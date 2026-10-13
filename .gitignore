@@ -1,0 +1,26 @@
+# Windows 辅助进程编译产物
+helper/bin/
+helper/obj/
+*.exe
+*.pdb
+*.dll
+
+# Node
+node_modules/
+plugin/dist/
+npm-debug.log*
+pnpm-debug.log*
+
+# 编辑器与系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# 运行期产物（截图、缓存、日志）
+*.log
+/screenshots/
+/.cache/
+
+# 本地配置（可能含应用白名单与路径，不入库）
+local.config.json
