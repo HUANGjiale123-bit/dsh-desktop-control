@@ -54,6 +54,11 @@ namespace Dsc
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        public static extern IntPtr WindowFromPoint(POINT p);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+        public const uint GA_ROOT = 2;
 
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
@@ -260,6 +265,115 @@ namespace Dsc
                 "确认安全后用 `dsc.exe stop --clear` 解除。");
         }
 
+        /* ═══════════════ 应用白名单闸门 ═══════════════
+         *
+         * 这道闸门在 helper 里，而不是只在插件层。
+         *
+         * 为什么必须下沉到这里：helper 是磁盘上一个可执行文件，任何人都能直接运行它。
+         * 白名单只做在插件层时，绕过插件就等于绕过全部限制。在输入注入还被误认为
+         * 不可用的那段时间这个缺口影响有限；注入可用之后，它意味着 dsc.exe 可以直接
+         * 操作这台机器上的任何窗口。
+         *
+         * 默认拒绝：白名单为空时，所有变更性操作一律拒绝。
+         * 读取类（list_windows / tree / screenshot / ping）不受限制——它们不改状态。
+         */
+
+        /// <summary>白名单：小写可执行文件名。来源是 --allow 参数或 DSC_ALLOWED_APPS 环境变量。</summary>
+        private static string[] _allowlist;
+
+        private static string[] Allowlist()
+        {
+            if (_allowlist == null)
+            {
+                string raw = Environment.GetEnvironmentVariable("DSC_ALLOWED_APPS");
+                for (int i = 0; i < _argsRaw.Length - 1; i++)
+                    if (_argsRaw[i] == "--allow") raw = _argsRaw[i + 1];
+
+                if (string.IsNullOrEmpty(raw)) _allowlist = new string[0];
+                else
+                {
+                    string[] parts = raw.Split(',');
+                    List<string> keep = new List<string>();
+                    foreach (string x in parts)
+                    {
+                        string t = x.Trim().ToLowerInvariant();
+                        if (t.Length > 0) keep.Add(t);
+                    }
+                    _allowlist = keep.ToArray();
+                }
+            }
+            return _allowlist;
+        }
+
+        private static string[] _argsRaw = new string[0];
+
+        /// <summary>从完整路径取出小写文件名。路径分隔符两种都处理。</summary>
+        private static string BaseName(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "";
+            int i = path.LastIndexOf('\\');
+            int j = path.LastIndexOf('/');
+            int k = Math.Max(i, j);
+            return (k >= 0 ? path.Substring(k + 1) : path).ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// 校验某个窗口所属的应用是否在白名单内。不在就抛异常。
+        ///
+        /// 三道判断，任何一道不过都拒绝：
+        ///   1. 白名单为空        → 什么都别做
+        ///   2. 取不到可执行文件  → 无法校验，拒绝（宁可拒绝也不放行未知目标）
+        ///   3. 不在名单内        → 拒绝并列出当前名单
+        /// </summary>
+        private static void RequireAllowedWindow(IntPtr hwnd, string action)
+        {
+            string[] allow = Allowlist();
+            if (allow.Length == 0)
+                throw new InvalidOperationException(
+                    "白名单为空，拒绝执行 " + action + "。设置 DSC_ALLOWED_APPS（逗号分隔的可执行文件名，" +
+                    "例如 notepad.exe）或用 --allow notepad.exe 指定后再试。观察类命令不受限制。");
+
+            uint pid;
+            Native.GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0)
+                throw new InvalidOperationException("无法确定窗口 " + hwnd + " 所属进程，拒绝执行 " + action + "。");
+
+            string exe = BaseName(ProcessPath(pid));
+            if (exe.Length == 0)
+                throw new InvalidOperationException(
+                    "无法确定窗口 " + hwnd + " 所属的可执行文件，拒绝执行 " + action + "（无法校验白名单）。");
+
+            foreach (string a in allow)
+                if (a == exe) return;
+
+            throw new InvalidOperationException(
+                "目标应用 \"" + exe + "\" 不在白名单内，拒绝执行 " + action + "。当前白名单：" +
+                string.Join(", ", allow) + "。");
+        }
+
+        /// <summary>
+        /// 把目标窗口提到前台并把焦点交给它，然后校验确实到位了。
+        ///
+        /// 必要性：type / press_key 经由 SendInput 发到**当前焦点窗口**。
+        /// 焦点跑偏时文本会打进别的程序——那既是错误操作，也可能泄露内容。
+        /// 所以先确认焦点在目标窗口上，不确认就不发。
+        /// </summary>
+        private static void RequireFocus(IntPtr hwnd, string action)
+        {
+            IntPtr fg = Native.GetForegroundWindow();
+            if (fg == hwnd) return;
+
+            // 尝试激活一次，然后复查
+            Native.SetForegroundWindow(hwnd);
+            System.Threading.Thread.Sleep(180);
+
+            fg = Native.GetForegroundWindow();
+            if (fg != hwnd)
+                throw new InvalidOperationException(
+                    "窗口 " + hwnd + " 不是前台窗口（当前前台是 " + fg + "），拒绝执行 " + action +
+                    "——输入会发到当前焦点窗口，可能打进别的程序。请先把目标窗口切到前台。");
+        }
+
         /// <summary>本进程内的元素引用表：短 id → 无障碍元素。</summary>
         private static readonly Dictionary<string, AutomationElement> Elements =
             new Dictionary<string, AutomationElement>(StringComparer.Ordinal);
@@ -268,8 +382,20 @@ namespace Dsc
 
         private static int Main(string[] args)
         {
+            _argsRaw = args;
             Native.SetProcessDPIAware();   // ★ 必须先于任何窗口/坐标 API
             Console.OutputEncoding = Encoding.UTF8;
+
+            // 剥掉全局选项（--allow x），它们可能出现在命令名之前。
+            // 不剥的话 `dsc.exe --allow notepad.exe set_value ...` 会被当成 help
+            // ——这个坑我踩过一次，测试时看到的是帮助文本而不是错误。
+            List<string> rest = new List<string>();
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i] == "--allow" && i + 1 < args.Length) { i++; continue; }
+                rest.Add(args[i]);
+            }
+            args = rest.ToArray();
 
             string cmd = args.Length > 0 ? args[0] : "help";
             try
@@ -288,6 +414,7 @@ namespace Dsc
                     case "halt": return CmdHalt(args);
                     case "stop": return CmdStop();
                     case "ping": return CmdPing();
+                    case "allowcheck": return CmdAllowCheck(args);
                     default: return CmdHelp();
                 }
             }
@@ -312,6 +439,26 @@ namespace Dsc
   dsc.exe tree <hwnd> [maxNodes]
   dsc.exe screenshot <hwnd> [outPath]
 ");
+            return 0;
+        }
+
+        /// <summary>诊断：打印白名单闸门实际看到的值。用来查"为什么明明在白名单里却被拒"。</summary>
+        private static int CmdAllowCheck(string[] args)
+        {
+            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            uint pid;
+            Native.GetWindowThreadProcessId(hwnd, out pid);
+            string full = ProcessPath(pid);
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("hwnd").Num(hwnd.ToInt64())
+                .Key("pid").Num(pid)
+                .Key("fullPath").Val(full)
+                .Key("baseName").Val(BaseName(full))
+                .Key("allowlist").Arr();
+            foreach (string a in Allowlist()) j.Val(a);
+            j.EndArr().End();
+            Console.WriteLine(j.ToString());
             return 0;
         }
 
@@ -431,6 +578,13 @@ namespace Dsc
             int y = int.Parse(args[2]);
             bool right = args.Length > 3 && args[3] == "right";
 
+            // click 是裸坐标点击，没有目标窗口参数——按"点击点落在哪个窗口上"校验，
+            // 用 WindowFromPoint 取该点处的窗口。这样点击才不会误伤白名单之外的程序。
+            IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+            if (hit == IntPtr.Zero)
+                throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口，拒绝点击。");
+            RequireAllowedWindow(Native.GetAncestor(hit, Native.GA_ROOT), "click");
+
             MoveCursorAbsolute(x, y);
             SendMouseButton(right, 1);
 
@@ -504,6 +658,7 @@ namespace Dsc
             RequireNotHalted("click_element");
             if (args.Length < 3) throw new ArgumentException("click_element 需要 hwnd 与描述符");
             IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            RequireAllowedWindow(hwnd, "click_element");
             string desc = args[2];
             bool right = args.Length > 3 && args[3] == "right";
 
@@ -621,6 +776,7 @@ namespace Dsc
             RequireNotHalted("set_value");
             if (args.Length < 4) throw new ArgumentException("set_value 需要 hwnd index value");
             IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            RequireAllowedWindow(hwnd, "set_value");
             int index = int.Parse(args[2]);
             string value = args[3];
 
@@ -780,6 +936,7 @@ namespace Dsc
             RequireNotHalted("do_action");
             if (args.Length < 3) throw new ArgumentException("do_action 需要 hwnd index action");
             IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            RequireAllowedWindow(hwnd, "do_action");
             int index = int.Parse(args[2]);
             string wanted = NormalizeAction(args[3]);
 
@@ -916,8 +1073,11 @@ namespace Dsc
         private static int CmdType(string[] args)
         {
             RequireNotHalted("type");
-            if (args.Length < 2) throw new ArgumentException("type 需要文本参数");
-            string text = args[1];
+            if (args.Length < 3) throw new ArgumentException("type 需要 hwnd 与文本参数");
+            IntPtr typeHwnd = new IntPtr(long.Parse(args[1]));
+            RequireAllowedWindow(typeHwnd, "type");
+            RequireFocus(typeHwnd, "type");
+            string text = args[2];
 
             // 用 SendInput + KEYEVENTF_UNICODE，不用 keybd_event。
             //
@@ -967,8 +1127,11 @@ namespace Dsc
         private static int CmdPressKey(string[] args)
         {
             RequireNotHalted("press_key");
-            if (args.Length < 2) throw new ArgumentException("press_key 需要按键参数");
-            string[] parts = args[1].Split('+');
+            if (args.Length < 3) throw new ArgumentException("press_key 需要 hwnd 与按键参数");
+            IntPtr keyHwnd = new IntPtr(long.Parse(args[1]));
+            RequireAllowedWindow(keyHwnd, "press_key");
+            RequireFocus(keyHwnd, "press_key");
+            string[] parts = args[2].Split('+');
             List<byte> mods = new List<byte>();
             byte main = 0;
 
