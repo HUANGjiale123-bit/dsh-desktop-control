@@ -27,3 +27,6 @@ desktop.ini
 
 # 本地配置（可能含应用白名单与路径，不入库）
 local.config.json
+
+# 急停闸门等运行期状态
+/.state/

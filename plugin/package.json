@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-control",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Desktop observation and control for DeepSeek Harness on Windows: read a window's accessibility tree, capture it, click and type. Application allowlist, empty by default.",
   "type": "module",
   "main": "index.mjs",

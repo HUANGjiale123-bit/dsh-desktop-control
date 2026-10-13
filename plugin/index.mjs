@@ -17,6 +17,9 @@
  *       shotDir:    "D:\\path\\to\\shots"       # 可选
  */
 
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createDesktopToolset } from './toolset.mjs'
 
@@ -248,8 +251,129 @@ export function apply(ctx, config = {}) {
     presentCall: args => ({ card: 'generic', title: `按键 ${args.chord}`, kind: 'other' }),
   })
 
+  /* ───────── 操作指示浮层 ─────────
+   *
+   * 助手开始操作某个窗口时，在它外围画一圈边框并标注应用名，让使用者
+   * 随时看得见"现在有人在动我的电脑、动的是哪一个窗口"。
+   *
+   * 由**宿主进程**持有子进程，因此浮层不会随着我的会话或沙箱消失而消失，
+   * 能活到窗口关闭或超时为止。
+   */
+
+  const overlayPath =
+    config.overlayPath ??
+    process.env.DSC_OVERLAY ??
+    join(dirname(set.helperPath), 'dsc-overlay.exe')
+
+  const liveOverlays = new Map()   // hwnd -> ChildProcess
+
+  function startOverlay(hwnd, label, timeoutMs) {
+    if (!existsSync(overlayPath)) return { ok: false, reason: `找不到浮层程序：${overlayPath}` }
+
+    const prev = liveOverlays.get(String(hwnd))
+    if (prev && prev.exitCode === null) {
+      try { prev.kill() } catch { }
+    }
+
+    const child = spawn(
+      overlayPath,
+      [String(hwnd), ...(label ? ['--label', label] : []),
+       ...(timeoutMs > 0 ? ['--timeout', String(timeoutMs)] : [])],
+      { windowsHide: false, detached: false, stdio: 'ignore' },
+    )
+    child.on('exit', () => { if (liveOverlays.get(String(hwnd)) === child) liveOverlays.delete(String(hwnd)) })
+    child.on('error', () => { liveOverlays.delete(String(hwnd)) })
+    liveOverlays.set(String(hwnd), child)
+    return { ok: true }
+  }
+
+  register({
+    name: 'desktop_indicate',
+    description:
+      '在被操作窗口的外围显示一圈边框并标注应用名，让使用者看得见助手正在操作哪个窗口。' +
+      '边框**不拦截鼠标键盘**（点击穿透）、不抢焦点，目标窗口最小化或关闭时自动消失。' +
+      '只读性质的提示，不受白名单限制。建议在开始操作某个窗口前调用。',
+    parameters: {
+      hwnd: HWND,
+      label: { type: 'string', description: '边框上显示的文本，默认按窗口所属进程名生成。' },
+      timeoutMs: { type: 'integer', description: '多久后自动消失（毫秒）；0 或省略表示跟随窗口直到它关闭。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute(args) {
+      const r = startOverlay(args.hwnd, args.label, args.timeoutMs ?? 0)
+      if (!r.ok) throw new Error(r.reason)
+      return {
+        result:
+          `已在窗口 ${args.hwnd} 外围显示操作指示边框` +
+          (args.label ? `（标注：${args.label}）` : '') +
+          (args.timeoutMs ? `，${args.timeoutMs} 毫秒后自动消失。` : '，跟随该窗口直到它关闭。'),
+      }
+    },
+    presentCall: args => ({ card: 'generic', title: `标示操作窗口 ${args.hwnd}`, kind: 'read' }),
+  })
+
+  register({
+    name: 'desktop_off',
+    description:
+      '立即关闭所有 computer use 指示层与 ESC 守候进程，并拉下急停闸门让后续任何桌面操作被拒绝。' +
+      '这是逃生舱的兜底：无论指示层是怎么起来的、ESC 灵不灵，这一条一定管用。' +
+      '想彻底停手时调用它。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute() {
+      // ① 收掉本插件拉起的浮层
+      let killed = 0
+      for (const child of liveOverlays.values()) {
+        try { child.kill(); killed++ } catch { }
+      }
+      liveOverlays.clear()
+
+      // ② 拉下急停闸门：即使还有进程活着，动作也做不了
+      let gateNote
+      try {
+        const g = await set.runHelper(['halt', '由 desktop_off 触发'])
+        gateNote = g.ok
+          ? `急停闸门已拉下（${g.gatePath}）`
+          : `急停闸门拉下失败：${g.message ?? g.error ?? '未知原因'}`
+      } catch (e) {
+        gateNote = '急停闸门拉下异常：' + (e?.message ?? e)
+      }
+
+      return {
+        result:
+          `已关闭 ${killed} 个由本插件拉起的指示浮层。${gateNote}。` +
+          `此后任何桌面操作都会被拒绝。` +
+          `若屏幕上仍有残留边框，可在终端执行：taskkill /IM dsc-edge.exe /F`,
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: '关闭 computer use', kind: 'other' }),
+  })
+
   ctx.logger?.info?.(
-    `[desktop-control] 已注册 7 个工具；helper=${set.helperPath}；` +
+    `[desktop-control] 已注册 8 个工具；helper=${set.helperPath}；` +
+    `浮层=${overlayPath}；` +
     `白名单=${set.allowlist.length ? set.allowlist.join(', ') : '（空）'}`,
   )
+
+  // 插件卸载时收掉所有浮层，不留孤儿窗口
+  ctx.on?.('dispose', () => {
+    for (const child of liveOverlays.values()) {
+      try { child.kill() } catch { }
+    }
+    liveOverlays.clear()
+  })
 }

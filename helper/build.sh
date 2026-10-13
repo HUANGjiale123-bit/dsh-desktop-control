@@ -79,6 +79,35 @@ echo "编译 dsc.exe ..."
 
 echo
 echo "完成: bin/dsc.exe ($(stat -c%s bin/dsc.exe) bytes)"
+
+echo
+echo "编译 dsc-edge.exe （整屏 computer use 状态指示）..."
+"$CSC" \
+    -nologo \
+    -target:winexe \
+    -platform:x64 \
+    -out:bin/dsc-edge.exe \
+    -r:System.dll \
+    -r:System.Drawing.dll \
+    -r:System.Windows.Forms.dll \
+    'src\Edge.cs'
+
+echo "完成: bin/dsc-edge.exe ($(stat -c%s bin/dsc-edge.exe) bytes)"
+
+echo
+echo "编译 dsc-esc.exe （ESC 急停守候）..."
+"$CSC" \
+    -nologo \
+    -target:winexe \
+    -platform:x64 \
+    -out:bin/dsc-esc.exe \
+    -r:System.dll \
+    -r:System.Drawing.dll \
+    -r:System.Windows.Forms.dll \
+    'src\Esc.cs'
+
+echo "完成: bin/dsc-esc.exe ($(stat -c%s bin/dsc-esc.exe) bytes)"
+
 echo
 echo "自检:"
 ./bin/dsc.exe ping

@@ -172,19 +172,30 @@ namespace Dsc
     internal static class Program
     {
         /// <summary>
-        /// 急停闸门文件。
+        /// 急停闸门文件的位置。
         ///
-        /// 存在即表示用户按下了 ESC，此时**所有变更性动作一律拒绝**。
-        /// 观察类操作不受影响——急停的目的是停手，不是把眼睛也蒙上。
+        /// 存在即表示"停"：此后**所有变更性动作一律拒绝**，观察类操作不受影响
+        /// ——急停的目的是停手，不是把眼睛也蒙上。
         ///
-        /// 放在 %LOCALAPPDATA% 下，与其他用户数据同处一地。
+        /// 位置优先级：
+        ///   1. 环境变量 DSC_HALT_GATE（便于测试与特殊部署）
+        ///   2. 辅助进程所在目录的上一级（即仓库根）下的 .state\halt
+        ///
+        /// **刻意不放在 %LOCALAPPDATA%**：实测某些受限环境下对该目录的写入
+        /// 会被拒绝，而一个写不进去的急停闸门等于没有急停。仓库目录是随辅助
+        /// 进程一起部署的，必然可写。
         /// </summary>
         private static string GatePath()
         {
-            string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "dsh-desktop-control");
-            return Path.Combine(dir, "halt");
+            string fromEnv = Environment.GetEnvironmentVariable("DSC_HALT_GATE");
+            if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
+
+            // AppContext.BaseDirectory = 可执行文件所在目录
+            string binDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
+            string root = Path.GetDirectoryName(binDir);      // helper\bin -> helper
+            if (!string.IsNullOrEmpty(root)) root = Path.GetDirectoryName(root);  // helper -> 仓库根
+            if (string.IsNullOrEmpty(root)) root = binDir;
+            return Path.Combine(root, ".state", "halt");
         }
 
         private static bool IsHalted()
@@ -193,16 +204,24 @@ namespace Dsc
             catch { return false; }
         }
 
+        /// <summary>
+        /// 拉起急停闸门。
+        ///
+        /// **失败必须响亮地失败。** 早先这里把异常整个吞掉，结果是：闸门文件
+        /// 根本没写成，命令却回报 halted=true。使用者以为已经停了，实际没有——
+        /// 对逃生舱而言这是最坏的一类 bug，比没有逃生舱更危险。
+        /// 现在写不成就抛错，命令以非零码结束，调用方一定看得见。
+        /// </summary>
         private static void EnsureHalt(string reason)
         {
-            try
-            {
-                string p = GatePath();
-                Directory.CreateDirectory(Path.GetDirectoryName(p));
-                File.WriteAllText(p, reason + Environment.NewLine +
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine);
-            }
-            catch { }
+            string p = GatePath();
+            string dir = Path.GetDirectoryName(p);
+            Directory.CreateDirectory(dir);          // 失败就让异常冒出去
+            File.WriteAllText(p, reason + Environment.NewLine +
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine);
+
+            if (!File.Exists(p))
+                throw new InvalidOperationException("急停闸门写入后仍不存在：" + p);
         }
 
         /// <summary>变更性动作的统一入口：先过急停闸门。</summary>
