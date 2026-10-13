@@ -70,14 +70,47 @@ namespace Dsc
         [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
 
-        [DllImport("user32.dll")]
-        public static extern bool SetCursorPos(int X, int Y);
-
-        [DllImport("user32.dll")]
-        public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, IntPtr dwExtraInfo);
-
         [DllImport("user32.dll", SetLastError = true)]
         public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool GetCursorPos(out POINT p);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int X, Y; }
+
+        [DllImport("user32.dll")]
+        public static extern int GetSystemMetrics(int nIndex);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MOUSEINPUT
+        {
+            public int dx, dy;
+            public uint mouseData, dwFlags, time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct INPUT
+        {
+            public uint type;
+            public MOUSEINPUT mi;
+        }
+
+        public const uint INPUT_MOUSE = 0;
+        public const uint MOUSEEVENTF_MOVE = 0x0001;
+        public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+        public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+
+        public const int SM_XVIRTUALSCREEN = 76;
+        public const int SM_YVIRTUALSCREEN = 77;
+        public const int SM_CXVIRTUALSCREEN = 78;
+        public const int SM_CYVIRTUALSCREEN = 79;
+        public const int SM_CXSCREEN = 0;
+        public const int SM_CYSCREEN = 1;
 
         public const uint KEYEVENTF_KEYUP = 0x0002;
         public const uint KEYEVENTF_UNICODE = 0x0004;
@@ -343,33 +376,24 @@ namespace Dsc
         /// </summary>
         private static int CmdClick(string[] args)
         {
+            // 急停检查必须是第一件事——放在坐标计算之后就等于没有闸门。
             RequireNotHalted("click");
             if (args.Length < 3) throw new ArgumentException("click 需要 x y 参数（桌面绝对物理像素）");
             int x = int.Parse(args[1]);
             int y = int.Parse(args[2]);
             bool right = args.Length > 3 && args[3] == "right";
 
-            if (!Native.SetCursorPos(x, y))
-            {
-                int err = Marshal.GetLastWin32Error();
-                throw new InvalidOperationException(
-                    "SetCursorPos 失败 (Win32 错误 " + err + ": " + new System.ComponentModel.Win32Exception(err).Message + ")。" +
-                    "通常表示本进程没有交互式输入桌面的访问权——" +
-                    "例如运行在受限窗口站、服务会话或沙箱中。" +
-                    "把本程序作为 DSH 插件的宿主子进程运行时才有该权限。");
-            }
+            MoveCursorAbsolute(x, y);
+            SendMouseButton(right, 1);
 
-            uint down = right ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_LEFTDOWN;
-            uint up = right ? Native.MOUSEEVENTF_RIGHTUP : Native.MOUSEEVENTF_LEFTUP;
-
-            System.Threading.Thread.Sleep(60);
-            Native.mouse_event(down, 0, 0, 0, IntPtr.Zero);
-            System.Threading.Thread.Sleep(60);
-            Native.mouse_event(up, 0, 0, 0, IntPtr.Zero);
+            // 回读光标位置：调用成功不代表点在了期望处，读回来才是证据。
+            Native.POINT after;
+            string actual = Native.GetCursorPos(out after) ? (after.X + "," + after.Y) : "?";
 
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("clickedX").Num(x).Key("clickedY").Num(y)
+                .Key("cursorAfter").Val(actual)
                 .Key("button").Val(right ? "right" : "left")
              .End();
             Console.WriteLine(j.ToString());
@@ -458,26 +482,18 @@ namespace Dsc
             int cx = (r.Left + r.Right) / 2;
             int cy = (r.Top + r.Bottom) / 2;
 
-            if (!Native.SetCursorPos(cx, cy))
-            {
-                int err = Marshal.GetLastWin32Error();
-                throw new InvalidOperationException(
-                    "SetCursorPos 失败 (Win32 错误 " + err + ": " +
-                    new System.ComponentModel.Win32Exception(err).Message + ")。" +
-                    "通常表示本进程没有交互式输入桌面的访问权。");
-            }
-            uint down = right ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_LEFTDOWN;
-            uint up = right ? Native.MOUSEEVENTF_RIGHTUP : Native.MOUSEEVENTF_LEFTUP;
-            System.Threading.Thread.Sleep(60);
-            Native.mouse_event(down, 0, 0, 0, IntPtr.Zero);
-            System.Threading.Thread.Sleep(60);
-            Native.mouse_event(up, 0, 0, 0, IntPtr.Zero);
+            MoveCursorAbsolute(cx, cy);
+            SendMouseButton(right, 1);
+
+            Native.POINT after;
+            string actual = Native.GetCursorPos(out after) ? (after.X + "," + after.Y) : "?";
 
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("matched").Val(desc)
                 .Key("rect").Val(r.Left + "," + r.Top + " " + (r.Right - r.Left) + "x" + (r.Bottom - r.Top))
                 .Key("clickedX").Num(cx).Key("clickedY").Num(cy)
+                .Key("cursorAfter").Val(actual)
                 .Key("button").Val(right ? "right" : "left")
              .End();
             Console.WriteLine(j.ToString());
@@ -629,6 +645,69 @@ namespace Dsc
             j.Obj().Key("ok").Bool(true).Key("chord").Val(args[1]).End();
             Console.WriteLine(j.ToString());
             return 0;
+        }
+
+        /// <summary>
+        /// 通过 SendInput 把光标移到绝对屏幕坐标。
+        ///
+        /// **不用 SetCursorPos。** 本机实测：同样坐标经 SetCursorPos 会被拒并报
+        /// ERROR_FILE_NOT_FOUND(2) / ERROR_PATH_NOT_FOUND(3)，而 SendInput 的
+        /// 绝对模式却成功（返回 1，光标真实移动）。SendInput 是更底层的输入
+        /// 注入通道，因此改用它。
+        ///
+        /// 绝对坐标需归一化到 0..65535，并配合 MOUSEEVENTF_VIRTUALDESK
+        /// 以覆盖多显示器构成的整个虚拟桌面。
+        /// </summary>
+        private static void MoveCursorAbsolute(int x, int y)
+        {
+            int vx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
+            int vy = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
+            int vw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
+            int vh = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+            if (vw <= 0) vw = Native.GetSystemMetrics(Native.SM_CXSCREEN);
+            if (vh <= 0) vh = Native.GetSystemMetrics(Native.SM_CYSCREEN);
+            if (vw <= 0 || vh <= 0) throw new InvalidOperationException("无法取得屏幕尺寸");
+
+            Native.INPUT[] inp = new Native.INPUT[1];
+            inp[0].type = Native.INPUT_MOUSE;
+            inp[0].mi.dx = (int)Math.Round((x - vx) * 65535.0 / (vw - 1));
+            inp[0].mi.dy = (int)Math.Round((y - vy) * 65535.0 / (vh - 1));
+            inp[0].mi.dwFlags = Native.MOUSEEVENTF_MOVE | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK;
+
+            uint n = Native.SendInput(1, inp, Marshal.SizeOf(typeof(Native.INPUT)));
+            if (n == 0)
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(
+                    "SendInput 移动光标失败 (Win32 错误 " + err + ": " +
+                    new System.ComponentModel.Win32Exception(err).Message + ")。" +
+                    "通常表示本进程没有交互式输入桌面的写入权限。");
+            }
+            System.Threading.Thread.Sleep(50);
+        }
+
+        /// <summary>发送一次鼠标按键（按下 + 抬起）。</summary>
+        private static void SendMouseButton(bool right, int clickCount)
+        {
+            uint down = right ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_LEFTDOWN;
+            uint up = right ? Native.MOUSEEVENTF_RIGHTUP : Native.MOUSEEVENTF_LEFTUP;
+
+            for (int i = 0; i < Math.Max(1, clickCount); i++)
+            {
+                Native.INPUT[] dn = new Native.INPUT[1];
+                dn[0].type = Native.INPUT_MOUSE;
+                dn[0].mi.dwFlags = down;
+                Native.INPUT[] us = new Native.INPUT[1];
+                us[0].type = Native.INPUT_MOUSE;
+                us[0].mi.dwFlags = up;
+
+                System.Threading.Thread.Sleep(40);
+                if (Native.SendInput(1, dn, Marshal.SizeOf(typeof(Native.INPUT))) == 0)
+                    throw new InvalidOperationException("SendInput 按下鼠标失败，err=" + Marshal.GetLastWin32Error());
+                System.Threading.Thread.Sleep(40);
+                if (Native.SendInput(1, us, Marshal.SizeOf(typeof(Native.INPUT))) == 0)
+                    throw new InvalidOperationException("SendInput 抬起鼠标失败，err=" + Marshal.GetLastWin32Error());
+            }
         }
 
         private static string WindowTitle(IntPtr h)
