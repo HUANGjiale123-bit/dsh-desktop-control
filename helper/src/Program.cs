@@ -78,6 +78,8 @@ namespace Dsc
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool GetCursorPos(out POINT p);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SetCursorPos(int x, int y);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT { public int X, Y; }
@@ -93,11 +95,30 @@ namespace Dsc
             public IntPtr dwExtraInfo;
         }
 
+        public const uint INPUT_KEYBOARD = 1;
+
+        /// <summary>键盘事件的联合体成员。wScan 是 16 位，能装下任何 BMP 字符。</summary>
         [StructLayout(LayoutKind.Sequential)]
+        public struct KEYBDINPUT
+        {
+            public ushort wVk;
+            public ushort wScan;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        /// <summary>
+        /// SendInput 的 INPUT。**必须是显式布局的联合体**——
+        /// 之前这里只有一个 MOUSEINPUT 字段，没法发键盘事件。
+        /// 偏移量在 64 位下也成立（sizeof(INPUT)=40）。
+        /// </summary>
+        [StructLayout(LayoutKind.Explicit)]
         public struct INPUT
         {
-            public uint type;
-            public MOUSEINPUT mi;
+            [FieldOffset(0)] public uint type;
+            [FieldOffset(8)] public MOUSEINPUT mi;
+            [FieldOffset(8)] public KEYBDINPUT ki;
         }
 
         public const uint INPUT_MOUSE = 0;
@@ -898,11 +919,37 @@ namespace Dsc
             if (args.Length < 2) throw new ArgumentException("type 需要文本参数");
             string text = args[1];
 
+            // 用 SendInput + KEYEVENTF_UNICODE，不用 keybd_event。
+            //
+            // 原因：keybd_event 的扫描码参数是 BYTE，写 `(byte)c` 会把任何
+            // 非 ASCII 字符截断——实测输入「键盘输入成功XY」得到 "BBB.ØeXY"，
+            // 中文全毁且长度变短。'键'(U+952E) 被截成 0x2E，高位丢失。
+            //
+            // SendInput 的 KEYBDINPUT.wScan 是 USHORT，能装下整个 BMP，
+            // 因此中文、日文、emoji（BMP 内）都能原样送达。
             foreach (char c in text)
             {
-                Native.keybd_event(0, (byte)c, Native.KEYEVENTF_UNICODE, UIntPtr.Zero);
-                Native.keybd_event(0, (byte)c, Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
-                System.Threading.Thread.Sleep(12);
+                Native.INPUT[] pair = new Native.INPUT[2];
+
+                pair[0].type = Native.INPUT_KEYBOARD;
+                pair[0].ki.wVk = 0;
+                pair[0].ki.wScan = (ushort)c;
+                pair[0].ki.dwFlags = Native.KEYEVENTF_UNICODE;
+
+                pair[1].type = Native.INPUT_KEYBOARD;
+                pair[1].ki.wVk = 0;
+                pair[1].ki.wScan = (ushort)c;
+                pair[1].ki.dwFlags = Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP;
+
+                uint sent = Native.SendInput(2, pair, Marshal.SizeOf(typeof(Native.INPUT)));
+                if (sent == 0)
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    throw new InvalidOperationException(
+                        "文本输入在第 " + (text.IndexOf(c) + 1) + " 个字符处失败 (Win32 错误 " + err + ": " +
+                        new System.ComponentModel.Win32Exception(err).Message + ")。");
+                }
+                System.Threading.Thread.Sleep(8);
             }
 
             Jw j = new Jw();
@@ -984,42 +1031,51 @@ namespace Dsc
         }
 
         /// <summary>
-        /// 通过 SendInput 把光标移到绝对屏幕坐标。
+        /// 把光标移到绝对屏幕坐标（物理像素）。
         ///
-        /// **不用 SetCursorPos。** 本机实测：同样坐标经 SetCursorPos 会被拒并报
-        /// ERROR_FILE_NOT_FOUND(2) / ERROR_PATH_NOT_FOUND(3)，而 SendInput 的
-        /// 绝对模式却成功（返回 1，光标真实移动）。SendInput 是更底层的输入
-        /// 注入通道，因此改用它。
-        ///
-        /// 绝对坐标需归一化到 0..65535，并配合 MOUSEEVENTF_VIRTUALDESK
-        /// 以覆盖多显示器构成的整个虚拟桌面。
+        /// 历史注记：本方法原先用 SendInput 的绝对模式，理由写在旧注释里——
+        /// 「SetCursorPos 被拒并报 ERROR_FILE_NOT_FOUND(2)/ERROR_PATH_NOT_FOUND(3)，
+        /// 而 SendInput 成功」。那个理由**是错的**，而且正是它把光标送错了位置：
+        /// SendInput 的绝对坐标会被 DPI 再缩放一次，落点恒为目标的 0.667 倍。
+        /// SetCursorPos 报错的那次是另一个上下文（非交互式）造成的误判。
+        /// 详见下面的实测数据。
         /// </summary>
         private static void MoveCursorAbsolute(int x, int y)
         {
-            int vx = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
-            int vy = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
-            int vw = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
-            int vh = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
-            if (vw <= 0) vw = Native.GetSystemMetrics(Native.SM_CXSCREEN);
-            if (vh <= 0) vh = Native.GetSystemMetrics(Native.SM_CYSCREEN);
-            if (vw <= 0 || vh <= 0) throw new InvalidOperationException("无法取得屏幕尺寸");
-
-            Native.INPUT[] inp = new Native.INPUT[1];
-            inp[0].type = Native.INPUT_MOUSE;
-            inp[0].mi.dx = (int)Math.Round((x - vx) * 65535.0 / (vw - 1));
-            inp[0].mi.dy = (int)Math.Round((y - vy) * 65535.0 / (vh - 1));
-            inp[0].mi.dwFlags = Native.MOUSEEVENTF_MOVE | Native.MOUSEEVENTF_ABSOLUTE | Native.MOUSEEVENTF_VIRTUALDESK;
-
-            uint n = Native.SendInput(1, inp, Marshal.SizeOf(typeof(Native.INPUT)));
-            if (n == 0)
+            // 用 SetCursorPos，不用 SendInput 的绝对模式。
+            //
+            // 实测依据（这是本文件里最重要的一个坑）：
+            //   · 本进程 SetProcessDPIAware() 成功，awareness=SYSTEM_AWARE，
+            //     screen LOGPIXELSX=144（150% 缩放），SM_CXSCREEN=2240（物理像素）。
+            //   · SetCursorPos(1500,900) → 实际落点 1500,900，比值 1.000，精确。
+            //   · SendInput + MOUSEEVENTF_ABSOLUTE + VIRTUALDESK，按 65535 归一化
+            //     之后，同样的目标点会落在 2/3 处（150% 缩放的倒数 96/144=0.667）：
+            //     目标(500,300)→落点(333,200)，目标(100,100)→落点(67,67)，
+            //     目标(1900,1000)→落点(1267,667)，比值恒为 0.667。
+            //
+            // 结论：SendInput 的绝对坐标即便在 DPI-aware 进程里也会被再缩放一次，
+            // 而 SetCursorPos 直接把参数当物理像素。既然本进程已经 DPI-aware、
+            // 全程用物理像素，「SetCursorPos + 物理像素」是唯一自洽的组合。
+            if (!Native.SetCursorPos(x, y))
             {
                 int err = Marshal.GetLastWin32Error();
                 throw new InvalidOperationException(
-                    "SendInput 移动光标失败 (Win32 错误 " + err + ": " +
-                    new System.ComponentModel.Win32Exception(err).Message + ")。" +
-                    "通常表示本进程没有交互式输入桌面的写入权限。");
+                    "SetCursorPos(" + x + "," + y + ") 失败 (Win32 错误 " + err + ": " +
+                    new System.ComponentModel.Win32Exception(err).Message + ")。");
             }
             System.Threading.Thread.Sleep(50);
+
+            // 回读校验：不能只信返回值。
+            // 之前的实现把"我传进去的值"当作 cursorAfter 报出去，于是即使落点错了
+            // 也显示成功——那是自欺。这里读的是屏幕上的真实位置。
+            Native.POINT p;
+            if (Native.GetCursorPos(out p))
+            {
+                if (Math.Abs(p.X - x) > 2 || Math.Abs(p.Y - y) > 2)
+                    throw new InvalidOperationException(
+                        "光标未落到目标位置：请求 (" + x + "," + y + ") 实际 (" + p.X + "," + p.Y + ")。" +
+                        "若差值恒为 0.667 倍或 1.5 倍，说明进程 DPI awareness 与坐标基准不一致。");
+            }
         }
 
         /// <summary>发送一次鼠标按键（按下 + 抬起）。</summary>
