@@ -47,7 +47,7 @@ export const inject = ['tools']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.1.5'
+const PLUGIN_VERSION = '0.1.6'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -77,7 +77,13 @@ function applyInner(ctx, config = {}) {
     ? `当前白名单：${set.allowlist.join(', ')}。`
     : '当前白名单为空——这些工具只能观察，任何操作都会被拒绝。'
 
-  const register = (definition) => ctx.tools.register(defineTool(definition))
+  // 记录已注册的工具名：日志里报数量与名单，这样"哪个版本跑起来了"
+  // 可以直接从日志读出来，不必靠工具是否可调来推断。
+  const registered = []
+  const register = (definition) => {
+    registered.push(definition.name)
+    return ctx.tools.register(defineTool(definition))
+  }
 
   register({
     name: 'desktop_list_windows',
@@ -224,8 +230,12 @@ function applyInner(ctx, config = {}) {
   register({
     name: 'desktop_type',
     description:
-      '向当前焦点输入一段文本，需要目标窗口在白名单内。支持中文与任意 Unicode 字符。' +
-      '通常先 desktop_click 把焦点点到输入框，再调用本工具。' +
+      '向目标窗口的当前焦点输入文本。支持中文与任意 Unicode 字符。' +
+      '发送前会确认该窗口就是前台窗口——SendInput 发到当前焦点，' +
+      '不确认就可能在别的程序里打字。必要时会先尝试激活目标窗口一次，' +
+      '仍不是前台则拒绝执行。' +
+      '**如果只是要改一个输入框的值，优先用 desktop_set_value**：' +
+      '它走无障碍接口，不依赖前台焦点，更可靠。' +
       '这是变更性操作，会真实敲键盘。' +
       allowNote,
     parameters: {
@@ -307,6 +317,90 @@ function applyInner(ctx, config = {}) {
     liveOverlays.set(String(key), child)
     return { ok: true }
   }
+
+  register({
+    name: 'desktop_set_value',
+    description:
+      '通过无障碍接口（UIA ValuePattern / RangeValuePattern）替换某个元素的值。' +
+      '**这是唯一不经过鼠标键盘注入的写入方式**，因此比 desktop_type 可靠：' +
+      '不依赖窗口在前台、不受分辨率影响、不受焦点影响。' +
+      '适用对象是那些实现了这两个模式的控件（文本框、数字框等）；' +
+      '两者都不实现的控件会被明确拒绝，不会偷偷换别的方式写入。' +
+      '写入后会立刻回读值确认，回读不一致时报告失败而不是假定成功。' +
+      '需要目标窗口在白名单内。' + allowNote,
+    parameters: {
+      hwnd: { ...HWND, description: '目标窗口句柄。' },
+      index: {
+        type: 'number',
+        description: '元素索引，取自 desktop_read_window 输出中的 [N]。索引只对产生它的那次读取有效，界面变化后需重新读取。',
+        required: true,
+      },
+      value: { type: 'string', description: '要写入的值。元素实现 RangeValuePattern 时必须是数字。', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute(args) {
+      const r = await set.tools.setValue(args)
+      if (r.isError) throw new Error(r.text)
+      return { result: r.text }
+    },
+    presentCall: args => ({
+      card: 'generic',
+      title: `写入元素 [${args.index}]`,
+      kind: 'other',
+      raw: args,
+    }),
+  })
+
+  register({
+    name: 'desktop_do_action',
+    description:
+      '触发元素的次要无障碍动作。**不经过鼠标键盘注入。**' +
+      '只接受七个标签（大小写不敏感）：Raise、Scroll Up、Scroll Down、Scroll Left、' +
+      'Scroll Right、Expand、Collapse —— 分别由 UIA 的 ScrollPattern、' +
+      'ExpandCollapsePattern 与置顶能力合成。' +
+      '动作名只能从 desktop_read_window 输出里的 "Secondary Actions" 列表选取，' +
+      '不接受猜测的名字；元素当前不具备的动作也会被拒绝。' +
+      '需要目标窗口在白名单内。' + allowNote,
+    parameters: {
+      hwnd: { ...HWND, description: '目标窗口句柄。' },
+      index: {
+        type: 'number',
+        description: '元素索引，取自 desktop_read_window 输出中的 [N]。',
+        required: true,
+      },
+      action: {
+        type: 'string',
+        description: '动作名，七个标签之一，大小写不敏感。须出现在该元素的 Secondary Actions 列表中。',
+        required: true,
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute(args) {
+      const r = await set.tools.doAction(args)
+      if (r.isError) throw new Error(r.text)
+      return { result: r.text }
+    },
+    presentCall: args => ({
+      card: 'generic',
+      title: `元素 [${args.index}] → ${args.action}`,
+      kind: 'other',
+      raw: args,
+    }),
+  })
 
   register({
     name: 'desktop_indicate',
@@ -396,7 +490,8 @@ function applyInner(ctx, config = {}) {
   })
 
   ctx.logger?.info?.(
-    `[desktop-control] v${PLUGIN_VERSION} 已注册 9 个工具；helper=${set.helperPath}；` +
+    `[desktop-control] v${PLUGIN_VERSION} 已注册 ${registered.length} 个工具` +
+    `（${registered.join(', ')}）；helper=${set.helperPath}；` +
     `指示层=${edgePath}；` +
     `白名单=${set.allowlist.length ? set.allowlist.join(', ') : '（空）'}`,
   )

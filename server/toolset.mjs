@@ -43,7 +43,17 @@ export function createDesktopToolset(options = {}) {
 
   /* ───────────── dsc.exe 调用 ───────────── */
 
-  function runHelper(args, timeoutMs = 30000) {
+  /**
+   * 调用 helper。
+   *
+   * 第二个参数控制交给 helper 的白名单：
+   *   · 传目标窗口对象 → 收紧成"只有这一个应用"，两道闸门按同一个目标校验，
+   *     不会出现"插件放行但 helper 因名单为空而拒绝"的矛盾。
+   *   · 传字符串 'configured' → 传插件配置的完整白名单。用于 click 这种
+   *     裸坐标点击：插件无法预知会点到谁，只能让 helper 用 WindowFromPoint
+   *     自行判定，因此必须把完整名单交出去。
+   */
+  function runHelper(args, allow, timeoutMs = 30000) {
     return new Promise((done) => {
       if (!existsSync(helperPath)) {
         done({
@@ -56,9 +66,17 @@ export function createDesktopToolset(options = {}) {
         return
       }
 
+      let env = process.env
+      if (allow === 'configured') {
+        env = { ...process.env, DSC_ALLOWED_APPS: allowlist.join(',') }
+      } else if (allow && allow.exe) {
+        const base = String(allow.exe).split(/[\\/]/).pop().toLowerCase()
+        if (base) env = { ...process.env, DSC_ALLOWED_APPS: base }
+      }
+
       let child
       try {
-        child = spawn(helperPath, args, { windowsHide: true })
+        child = spawn(helperPath, args, { windowsHide: true, env })
       } catch (e) {
         done({ ok: false, error: 'SpawnFailed', message: String(e?.message ?? e) })
         return
@@ -208,7 +226,7 @@ export function createDesktopToolset(options = {}) {
       const auth = await authorize(hwnd)
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['click', String(x), String(y), button ?? 'left'])
+      const r = await runHelper(['click', String(x), String(y), button ?? 'left'], 'configured')
       if (!r.ok) return { isError: true, text: failMessage(r) }
       return { text: `已在 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键点击。` }
     },
@@ -217,7 +235,7 @@ export function createDesktopToolset(options = {}) {
       const auth = await authorize(hwnd)
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['click_element', String(hwnd), descriptor, button ?? 'left'])
+      const r = await runHelper(['click_element', String(hwnd), descriptor, button ?? 'left'], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
       return {
         text:
@@ -230,18 +248,71 @@ export function createDesktopToolset(options = {}) {
       const auth = await authorize(hwnd)
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['type', String(text)])
+      // hwnd 必须传给 helper：它会在发送前确认该窗口就是前台窗口。
+      // SendInput 是发到"当前焦点"的，不确认就可能在别的程序里打字。
+      const r = await runHelper(['type', String(hwnd), String(text)], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
-      return { text: `已向当前焦点输入 ${r.typed} 个字符：${JSON.stringify(r.text)}` }
+      return { text: `已向窗口 ${hwnd} 的当前焦点输入 ${r.typed} 个字符：${JSON.stringify(r.text)}` }
     },
 
     async pressKey({ hwnd, chord }) {
       const auth = await authorize(hwnd)
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['press_key', String(chord)])
+      const r = await runHelper(['press_key', String(hwnd), String(chord)], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
-      return { text: `已发送按键 ${r.chord}。` }
+      return { text: `已向窗口 ${hwnd} 发送按键 ${r.chord}。` }
+    },
+
+    /**
+     * 通过 UIA 的 ValuePattern / RangeValuePattern 替换元素的值。
+     *
+     * 这是唯一一条**不经过鼠标键盘注入**的写入路径，因此在注入被阻断的环境里
+     * 仍然可用，而且比模拟打字可靠（不依赖前台焦点）。
+     *
+     * 只支持实现了这两个模式的控件；都不实现时明确报"控件不可设置"，
+     * 不做 LegacyIAccessible 回退——偷偷换路写进去会让结论不可信。
+     */
+    async setValue({ hwnd, index, value }) {
+      const auth = await authorize(hwnd)
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const r = await runHelper(['set_value', String(hwnd), String(index), String(value)], auth.window)
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      // 回读校验：helper 写入后会立刻读回值。verified=false 说明"调用成功但值没变"，
+      // 那不该报成成功——调用方应当据此怀疑，而不是相信。
+      if (r.verified === false) {
+        return {
+          isError: true,
+          text:
+            `已调用 ${r.via} 写入，但回读不一致：写入前 ${JSON.stringify(r.before)}，` +
+            `写入后 ${JSON.stringify(r.after)}，期望 ${JSON.stringify(r.requested)}。` +
+            `元素 [${index}]（${r.role}）。不要假定写入成功。`,
+        }
+      }
+      return {
+        text:
+          `已用 ${r.via} 写入元素 [${index}]（${r.role}）：` +
+          `${JSON.stringify(r.before)} → ${JSON.stringify(r.after)}（已回读确认）。`,
+      }
+    },
+
+    /**
+     * 触发元素的次要无障碍动作。七个标签，大小写不敏感，由 UIA patterns 合成：
+     *   Raise / Scroll Up / Scroll Down / Scroll Left / Scroll Right / Expand / Collapse
+     *
+     * 动作名只能取自 desktop_read_window 输出里的 "Secondary Actions" 列表，
+     * 不接受猜测的名字；元素当前不具备的动作也会被拒绝。
+     * 同样不经过输入注入。
+     */
+    async doAction({ hwnd, index, action }) {
+      const auth = await authorize(hwnd)
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const r = await runHelper(['do_action', String(hwnd), String(index), String(action)], auth.window)
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+      return { text: `已对元素 [${index}]（${r.role}）执行次要动作 ${r.action}。` }
     },
   }
 
