@@ -47,13 +47,26 @@ export const inject = ['tools']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.1.3'
+const PLUGIN_VERSION = '0.1.4'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
 const BUTTON = { type: 'string', enum: ['left', 'right'], description: '鼠标键，默认 left。' }
 
 export function apply(ctx, config = {}) {
+  // 加载期的任何异常都要带堆栈打出来。
+  // 宿主只报一句 "entry did not activate"，看不出是哪一行坏掉的——
+  // 这一层在本次开发中反复救命，别删。
+  try {
+    return applyInner(ctx, config)
+  } catch (e) {
+    const where = e && e.stack ? String(e.stack).split('\n').slice(0, 6).join(' | ') : ''
+    ctx.logger?.error?.(`[desktop-control] v${PLUGIN_VERSION} 激活失败: ${e?.message}  :: ${where}`)
+    throw e
+  }
+}
+
+function applyInner(ctx, config = {}) {
   const set = createDesktopToolset({
     helperPath: config.helperPath,
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
