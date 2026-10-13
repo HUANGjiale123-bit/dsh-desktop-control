@@ -33,8 +33,6 @@
 
 using System;
 using System.Drawing;
-using System.IO;
-using System.Threading;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -71,117 +69,6 @@ namespace DscEdge
         public const uint SWP_NOACTIVATE = 0x0010;
         public const uint SWP_SHOWWINDOW = 0x0040;
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-
-        /* ── ESC 急停所需的键盘钩子 ── */
-
-        public delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern IntPtr SetWindowsHookExW(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-        [DllImport("user32.dll")]
-        public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-        public static extern IntPtr GetModuleHandleW(string lpModuleName);
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct KBDLLHOOKSTRUCT
-        {
-            public uint vkCode, scanCode, flags, time;
-            public IntPtr dwExtraInfo;
-        }
-
-        public const int WH_KEYBOARD_LL = 13;
-        public const int HC_ACTION = 0;
-        public const int WM_KEYDOWN = 0x0100;
-        public const int WM_SYSKEYDOWN = 0x0104;
-        public const uint VK_ESCAPE = 0x1B;
-    }
-
-    internal static class EscapeGate
-    {
-        private static Native.HookProc _proc;      // 必须保住引用，否则被 GC 回收后钩子失效
-        private static IntPtr _hook = IntPtr.Zero;
-        private static int _fires;
-
-        /// <summary>
-        /// 闸门文件位置，必须与 dsc.exe 的 GatePath() 保持一致。
-        /// 两处各写一份是无奈：独立编译的两个可执行文件。改其一必须同步另一处，
-        /// 否则会出现"按了急停却拦不住"这种最坏的情况。
-        /// </summary>
-        public static string GatePath()
-        {
-            string fromEnv = Environment.GetEnvironmentVariable("DSC_HALT_GATE");
-            if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
-
-            string binDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
-            string root = Path.GetDirectoryName(binDir);
-            if (!string.IsNullOrEmpty(root)) root = Path.GetDirectoryName(root);
-            if (string.IsNullOrEmpty(root)) root = binDir;
-            return Path.Combine(root, ".state", "halt");
-        }
-
-        /// <summary>拉闸。失败就抛，绝不"以为停了其实没停"。</summary>
-        private static void Pull()
-        {
-            string p = GatePath();
-            Directory.CreateDirectory(Path.GetDirectoryName(p));
-            File.WriteAllText(p,
-                "由 ESC 急停触发" + Environment.NewLine +
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine);
-            if (!File.Exists(p)) throw new InvalidOperationException("闸门写入后仍不存在：" + p);
-            Console.Error.WriteLine("[edge] ESC 急停已拉下 -> " + p);
-        }
-
-        private static IntPtr Callback(int nCode, IntPtr wParam, IntPtr lParam)
-        {
-            try
-            {
-                if (nCode == Native.HC_ACTION)
-                {
-                    int msg = wParam.ToInt32();
-                    if (msg == Native.WM_KEYDOWN || msg == Native.WM_SYSKEYDOWN)
-                    {
-                        Native.KBDLLHOOKSTRUCT d =
-                            (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
-                        if (d.vkCode == Native.VK_ESCAPE && Interlocked.Increment(ref _fires) == 1)
-                        {
-                            try { Pull(); }
-                            catch (Exception ex) { Console.Error.WriteLine("[edge] 拉闸失败: " + ex.Message); }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex) { Console.Error.WriteLine("[edge] 钩子异常: " + ex.Message); }
-
-            // 永远把事件传下去 —— 绝不吞掉 ESC
-            return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
-        }
-
-        /// <summary>安装钩子。返回 false 表示装不上——必须让调用方知道。</summary>
-        public static bool Install()
-        {
-            _proc = Callback;
-            _hook = Native.SetWindowsHookExW(Native.WH_KEYBOARD_LL, _proc, Native.GetModuleHandleW(null), 0);
-            if (_hook == IntPtr.Zero)
-            {
-                int err = Marshal.GetLastWin32Error();
-                Console.Error.WriteLine("[edge] 安装键盘钩子失败 (err=" + err + ": " +
-                    new System.ComponentModel.Win32Exception(err).Message + ")。ESC 急停未生效。");
-                return false;
-            }
-            Console.Error.WriteLine("[edge] ESC 急停已就位（低级键盘钩子）；闸门 " + GatePath());
-            return true;
-        }
-
-        public static void Uninstall()
-        {
-            if (_hook != IntPtr.Zero) { try { Native.UnhookWindowsHookEx(_hook); } catch { } _hook = IntPtr.Zero; }
-        }
     }
 
     internal sealed class EdgeForm : Form
@@ -617,21 +504,7 @@ namespace DscEdge
 
             Application.EnableVisualStyles();
 
-            // 急停钩子随指示层一起装上；--no-esc 可单独关掉（调试用）
-            if (Array.IndexOf(args, "--no-esc") < 0)
-            {
-                if (!EscapeGate.Install())
-                    return 3;   // 装不上急停就不要继续——没急停的 computer use 不该跑起来
-            }
-
-            try
-            {
-                Application.Run(new EdgeForm(label, timeout, accent, noExclude, isStatic));
-            }
-            finally
-            {
-                EscapeGate.Uninstall();
-            }
+            Application.Run(new EdgeForm(label, timeout, accent, noExclude, isStatic));
             return 0;
         }
     }

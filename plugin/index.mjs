@@ -47,7 +47,7 @@ export const inject = ['tools']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.1.4'
+const PLUGIN_VERSION = '0.1.5'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -282,10 +282,6 @@ function applyInner(ctx, config = {}) {
    * 标的是**整屏**而不是某个窗口：窗口会移动、会被遮挡、会在多个目标之间
    * 切换，跟着它画既不稳定也容易看漏；整屏边缘位置恒定，不可能被遮住。
    *
-   * 指示层进程同时安装 ESC 急停钩子——两件事的生命周期完全一致，合成一个
-   * 进程还解决了一个实际问题：键盘钩子必须由**不在沙箱里的进程**安装才生效，
-   * 而本插件跑在宿主进程里，拉起的子进程因此具备这个条件。
-   *
    * 由宿主进程持有子进程，所以它不会随我的会话或沙箱消失而消失。
    */
 
@@ -316,8 +312,11 @@ function applyInner(ctx, config = {}) {
     name: 'desktop_indicate',
     description:
       '在整个屏幕边缘显示 computer use 状态指示层（蓝色粒子光带 + 顶部徽标），' +
-      '并同时安装 ESC 急停：用户按 ESC 即拉下闸门，之后所有桌面操作被拒绝。' +
+      '让使用者看得见"有人正在操作这台电脑"。' +
       '指示层**不拦截鼠标键盘**（点击穿透）、不抢焦点，且从截图中排除。' +
+      '它只是状态提示，不含任何控制能力。' +
+      '要停止请用 desktop_off——本环境实测无法捕获全局按键，' +
+      '因此没有"按 ESC 停"这个功能，不要这样告诉使用者。' +
       '不受白名单限制。建议在开始操作桌面前调用。',
     parameters: {
       label: { type: 'string', description: '徽标上显示的文本，默认"已激活"。' },
@@ -340,8 +339,9 @@ function applyInner(ctx, config = {}) {
       if (!r.ok) throw new Error(r.reason)
       return {
         result:
-          '已在整屏边缘显示 computer use 状态指示层，并安装 ESC 急停：' +
-          '按下 ESC 会拉下闸门，之后所有桌面操作被拒绝。' +
+          '已在整屏边缘显示 computer use 状态指示层。' +
+          '注意：本环境无法捕获全局按键，所以没有"按 ESC 停"；' +
+          '要停止请调用 desktop_off。' +
           (args.timeoutMs > 0
             ? `${args.timeoutMs} 毫秒后自动消失。`
             : '将常驻显示，直到调用 desktop_off 关闭。'),
@@ -353,9 +353,10 @@ function applyInner(ctx, config = {}) {
   register({
     name: 'desktop_off',
     description:
-      '立即关闭所有 computer use 指示层与 ESC 守候进程，并拉下急停闸门让后续任何桌面操作被拒绝。' +
-      '这是逃生舱的兜底：无论指示层是怎么起来的、ESC 灵不灵，这一条一定管用。' +
-      '想彻底停手时调用它。',
+      '立即关闭 computer use 状态指示层，并拉下急停闸门让后续任何桌面操作被拒绝。' +
+      '**这是本插件唯一的停止方式**——本环境无法捕获全局按键，因此没有"按 ESC 停"。' +
+      '它不依赖按键通道或前台窗口，无论指示层是怎么起来的都收得掉。' +
+      '想停手时调用它。',
     parameters: {},
     output: {
       schema: {
