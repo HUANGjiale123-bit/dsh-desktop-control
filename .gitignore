@@ -22,5 +22,8 @@ desktop.ini
 /screenshots/
 /.cache/
 
+# 临时探测与测试脚本
+/.probe/
+
 # 本地配置（可能含应用白名单与路径，不入库）
 local.config.json

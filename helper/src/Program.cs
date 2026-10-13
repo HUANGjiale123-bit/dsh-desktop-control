@@ -54,6 +54,18 @@ namespace Dsc
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool QueryFullProcessImageNameW(
+            IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
         [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -139,6 +151,7 @@ namespace Dsc
                     case "tree": return CmdTree(args);
                     case "screenshot": return CmdScreenshot(args);
                     case "click": return CmdClick(args);
+                    case "click_element": return CmdClickElement(args);
                     case "ping": return CmdPing();
                     default: return CmdHelp();
                 }
@@ -267,6 +280,160 @@ namespace Dsc
             return 0;
         }
 
+        /// <summary>
+        /// 取进程可执行文件路径。
+        ///
+        /// 首选 QueryFullProcessImageNameW：它只需要
+        /// PROCESS_QUERY_LIMITED_INFORMATION，是权限要求最低的官方途径，
+        /// 读取同用户会话内的进程通常都能成功。
+        ///
+        /// 备选 Process.MainModule——它需要 PROCESS_VM_READ，受限环境下常被拒。
+        /// </summary>
+        private static string ProcessPath(uint pid)
+        {
+            IntPtr h = IntPtr.Zero;
+            try
+            {
+                h = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (h != IntPtr.Zero)
+                {
+                    uint cap = 1024;
+                    StringBuilder sb = new StringBuilder((int)cap);
+                    if (Native.QueryFullProcessImageNameW(h, 0, sb, ref cap))
+                        return sb.ToString();
+                }
+            }
+            catch { }
+            finally
+            {
+                if (h != IntPtr.Zero) Native.CloseHandle(h);
+            }
+
+            try
+            {
+                return System.Diagnostics.Process.GetProcessById((int)pid).MainModule.FileName;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// 按稳定描述符定位元素并点击其矩形中心。
+        ///
+        /// 描述符的字段：role=TYPE / name=TEXT / aid=AUTOMATIONID，
+        /// 用 `/` 分隔，例如 `role=Button/name=保存`。
+        ///
+        /// 为什么不靠短 id：本程序是一次性进程，每次调用都是新进程，
+        /// 上次的引用表已经没了。因此改为每次按稳定属性重新定位——
+        /// 这样跨调用可用，也不必持有元素引用（那正是 PropertyCondition
+        /// 类型细节容易出错的地方）。
+        ///
+        /// 点击用坐标而非 Invoke 模式：坐标与截图同处一个坐标空间，
+        /// 所见即所点，不需要为每个控件类型判断该用哪个 Pattern。
+        /// </summary>
+        private static int CmdClickElement(string[] args)
+        {
+            if (args.Length < 3) throw new ArgumentException("click_element 需要 hwnd 与描述符");
+            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            string desc = args[2];
+            bool right = args.Length > 3 && args[3] == "right";
+
+            Dictionary<string, string> want = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string part in desc.Split('/'))
+            {
+                int eq = part.IndexOf('=');
+                if (eq > 0) want[part.Substring(0, eq).Trim()] = part.Substring(eq + 1).Trim();
+            }
+            if (want.Count == 0) throw new ArgumentException("描述符为空，例如 role=Button/name=保存");
+
+            AutomationElement root = AutomationElement.FromHandle(hwnd);
+            if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
+
+            AutomationElement found = FindByDescriptor(root, want, 0, 4000);
+            if (found == null)
+                throw new InvalidOperationException("未找到匹配元素：" + desc);
+
+            Native.RECT r;
+            GetElementRect(found, out r);
+            if (r.Right <= r.Left || r.Bottom <= r.Top)
+                throw new InvalidOperationException("匹配到的元素没有有效矩形，无法点击：" + desc);
+
+            int cx = (r.Left + r.Right) / 2;
+            int cy = (r.Top + r.Bottom) / 2;
+
+            if (!Native.SetCursorPos(cx, cy))
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(
+                    "SetCursorPos 失败 (Win32 错误 " + err + ": " +
+                    new System.ComponentModel.Win32Exception(err).Message + ")。" +
+                    "通常表示本进程没有交互式输入桌面的访问权。");
+            }
+            uint down = right ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_LEFTDOWN;
+            uint up = right ? Native.MOUSEEVENTF_RIGHTUP : Native.MOUSEEVENTF_LEFTUP;
+            System.Threading.Thread.Sleep(60);
+            Native.mouse_event(down, 0, 0, 0, IntPtr.Zero);
+            System.Threading.Thread.Sleep(60);
+            Native.mouse_event(up, 0, 0, 0, IntPtr.Zero);
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("matched").Val(desc)
+                .Key("rect").Val(r.Left + "," + r.Top + " " + (r.Right - r.Left) + "x" + (r.Bottom - r.Top))
+                .Key("clickedX").Num(cx).Key("clickedY").Num(cy)
+                .Key("button").Val(right ? "right" : "left")
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>按描述符深度优先查找第一个匹配元素。</summary>
+        private static AutomationElement FindByDescriptor(
+            AutomationElement el, Dictionary<string, string> want, int depth, int budget)
+        {
+            if (depth > 64 || budget <= 0) return null;
+
+            bool match = true;
+            foreach (KeyValuePair<string, string> kv in want)
+            {
+                string actual;
+                switch (kv.Key.ToLowerInvariant())
+                {
+                    case "role":
+                        actual = Safe(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
+                        break;
+                    case "name":
+                        actual = Safe(delegate { return el.Current.Name; });
+                        break;
+                    case "aid":
+                        actual = Safe(delegate { return el.Current.AutomationId; });
+                        break;
+                    case "class":
+                        actual = Safe(delegate { return el.Current.ClassName; });
+                        break;
+                    default:
+                        actual = null;
+                        break;
+                }
+                if (actual == null || string.Compare(actual, kv.Value, StringComparison.OrdinalIgnoreCase) != 0)
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return el;
+
+            AutomationElement child = null;
+            try { child = TreeWalker.ControlViewWalker.GetFirstChild(el); } catch { }
+            while (child != null)
+            {
+                AutomationElement hit = FindByDescriptor(child, want, depth + 1, budget - 1);
+                if (hit != null) return hit;
+                try { child = TreeWalker.ControlViewWalker.GetNextSibling(child); } catch { break; }
+            }
+            return null;
+        }
+
         private static string WindowTitle(IntPtr h)
         {
             StringBuilder sb = new StringBuilder(512);
@@ -304,9 +471,7 @@ namespace Dsc
                 Native.GetWindowRect(h, out r);
                 uint pid;
                 Native.GetWindowThreadProcessId(h, out pid);
-                string exe = null;
-                try { exe = System.Diagnostics.Process.GetProcessById((int)pid).MainModule.FileName; }
-                catch { }
+                string exe = ProcessPath(pid);
 
                 j.Obj()
                     .Key("hwnd").Num(h.ToInt64())

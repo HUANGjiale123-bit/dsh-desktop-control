@@ -17,13 +17,49 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-CSC='C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-FW='C:/Windows/Microsoft.NET/Framework64/v4.0.30319'
+# 探测 csc.exe：不同机器上 .NET Framework 的落点不一样，32/64 位也可能只有一边。
+# 顺带试 Roslyn（若装了 SDK 或 VS），它有更好的语言支持。
+find_csc() {
+    local cands=(
+        "/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+        "/c/Windows/Microsoft.NET/Framework/v4.0.30319/csc.exe"
+        "/c/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/Roslyn/csc.exe"
+        "/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin/Roslyn/csc.exe"
+    )
+    for c in "${cands[@]}"; do
+        [ -f "$c" ] && { echo "$c"; return 0; }
+    done
+    return 1
+}
 
-if [ ! -f "/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe" ]; then
-    echo "找不到 csc.exe —— 这台机器没有 .NET Framework 4.x？" >&2
+find_fw() {
+    for d in \
+        "/c/Windows/Microsoft.NET/Framework64/v4.0.30319" \
+        "/c/Windows/Microsoft.NET/Framework/v4.0.30319"
+    do
+        [ -f "$d/WPF/UIAutomationClient.dll" ] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+
+CSC_MSYS="$(find_csc)" || {
+    echo "找不到 C# 编译器。" >&2
+    echo "需要 .NET Framework 4.x（Windows 自带），或 Visual Studio 的 Roslyn。" >&2
     exit 1
-fi
+}
+FW_MSYS="$(find_fw)" || {
+    echo "找不到 WPF 的 UIAutomation 程序集（$CSC_MSYS 旁边应有 WPF 目录）。" >&2
+    exit 1
+}
+
+# 转成 Windows 风格路径给 csc：它不认 MSYS 的 /c/... 形式，
+# 而反斜杠形式还能绕开"老 csc 把 / 当选项分隔符"的坑。
+win() { printf '%s' "$1" | sed -e 's|^/c/|C:/|' ; }
+CSC="$(win "$CSC_MSYS")"
+FW="$(win "$FW_MSYS")"
+
+echo "编译器: $CSC"
+echo "框架  : $FW"
 
 mkdir -p bin
 
