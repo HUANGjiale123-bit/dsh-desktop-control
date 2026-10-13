@@ -39,6 +39,16 @@ export const name = 'dsh-desktop-control'
  */
 export const inject = ['tools']
 
+/**
+ * 插件版本，只用于日志与工具输出。
+ *
+ * **为什么要单独写一份常量：** 实测宿主进程会缓存已加载的插件模块，包被替换后
+ * 未必真正重载——结果是新旧代码混着跑（同一次会话里 desktop_off 走新实现、
+ * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
+ * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
+ */
+const PLUGIN_VERSION = '0.1.3'
+
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
 const BUTTON = { type: 'string', enum: ['left', 'right'], description: '鼠标键，默认 left。' }
@@ -251,52 +261,54 @@ export function apply(ctx, config = {}) {
     presentCall: args => ({ card: 'generic', title: `按键 ${args.chord}`, kind: 'other' }),
   })
 
-  /* ───────── 操作指示浮层 ─────────
+  /* ───────── computer use 状态指示层 ─────────
    *
-   * 助手开始操作某个窗口时，在它外围画一圈边框并标注应用名，让使用者
-   * 随时看得见"现在有人在动我的电脑、动的是哪一个窗口"。
+   * 助手开始操作桌面时，在整个屏幕边缘显示一层蓝色粒子光带与状态徽标，
+   * 让使用者随时看得见"有人在操作这台电脑"。
    *
-   * 由**宿主进程**持有子进程，因此浮层不会随着我的会话或沙箱消失而消失，
-   * 能活到窗口关闭或超时为止。
+   * 标的是**整屏**而不是某个窗口：窗口会移动、会被遮挡、会在多个目标之间
+   * 切换，跟着它画既不稳定也容易看漏；整屏边缘位置恒定，不可能被遮住。
+   *
+   * 指示层进程同时安装 ESC 急停钩子——两件事的生命周期完全一致，合成一个
+   * 进程还解决了一个实际问题：键盘钩子必须由**不在沙箱里的进程**安装才生效，
+   * 而本插件跑在宿主进程里，拉起的子进程因此具备这个条件。
+   *
+   * 由宿主进程持有子进程，所以它不会随我的会话或沙箱消失而消失。
    */
 
-  const overlayPath =
-    config.overlayPath ??
-    process.env.DSC_OVERLAY ??
-    join(dirname(set.helperPath), 'dsc-overlay.exe')
+  const edgePath =
+    config.edgePath ??
+    config.overlayPath ??          // 兼容旧配置名
+    process.env.DSC_EDGE ??
+    join(dirname(set.helperPath), 'dsc-edge.exe')
 
-  const liveOverlays = new Map()   // hwnd -> ChildProcess
+  const liveOverlays = new Map()   // key -> ChildProcess
 
-  function startOverlay(hwnd, label, timeoutMs) {
-    if (!existsSync(overlayPath)) return { ok: false, reason: `找不到浮层程序：${overlayPath}` }
+  function startIndicator(key, args) {
+    if (!existsSync(edgePath)) return { ok: false, reason: `找不到指示层程序：${edgePath}` }
 
-    const prev = liveOverlays.get(String(hwnd))
+    const prev = liveOverlays.get(String(key))
     if (prev && prev.exitCode === null) {
       try { prev.kill() } catch { }
     }
 
-    const child = spawn(
-      overlayPath,
-      [String(hwnd), ...(label ? ['--label', label] : []),
-       ...(timeoutMs > 0 ? ['--timeout', String(timeoutMs)] : [])],
-      { windowsHide: false, detached: false, stdio: 'ignore' },
-    )
-    child.on('exit', () => { if (liveOverlays.get(String(hwnd)) === child) liveOverlays.delete(String(hwnd)) })
-    child.on('error', () => { liveOverlays.delete(String(hwnd)) })
-    liveOverlays.set(String(hwnd), child)
+    const child = spawn(edgePath, args, { windowsHide: false, detached: false, stdio: 'ignore' })
+    child.on('exit', () => { if (liveOverlays.get(String(key)) === child) liveOverlays.delete(String(key)) })
+    child.on('error', () => { liveOverlays.delete(String(key)) })
+    liveOverlays.set(String(key), child)
     return { ok: true }
   }
 
   register({
     name: 'desktop_indicate',
     description:
-      '在被操作窗口的外围显示一圈边框并标注应用名，让使用者看得见助手正在操作哪个窗口。' +
-      '边框**不拦截鼠标键盘**（点击穿透）、不抢焦点，目标窗口最小化或关闭时自动消失。' +
-      '只读性质的提示，不受白名单限制。建议在开始操作某个窗口前调用。',
+      '在整个屏幕边缘显示 computer use 状态指示层（蓝色粒子光带 + 顶部徽标），' +
+      '并同时安装 ESC 急停：用户按 ESC 即拉下闸门，之后所有桌面操作被拒绝。' +
+      '指示层**不拦截鼠标键盘**（点击穿透）、不抢焦点，且从截图中排除。' +
+      '不受白名单限制。建议在开始操作桌面前调用。',
     parameters: {
-      hwnd: HWND,
-      label: { type: 'string', description: '边框上显示的文本，默认按窗口所属进程名生成。' },
-      timeoutMs: { type: 'integer', description: '多久后自动消失（毫秒）；0 或省略表示跟随窗口直到它关闭。' },
+      label: { type: 'string', description: '徽标上显示的文本，默认"已激活"。' },
+      timeoutMs: { type: 'integer', description: '多久后自动消失（毫秒）；0 或省略表示常驻，直到调用 desktop_off。' },
     },
     output: {
       schema: {
@@ -307,16 +319,22 @@ export function apply(ctx, config = {}) {
       render: (_args, value) => [{ type: 'text', text: value.result }],
     },
     async execute(args) {
-      const r = startOverlay(args.hwnd, args.label, args.timeoutMs ?? 0)
+      const label = args.label ?? '已激活'
+      const childArgs = ['--label', label]
+      if (args.timeoutMs > 0) childArgs.push('--timeout', String(args.timeoutMs))
+
+      const r = startIndicator('indicator', childArgs)
       if (!r.ok) throw new Error(r.reason)
       return {
         result:
-          `已在窗口 ${args.hwnd} 外围显示操作指示边框` +
-          (args.label ? `（标注：${args.label}）` : '') +
-          (args.timeoutMs ? `，${args.timeoutMs} 毫秒后自动消失。` : '，跟随该窗口直到它关闭。'),
+          '已在整屏边缘显示 computer use 状态指示层，并安装 ESC 急停：' +
+          '按下 ESC 会拉下闸门，之后所有桌面操作被拒绝。' +
+          (args.timeoutMs > 0
+            ? `${args.timeoutMs} 毫秒后自动消失。`
+            : '将常驻显示，直到调用 desktop_off 关闭。'),
       }
     },
-    presentCall: args => ({ card: 'generic', title: `标示操作窗口 ${args.hwnd}`, kind: 'read' }),
+    presentCall: () => ({ card: 'generic', title: '显示 computer use 状态指示', kind: 'read' }),
   })
 
   register({
@@ -364,8 +382,8 @@ export function apply(ctx, config = {}) {
   })
 
   ctx.logger?.info?.(
-    `[desktop-control] 已注册 8 个工具；helper=${set.helperPath}；` +
-    `浮层=${overlayPath}；` +
+    `[desktop-control] v${PLUGIN_VERSION} 已注册 9 个工具；helper=${set.helperPath}；` +
+    `指示层=${edgePath}；` +
     `白名单=${set.allowlist.length ? set.allowlist.join(', ') : '（空）'}`,
   )
 
