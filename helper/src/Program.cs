@@ -171,6 +171,12 @@ namespace Dsc
 
     internal static class Program
     {
+        /* 遍历上限的默认值。三个都是"防止在怪应用上挂死/一次抓回上千个活 RCW"的闸门，
+         * 触发时会在树文本末尾明确报告被截断，而不是假装遍历完整。 */
+        public const int DefaultMaxNodes = 400;
+        public const int DefaultMaxDepth = 32;
+        public const int DefaultMaxChildren = 200;
+
         /// <summary>
         /// 急停闸门文件的位置。
         ///
@@ -606,7 +612,7 @@ namespace Dsc
                 return FailJson("BadIndex", "element index must be >= 0, got " + index);
 
             // 只为绑定这一个索引而抓快照：抓到 index+1 个即可，超出 index 的部分不需要。
-            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1);
+            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
             AutomationElement el;
             if (!snap.Map.TryGetValue(index, out el))
                 return FailJson("StaleSnapshot",
@@ -764,7 +770,7 @@ namespace Dsc
             AutomationElement root = AutomationElement.FromHandle(hwnd);
             if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
 
-            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1);
+            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
             AutomationElement el;
             if (!snap.Map.TryGetValue(index, out el))
                 return FailJson("StaleSnapshot",
@@ -1101,14 +1107,29 @@ namespace Dsc
         {
             if (args.Length < 2) throw new ArgumentException("tree 需要 hwnd 参数");
             IntPtr hwnd = new IntPtr(long.Parse(args[1]));
-            int maxNodes = args.Length > 2 ? int.Parse(args[2]) : 400;
+
+            // 位置参数 hwnd [maxNodes]，另有可选开关 --depth / --children。
+            // 三个上限都是为了不在怪应用上挂死，也为了避免一次取回上千个活 RCW。
+            int maxNodes = DefaultMaxNodes;
+            int maxDepth = DefaultMaxDepth;
+            int maxChildren = DefaultMaxChildren;
+            if (args.Length > 2 && !args[2].StartsWith("--")) maxNodes = int.Parse(args[2]);
+            for (int a = 2; a < args.Length - 1; a++)
+            {
+                if (args[a] == "--depth") maxDepth = int.Parse(args[a + 1]);
+                else if (args[a] == "--children") maxChildren = int.Parse(args[a + 1]);
+            }
+
+            if (maxNodes < 1) throw new ArgumentException("maxNodes 必须 >= 1");
+            if (maxDepth < 0 || maxDepth > 128) throw new ArgumentException("--depth 允许 0..128");
+            if (maxChildren < 1 || maxChildren > 2000) throw new ArgumentException("--children 允许 1..2000");
 
             AutomationElement root = AutomationElement.FromHandle(hwnd);
             if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
 
             // 树文本、索引表、次要动作表全部来自这一次遍历——它们必须同源，
             // 否则索引会和元素对不上号。
-            Snapshot snap = SnapshotOps.Capture(root, hwnd, maxNodes);
+            Snapshot snap = SnapshotOps.Capture(root, hwnd, maxNodes, maxDepth, maxChildren);
 
             // 附加：Document/Edit 的文本内容，纯文本模型靠它判读界面
             StringBuilder extra = new StringBuilder();
@@ -1139,6 +1160,7 @@ namespace Dsc
                 .Key("revision").Num(snap.Revision)
                 .Key("total").Num(snap.Total)
                 .Key("listed").Num(snap.Listed)
+                .Key("truncated").Bool(snap.Truncated)
                 .Key("tree").Val(tree)
              .End();
             Console.WriteLine(j.ToString());

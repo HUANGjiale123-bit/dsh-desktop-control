@@ -34,6 +34,9 @@ namespace Dsc
         public int Total;
         public int Listed;
 
+        /// <summary>是否因为深度/子节点/总数上限而没能遍历完。</summary>
+        public bool Truncated;
+
         public readonly Dictionary<int, AutomationElement> Map =
             new Dictionary<int, AutomationElement>();
 
@@ -52,17 +55,131 @@ namespace Dsc
             return ++_revision;
         }
 
+        /// <summary>
+        /// 有界遍历：广度优先，逐层 FindAll(Children)。
+        ///
+        /// 三重上限 + 环路检测，任何一项触发都置 truncated（而不是假装遍历完整）：
+        ///   maxNodes           总元素数
+        ///   maxDepth           深度
+        ///   maxChildrenPerNode 单个节点的直接子节点数
+        ///
+        /// 环路检测用 runtime ID：怪应用可能把祖先当子节点报回来，那是死循环。
+        ///
+        /// 叶节点剪枝：Button/Edit/Text 这类已知叶节点不再向下查，
+        /// 省掉"必然为空"的那次跨进程调用。
+        /// </summary>
+        private static List<AutomationElement> BoundedWalk(
+            AutomationElement root, int maxNodes, int maxDepth, int maxChildrenPerNode,
+            out int totalSeen, out bool truncated)
+        {
+            List<AutomationElement> result = new List<AutomationElement>();
+            HashSet<string> visited = new HashSet<string>(StringComparer.Ordinal);
+            truncated = false;
+            totalSeen = 0;
+
+            List<AutomationElement> frontier = new List<AutomationElement>();
+            frontier.Add(root);
+
+            for (int depth = 0; depth <= maxDepth && frontier.Count > 0; depth++)
+            {
+                List<AutomationElement> next = new List<AutomationElement>();
+
+                foreach (AutomationElement el in frontier)
+                {
+                    if (result.Count >= maxNodes) { truncated = true; break; }
+
+                    // 环路检测：同一个 runtime ID 只收一次
+                    string rid = null;
+                    try
+                    {
+                        int[] r = el.GetRuntimeId();
+                        if (r != null) rid = string.Join(",", Array.ConvertAll(r, delegate(int x) { return x.ToString(); }));
+                    }
+                    catch { }
+                    if (rid != null && !visited.Add(rid)) continue;   // 见过，跳过
+
+                    result.Add(el);
+                    totalSeen++;
+                }
+
+                if (truncated) break;
+                if (depth == maxDepth) { continue; }   // 到底了，不再下探
+
+                foreach (AutomationElement el in frontier)
+                {
+                    if (result.Count >= maxNodes) { truncated = true; break; }
+                    if (IsLeafType(el)) continue;
+
+                    AutomationElementCollection kids;
+                    try { kids = el.FindAll(TreeScope.Children, Condition.TrueCondition); }
+                    catch { continue; }
+
+                    if (kids.Count > maxChildrenPerNode) truncated = true;   // 该节点的子节点被截断
+                    int take = Math.Min(kids.Count, maxChildrenPerNode);
+                    for (int i = 0; i < take; i++)
+                    {
+                        try { next.Add(kids[i]); } catch { }
+                    }
+                }
+
+                frontier = next;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 已知不会再有子节点的类型。对这些类型不做 FindAll(Children)——
+        /// 那次调用必然返回空，但每次都是一趟跨进程往返。
+        /// </summary>
+        private static bool IsLeafType(AutomationElement el)
+        {
+            string role = SafeStr(delegate { return el.Current.ControlType.ProgrammaticName; });
+            if (role == null) return false;
+            switch (role)
+            {
+                case "ControlType.Button":
+                case "ControlType.Edit":
+                case "ControlType.Text":
+                case "ControlType.Image":
+                case "ControlType.CheckBox":
+                case "ControlType.RadioButton":
+                case "ControlType.Hyperlink":
+                case "ControlType.ComboBox":
+                case "ControlType.Slider":
+                case "ControlType.ProgressBar":
+                case "ControlType.Separator":
+                case "ControlType.Thumb":
+                case "ControlType.ScrollBar":
+                case "ControlType.TitleBar":
+                case "ControlType.Header":
+                case "ControlType.HeaderItem":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         /// <summary>抓取一份快照：树文本 + 索引表 + 动作表，来自同一次遍历。</summary>
-        public static Snapshot Capture(AutomationElement root, IntPtr hwnd, int maxNodes)
+        public static Snapshot Capture(AutomationElement root, IntPtr hwnd, int maxNodes,
+                                       int maxDepth, int maxChildrenPerNode)
         {
             Snapshot snap = new Snapshot();
             snap.Hwnd = hwnd;
             snap.Revision = NextRevision();
 
-            AutomationElementCollection all =
-                root.FindAll(TreeScope.Subtree, Condition.TrueCondition);
-            snap.Total = all.Count;
-            int limit = Math.Min(all.Count, maxNodes);
+            // 有界遍历：逐层 FindAll(Children)，带深度、子节点数、总元素数三重上限，
+            // 并用 runtime ID 做环路检测（怪应用可能把祖先当子节点报回来，那是死循环）。
+            //
+            // 为什么不用 FindAll(Subtree)：它会一次取回整棵子树，没有边界。实测大窗口
+            // （Program Manager 2240x1400、DSH 1941x1242）足以让那一次调用返回上千条，
+            // 且每条都是一个活 RCW。
+            //
+            // 为什么不用 TreeWalker：它在部分应用（打包应用、XAML 岛）上会中途停住——
+            // 之前实测 Store 版记事本只拿到 12 个顶层 Pane。FindAll 更可靠。
+            List<AutomationElement> all = BoundedWalk(root, maxNodes, maxDepth, maxChildrenPerNode,
+                                                      out snap.Total, out snap.Truncated);
+            int limit = all.Count;
             snap.Listed = limit;
 
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
@@ -120,8 +237,14 @@ namespace Dsc
                 sb.Append('\n');
             }
 
-            if (snap.Total > limit)
-                sb.Append("… 另有 ").Append(snap.Total - limit).Append(" 个元素未列出（受 maxNodes 限制）\n");
+            // 截断必须明说，而且要说明是被哪个上限截断的。
+            // "看起来完整但其实是残的"比"明确报错"危险得多——调用方会据此以为已经看到了全部。
+            if (snap.Truncated)
+                sb.Append("… 遍历被上限截断（--depth<=").Append(maxDepth)
+                  .Append(", --children<=").Append(maxChildrenPerNode)
+                  .Append(", maxNodes<=").Append(maxNodes)
+                  .Append("）；窗口内的元素多于列出的 ").Append(limit).Append(" 个，")
+                  .Append("未列出的部分不在此处。\n");
 
             snap.Tree = sb.ToString().TrimEnd();
             return snap;
