@@ -78,6 +78,14 @@ echo "编译 dsc.exe ..."
     'src\Program.cs' \
     'src\Snapshot.cs'
 
+# 按键读取能力探测工具（诊断用，不参与日常操作）
+echo
+echo "编译 dsc-esc-probe.exe ..."
+"$CSC" -nologo -target:exe -platform:x64 -out:bin/dsc-esc-probe.exe \
+    -r:System.dll \
+    'src\EscProbe.cs'
+echo "完成: bin/dsc-esc-probe.exe ($(stat -c%s bin/dsc-esc-probe.exe) bytes)"
+
 echo
 echo "完成: bin/dsc.exe ($(stat -c%s bin/dsc.exe) bytes)"
 

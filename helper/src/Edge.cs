@@ -35,6 +35,7 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -42,6 +43,58 @@ namespace DscEdge
 {
     internal static class Native
     {
+        /* ── ESC 急停所需的低层键盘钩子 ──
+         *
+         * 为什么是 WH_KEYBOARD_LL，而不是 RegisterHotKey 或轮询状态：
+         * 本机实测（三次独立探测）RegisterHotKey 返回成功但永不触发，
+         * GetAsyncKeyState 从未读到过按键，而 GetKeyState 只偶尔读到一次。
+         * 这个组合说明进程处于"消息队列可用但异步键状态不可用"的环境——
+         * 而低层钩子正是靠消息队列投递的，与这个环境特性吻合。
+         *
+         * 另外钩子不受目标窗口完整性级别限制：回调在安装进程自己的线程上被调用，
+         * 不走注入，所以即使前台是提权窗口，物理 ESC 依然可见。
+         * RegisterHotKey 在这一点上不可靠。
+         *
+         * 安装要求：**安装线程必须有消息循环**（WinForms 的 Application.Run 满足）。
+         */
+        public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetWindowsHookExW(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr GetModuleHandleW(IntPtr lpModuleName);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct KBDLLHOOKSTRUCT
+        {
+            public uint vkCode;
+            public uint scanCode;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        public const int WH_KEYBOARD_LL = 13;
+        public const int HC_ACTION = 0;
+        public const int WM_KEYDOWN = 0x0100;
+        public const int WM_SYSKEYDOWN = 0x0104;
+        public const uint VK_ESCAPE = 0x1B;
+
+        /// <summary>
+        /// 事件由 SendInput / keybd_event 注入而非真实硬件输入。
+        ///
+        /// **这个标志是必须处理的。** 全局物理钩子看得见本进程自己注入的按键，
+        /// 而 desktop_type 正在大量注入——不排除的话，急停会被自己的输入触发。
+        /// </summary>
+        public const uint LLKHF_INJECTED = 0x00000010;
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);
 
@@ -69,6 +122,206 @@ namespace DscEdge
         public const uint SWP_NOACTIVATE = 0x0010;
         public const uint SWP_SHOWWINDOW = 0x0040;
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    }
+
+    /// <summary>
+    /// ESC 急停：低层键盘钩子 → 写闸门文件。
+    ///
+    /// 设计上照 Codex 的三条纪律：
+    ///
+    ///   1. **Fail-closed**：钩子装不上就整体失败，不降级继续跑。
+    ///      "监控不可用时宁可不动，也不盲动"——一个装样子的急停比没有急停更危险。
+    ///
+    ///   2. **三重冗余**（这里做了两重，第三重在插件层）：
+    ///      闸门文件 + 日志行。钩子活着但闸门写不进去时会明确报错，不静默。
+    ///
+    ///   3. **区分注入与真实输入**：用 LLKHF_INJECTED 排除本进程自己注入的按键。
+    ///      不做这一步，desktop_type 的每一次注入都会触发急停。
+    ///
+    /// 钩子回调永远调用 CallNextHookEx——绝不吞掉 ESC。这是急停，不是拦截：
+    /// 用户按 ESC 该发生的照常发生，只是我们额外记一笔。
+    /// </summary>
+    internal static class EscapeGate
+    {
+        private static Native.LowLevelKeyboardProc _proc;   // 必须静态持有，否则被 GC 回收
+        private static IntPtr _hook = IntPtr.Zero;
+        private static bool _tripped;
+        private static int _keyEventsSeen;
+        private static string _logPath;
+
+        /// <summary>
+        /// 日志同时写 stderr 和文件。
+        ///
+        /// 文件是必须的：指示层由宿主拉起，stderr 取不到，而"钩子到底有没有收到按键"
+        /// 只能由钩子自己说话——不能从"闸门没生成"反推，因为那既可能是没人按键，
+        /// 也可能是钩子没工作。这两种情况必须能区分开，否则又是在猜。
+        /// </summary>
+        private static string LogPath()
+        {
+            if (_logPath != null) return _logPath;
+            try
+            {
+                // 闸门路径是 <root>\.state\halt，日志放同一个目录
+                string gate = GatePath();
+                string stateDir = Path.GetDirectoryName(gate);
+                _logPath = Path.Combine(stateDir, "esc.log");
+            }
+            catch { _logPath = ""; }
+            return _logPath;
+        }
+
+        /// <summary>闸门文件路径。必须与 dsc.exe 的 GatePath() 算出同一个位置。</summary>
+        public static string GatePath()
+        {
+            string fromEnv = Environment.GetEnvironmentVariable("DSC_HALT_GATE");
+            if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
+
+            string binDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
+            string root = Path.GetDirectoryName(binDir);        // helper\bin -> helper
+            if (!string.IsNullOrEmpty(root)) root = Path.GetDirectoryName(root);  // helper -> 仓库根
+            if (string.IsNullOrEmpty(root)) root = binDir;
+            return Path.Combine(root, ".state", "halt");
+        }
+
+        private static System.Windows.Forms.Timer _heartbeat;
+
+        public static bool Install()
+        {
+            _proc = HookProc;                                   // 静态持有
+            _hook = Native.SetWindowsHookExW(Native.WH_KEYBOARD_LL, _proc,
+                                             Native.GetModuleHandleW(IntPtr.Zero), 0);
+            if (_hook == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                Log("failed to install keyboard hook (Win32 " + err + ": " +
+                    new System.ComponentModel.Win32Exception(err).Message + ")");
+                return false;
+            }
+            Log("低层键盘钩子已安装；按 ESC 拉下急停闸门。闸门路径: " + GatePath());
+            Log("钩子句柄=" + _hook + " 日志路径=" + LogPath());
+
+            // 心跳：每 5 秒一行。它的作用是证明"日志通道是活的"——
+            // 没有心跳的话，"日志里没有按键"就无法区分是钩子没收到还是日志没写进去。
+            _heartbeat = new System.Windows.Forms.Timer();
+            _heartbeat.Interval = 5000;
+            _heartbeat.Tick += delegate
+            {
+                Log("心跳：钩子存活，累计收到真实按键 " + _keyEventsSeen + " 次");
+            };
+            _heartbeat.Start();
+
+            return true;
+        }
+
+        public static void Uninstall()
+        {
+            if (_heartbeat != null) { _heartbeat.Stop(); _heartbeat.Dispose(); _heartbeat = null; }
+            if (_hook == IntPtr.Zero) return;
+            if (!Native.UnhookWindowsHookEx(_hook))
+            {
+                int err = Marshal.GetLastWin32Error();
+                Log("low-level input hook cleanup failed: Win32 " + err);
+            }
+            _hook = IntPtr.Zero;
+        }
+
+        private static IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            try
+            {
+                if (nCode == Native.HC_ACTION && !_tripped)
+                {
+                    int msg = wParam.ToInt32();
+                    if (msg == Native.WM_KEYDOWN || msg == Native.WM_SYSKEYDOWN)
+                    {
+                        Native.KBDLLHOOKSTRUCT k =
+                            (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
+
+                        bool injected = (k.flags & Native.LLKHF_INJECTED) != 0;
+
+                        // 记录所有真实按键的前若干个（不含注入），用于确认钩子确实在工作。
+                        // 只看闸门文件的话，"没人按键"和"钩子没收到"无法区分。
+                        if (!injected && _keyEventsSeen < 25)
+                        {
+                            _keyEventsSeen++;
+                            Log("钩子收到真实按键 vk=0x" + k.vkCode.ToString("X2") +
+                                " (" + KeyName(k.vkCode) + ") flags=0x" + k.flags.ToString("X2"));
+                        }
+
+                        if (k.vkCode == Native.VK_ESCAPE && !injected)
+                        {
+                            _tripped = true;      // 只拉一次，避免按住时刷屏
+                            Trip();
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log("钩子回调异常（已忽略，继续放行）: " + e.Message);
+            }
+
+            // 永远放行。急停不该改变用户按键的原有行为。
+            return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
+        }
+
+        private static void Trip()
+        {
+            try
+            {
+                string p = GatePath();
+                string dir = Path.GetDirectoryName(p);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(p,
+                    "由物理 ESC 键触发" + Environment.NewLine +
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine +
+                    "（dsc-edge.exe 的低层键盘钩子；钩子不吞按键）" + Environment.NewLine);
+
+                if (!File.Exists(p))
+                {
+                    Log("急停触发但闸门文件写入后仍不存在: " + p);
+                    return;
+                }
+                Log("✅ 急停已触发：ESC 已拉下闸门 " + p);
+            }
+            catch (Exception e)
+            {
+                // 写入失败必须可见。之前这个 catch 是空的，导致"报了已急停但其实没写"。
+                Log("急停触发但闸门写入失败: " + e.GetType().Name + ": " + e.Message);
+            }
+        }
+
+        private static string KeyName(uint vk)
+        {
+            if (vk >= 0x41 && vk <= 0x5A) return ((char)vk).ToString();
+            if (vk >= 0x30 && vk <= 0x39) return ((char)vk).ToString();
+            switch (vk)
+            {
+                case 0x1B: return "ESC";
+                case 0x20: return "Space";
+                case 0x0D: return "Enter";
+                case 0x09: return "Tab";
+                case 0x08: return "Backspace";
+                default: return "vk" + vk;
+            }
+        }
+
+        private static void Log(string line)
+        {
+            string text = "[dsc-edge " + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + line;
+            Console.Error.WriteLine(text);
+            try
+            {
+                string p = LogPath();
+                if (!string.IsNullOrEmpty(p))
+                {
+                    string dir = Path.GetDirectoryName(p);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                    File.AppendAllText(p, text + Environment.NewLine);
+                }
+            }
+            catch { }   // 日志失败不该影响急停本身
+        }
     }
 
     internal sealed class EdgeForm : Form
@@ -482,6 +735,7 @@ namespace DscEdge
             int timeout = 0;
             bool noExclude = false;
             bool isStatic = false;
+            bool noEsc = false;
             Color accent = Color.FromArgb(0x4D, 0x9A, 0xFF);   // 亮蓝
 
             for (int i = 0; i < args.Length; i++)
@@ -492,6 +746,9 @@ namespace DscEdge
                     case "--timeout": if (i + 1 < args.Length) int.TryParse(args[++i], out timeout); break;
                     case "--no-exclude": noExclude = true; break;
                     case "--static": isStatic = true; break;
+                    case "--no-esc": noEsc = true; break;      // 仅供调试：不装急停
+                    case "--selftest-hook":                    // 只装钩子并报告，不显示指示层
+                        return EscapeGate.Install() ? 0 : 5;
                     case "--color":
                         if (i + 1 < args.Length)
                         {
@@ -502,9 +759,20 @@ namespace DscEdge
                 }
             }
 
+            // 急停随指示层一起装。装不上就整体退出——没急停的 computer use 不该跑起来。
+            if (!noEsc && !EscapeGate.Install())
+                return 3;
+
             Application.EnableVisualStyles();
 
-            Application.Run(new EdgeForm(label, timeout, accent, noExclude, isStatic));
+            try
+            {
+                Application.Run(new EdgeForm(label, timeout, accent, noExclude, isStatic));
+            }
+            finally
+            {
+                EscapeGate.Uninstall();
+            }
             return 0;
         }
     }
