@@ -602,12 +602,16 @@ namespace Dsc
 
             // 在同一次调用内重新抓一份快照再写：一次性进程模型下跨调用持不住快照，
             // 所以"索引仍然有效"只能靠这次重新绑定保证。
+            if (index < 0)
+                return FailJson("BadIndex", "element index must be >= 0, got " + index);
+
+            // 只为绑定这一个索引而抓快照：抓到 index+1 个即可，超出 index 的部分不需要。
             Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1);
             AutomationElement el;
             if (!snap.Map.TryGetValue(index, out el))
                 return FailJson("StaleSnapshot",
                     "element " + index + " is not present in window " + hwnd +
-                    " (only " + snap.Listed + " elements listed); re-read the tree");
+                    " (" + snap.Total + " elements exist); re-read the tree");
 
             if (SnapshotOps.SafeBool(delegate { return el.Current.IsPassword; }))
                 return FailJson("Refused",
@@ -634,8 +638,19 @@ namespace Dsc
                     try { el.SetFocus(); } catch { }     // Codex 也是先聚焦
                     System.Threading.Thread.Sleep(40);
 
+                    string before = null;
+                    try { before = vp.Current.Value; } catch { }
+
                     vp.SetValue(value);
-                    return OkJson(hwnd, index, role, "ValuePattern", value);
+
+                    // 回读校验：一次性进程模型下没有跨调用的可比基准，
+                    // 唯一能自证"确实写进去了"的办法就是写完立刻读回来。
+                    System.Threading.Thread.Sleep(60);
+                    string after = null;
+                    try { after = vp.Current.Value; } catch { }
+
+                    return OkJson(hwnd, index, role, "ValuePattern", value,
+                        before, after, string.Equals(after, value, StringComparison.Ordinal));
                 }
                 catch (Exception ex)
                 {
@@ -664,16 +679,51 @@ namespace Dsc
                         return FailJson("BadValue",
                             "element " + index + " exposes RangeValuePattern; its value must be a number, got: " + value);
 
+                    // 先聚焦再读区间：实测未聚焦时 Current.Minimum/Maximum 可能返回 0/0，
+                    // 而控件真实范围是 0..100（NumericUpDown）。若不重读，任何值都会
+                    // 被误判成越界——那是把"我读不到"错报成"你越界了"。
+                    try { el.SetFocus(); } catch { }
+                    System.Threading.Thread.Sleep(60);
+
                     double min = rv.Current.Minimum, max = rv.Current.Maximum;
+
+                    // [0,0] 是"读不到区间"的特征值，不是真的只允许 0
+                    if (min == 0 && max == 0)
+                    {
+                        try
+                        {
+                            object p2;
+                            if (el.TryGetCurrentPattern(RangeValuePattern.Pattern, out p2))
+                            {
+                                RangeValuePattern rv2 = (RangeValuePattern)p2;
+                                min = rv2.Current.Minimum; max = rv2.Current.Maximum;
+                            }
+                        }
+                        catch { }
+
+                        if (min == 0 && max == 0)
+                            return FailJson("RangeUnavailable",
+                                "element " + index + " exposes RangeValuePattern but reports an empty range [0, 0]; " +
+                                "the control likely does not publish its bounds to UIA. Refusing to guess.");
+                    }
+
                     if (d < min || d > max)
                         return FailJson("OutOfRange",
                             "value " + d + " is outside the allowed range [" + min + ", " + max + "]");
 
-                    try { el.SetFocus(); } catch { }
-                    System.Threading.Thread.Sleep(40);
+                    double beforeD = double.NaN;
+                    try { beforeD = rv.Current.Value; } catch { }
 
                     rv.SetValue(d);
-                    return OkJson(hwnd, index, role, "RangeValuePattern", value);
+
+                    System.Threading.Thread.Sleep(60);
+                    double afterD = double.NaN;
+                    try { afterD = rv.Current.Value; } catch { }
+
+                    return OkJson(hwnd, index, role, "RangeValuePattern", value,
+                        beforeD.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        afterD.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        Math.Abs(afterD - d) < 0.0001);
                 }
                 catch (Exception ex)
                 {
@@ -802,7 +852,13 @@ namespace Dsc
             return ex.GetType().Name + ": " + ex.Message;
         }
 
-        private static int OkJson(IntPtr hwnd, int index, string role, string via, string value)
+        /// <summary>
+        /// 成功回包。before/after 为回读校验的结果：
+        /// 一次性进程模型下没有跨调用的可比基准，唯一的自证方式就是写完立刻读回来。
+        /// verified=false 表示"调用成功但值没变"——调用方应当据此怀疑而不是相信。
+        /// </summary>
+        private static int OkJson(IntPtr hwnd, int index, string role, string via, string value,
+                                  string before, string after, bool verified)
         {
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
@@ -810,10 +866,13 @@ namespace Dsc
                 .Key("index").Num(index)
                 .Key("role").Val(role)
                 .Key("via").Val(via)
-                .Key("value").Val(value)
+                .Key("requested").Val(value)
+                .Key("before").Val(before)
+                .Key("after").Val(after)
+                .Key("verified").Bool(verified)
              .End();
             Console.WriteLine(j.ToString());
-            return 0;
+            return verified ? 0 : 4;      // 4 = 调用成功但回读不一致
         }
 
         private static int FailJson(string code, string message)
