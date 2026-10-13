@@ -254,6 +254,8 @@ namespace Dsc
                     case "screenshot": return CmdScreenshot(args);
                     case "click": return CmdClick(args);
                     case "click_element": return CmdClickElement(args);
+                    case "set_value": return CmdSetValue(args);
+                    case "do_action": return CmdDoAction(args);
                     case "type": return CmdType(args);
                     case "press_key": return CmdPressKey(args);
                     case "halt": return CmdHalt(args);
@@ -575,6 +577,256 @@ namespace Dsc
         ///
         /// 字符成对发送（按下 + 抬起）。
         /// </summary>
+        /// <summary>
+        /// set_value —— 通过 UIA 模式替换元素的值。**不经过输入注入。**
+        ///
+        /// 路径与 Codex 一致：先 ValuePattern，再 RangeValuePattern；
+        /// 先读 read-only 状态，写之前先聚焦元素。**没有 LegacyIAccessible 回退**——
+        /// 刻意不做，因为偷偷换一条路写进去会让"这个控件能不能写"的结论不可信。
+        ///
+        /// 三种失败原因分开报，不糊成一句"失败了"：
+        ///   · 控件没实现模式      → NotSettable（控件级限制）
+        ///   · 元素已从快照里消失  → StaleSnapshot（重新取快照）
+        ///   · UIA 调用本身报错    → UiaError（客户端上下文问题）
+        /// </summary>
+        private static int CmdSetValue(string[] args)
+        {
+            RequireNotHalted("set_value");
+            if (args.Length < 4) throw new ArgumentException("set_value 需要 hwnd index value");
+            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            int index = int.Parse(args[2]);
+            string value = args[3];
+
+            AutomationElement root = AutomationElement.FromHandle(hwnd);
+            if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
+
+            // 在同一次调用内重新抓一份快照再写：一次性进程模型下跨调用持不住快照，
+            // 所以"索引仍然有效"只能靠这次重新绑定保证。
+            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1);
+            AutomationElement el;
+            if (!snap.Map.TryGetValue(index, out el))
+                return FailJson("StaleSnapshot",
+                    "element " + index + " is not present in window " + hwnd +
+                    " (only " + snap.Listed + " elements listed); re-read the tree");
+
+            if (SnapshotOps.SafeBool(delegate { return el.Current.IsPassword; }))
+                return FailJson("Refused",
+                    "element " + index + " is a password field; refusing to set its value");
+
+            string role = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
+
+            object p;
+
+            // ① ValuePattern
+            bool hasValue = false;
+            try { hasValue = el.TryGetCurrentPattern(ValuePattern.Pattern, out p); }
+            catch (Exception ex) { return FailJson("UiaError", "TryGetCurrentPattern(ValuePattern) -> " + Describe(ex)); }
+
+            if (hasValue)
+            {
+                try
+                {
+                    ValuePattern vp = (ValuePattern)p;
+                    if (vp.Current.IsReadOnly)
+                        return FailJson("ReadOnly",
+                            "element " + index + " (" + role + ") is read-only; cannot set its value");
+
+                    try { el.SetFocus(); } catch { }     // Codex 也是先聚焦
+                    System.Threading.Thread.Sleep(40);
+
+                    vp.SetValue(value);
+                    return OkJson(hwnd, index, role, "ValuePattern", value);
+                }
+                catch (Exception ex)
+                {
+                    return FailJson("UiaError",
+                        "ValuePattern.SetValue failed on element " + index + " (" + role + "): " + Describe(ex));
+                }
+            }
+
+            // ② RangeValuePattern
+            bool hasRange = false;
+            try { hasRange = el.TryGetCurrentPattern(RangeValuePattern.Pattern, out p); }
+            catch (Exception ex) { return FailJson("UiaError", "TryGetCurrentPattern(RangeValuePattern) -> " + Describe(ex)); }
+
+            if (hasRange)
+            {
+                try
+                {
+                    RangeValuePattern rv = (RangeValuePattern)p;
+                    if (rv.Current.IsReadOnly)
+                        return FailJson("ReadOnly",
+                            "element " + index + " (" + role + ") is read-only (range); cannot set its value");
+
+                    double d;
+                    if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
+                                         System.Globalization.CultureInfo.InvariantCulture, out d))
+                        return FailJson("BadValue",
+                            "element " + index + " exposes RangeValuePattern; its value must be a number, got: " + value);
+
+                    double min = rv.Current.Minimum, max = rv.Current.Maximum;
+                    if (d < min || d > max)
+                        return FailJson("OutOfRange",
+                            "value " + d + " is outside the allowed range [" + min + ", " + max + "]");
+
+                    try { el.SetFocus(); } catch { }
+                    System.Threading.Thread.Sleep(40);
+
+                    rv.SetValue(d);
+                    return OkJson(hwnd, index, role, "RangeValuePattern", value);
+                }
+                catch (Exception ex)
+                {
+                    return FailJson("UiaError",
+                        "RangeValuePattern.SetValue failed on element " + index + " (" + role + "): " + Describe(ex));
+                }
+            }
+
+            // ③ 两条路都没有 —— 控件级限制，收敛到 Codex 的原话
+            return FailJson("NotSettable",
+                "Cannot set a value for an element that is not settable: element " + index +
+                " (" + role + ") implements neither ValuePattern nor RangeValuePattern. " +
+                "This is a control limitation, not a client problem — no LegacyIAccessible fallback is attempted.");
+        }
+
+        /// <summary>
+        /// do_action —— 触发元素的次要无障碍动作。**不经过输入注入。**
+        ///
+        /// 只接受七个标签（大小写不敏感），由 patterns 合成，与 Codex 一致：
+        ///   Raise / Scroll Up / Scroll Down / Scroll Left / Scroll Right / Expand / Collapse
+        ///
+        /// 刻意不走 MSAA 的 accDoDefaultAction，也不接受猜出来的动作名——
+        /// 动作名只能取自 tree 输出里的 Secondary Actions 列表。
+        /// </summary>
+        private static int CmdDoAction(string[] args)
+        {
+            RequireNotHalted("do_action");
+            if (args.Length < 3) throw new ArgumentException("do_action 需要 hwnd index action");
+            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            int index = int.Parse(args[2]);
+            string wanted = NormalizeAction(args[3]);
+
+            if (wanted == null)
+                return FailJson("BadAction",
+                    "unsupported secondary action: " + args[3] +
+                    "; expected Raise, Scroll Up, Scroll Down, Scroll Left, Scroll Right, Expand, or Collapse");
+
+            AutomationElement root = AutomationElement.FromHandle(hwnd);
+            if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
+
+            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1);
+            AutomationElement el;
+            if (!snap.Map.TryGetValue(index, out el))
+                return FailJson("StaleSnapshot",
+                    "element " + index + " is not present in window " + hwnd + "; re-read the tree");
+
+            List<string> available;
+            if (!snap.Actions.TryGetValue(index, out available) || available.Count == 0)
+                return FailJson("NoActions",
+                    "element " + index + " has no cached secondary actions for window " + hwnd);
+
+            if (!available.Contains(wanted))
+                return FailJson("ActionNotAvailable",
+                    "secondary action '" + wanted + "' is not available for element " + index +
+                    "; available actions: " + string.Join(", ", available.ToArray()));
+
+            string role = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
+
+            try
+            {
+                object p;
+
+                if (wanted == "Raise")
+                {
+                    if (!el.TryGetCurrentPattern(WindowPattern.Pattern, out p))
+                        return FailJson("PatternLost", "element " + index + " no longer exposes WindowPattern");
+                    // 置顶：先还原再前置，避免对已最小化的窗口直接 SetWindowVisualState 失败
+                    ((WindowPattern)p).SetWindowVisualState(WindowVisualState.Normal);
+                }
+                else if (wanted.StartsWith("Scroll "))
+                {
+                    if (!el.TryGetCurrentPattern(ScrollPattern.Pattern, out p))
+                        return FailJson("PatternLost", "element " + index + " no longer exposes ScrollPattern");
+                    ScrollPattern sp = (ScrollPattern)p;
+                    if (wanted == "Scroll Up") sp.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeDecrement);
+                    else if (wanted == "Scroll Down") sp.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeIncrement);
+                    else if (wanted == "Scroll Left") sp.Scroll(ScrollAmount.LargeDecrement, ScrollAmount.NoAmount);
+                    else sp.Scroll(ScrollAmount.LargeIncrement, ScrollAmount.NoAmount);
+                }
+                else
+                {
+                    if (!el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p))
+                        return FailJson("PatternLost", "element " + index + " no longer exposes ExpandCollapsePattern");
+                    ExpandCollapsePattern ec = (ExpandCollapsePattern)p;
+                    // ExpandCollapsePattern 的真实 API 是 Expand() / Collapse()，
+                    // 没有可写属性（反射确认过，别再凭记忆写）。
+                    if (wanted == "Expand") ec.Expand();
+                    else ec.Collapse();
+                }
+
+                Jw j = new Jw();
+                j.Obj().Key("ok").Bool(true)
+                    .Key("hwnd").Num(hwnd.ToInt64())
+                    .Key("index").Num(index)
+                    .Key("role").Val(role)
+                    .Key("action").Val(wanted)
+                    .Key("revision").Num(snap.Revision)
+                 .End();
+                Console.WriteLine(j.ToString());
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                return FailJson("UiaError",
+                    "secondary action '" + wanted + "' failed on element " + index + " (" + role + "): " + Describe(ex));
+            }
+        }
+
+        /// <summary>把输入的动作名规范化成七个标签之一；不认识返回 null。</summary>
+        private static string NormalizeAction(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return null;
+            string s = raw.Trim();
+            string[] canon = { "Raise", "Scroll Up", "Scroll Down", "Scroll Left", "Scroll Right", "Expand", "Collapse" };
+            foreach (string c in canon)
+                if (string.Equals(c, s, StringComparison.OrdinalIgnoreCase)) return c;
+            return null;
+        }
+
+        private static string Describe(Exception ex)
+        {
+            System.Runtime.InteropServices.COMException ce =
+                ex as System.Runtime.InteropServices.COMException;
+            if (ce != null)
+                return "COMException(0x" + ce.ErrorCode.ToString("X8") + "): " + ce.Message;
+            return ex.GetType().Name + ": " + ex.Message;
+        }
+
+        private static int OkJson(IntPtr hwnd, int index, string role, string via, string value)
+        {
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("hwnd").Num(hwnd.ToInt64())
+                .Key("index").Num(index)
+                .Key("role").Val(role)
+                .Key("via").Val(via)
+                .Key("value").Val(value)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        private static int FailJson(string code, string message)
+        {
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(false)
+                .Key("error").Val(code)
+                .Key("message").Val(message)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 1;
+        }
+
         private static int CmdType(string[] args)
         {
             RequireNotHalted("type");
@@ -795,68 +1047,40 @@ namespace Dsc
             AutomationElement root = AutomationElement.FromHandle(hwnd);
             if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
 
-            Elements.Clear();
-            _nextElementId = 1;
+            // 树文本、索引表、次要动作表全部来自这一次遍历——它们必须同源，
+            // 否则索引会和元素对不上号。
+            Snapshot snap = SnapshotOps.Capture(root, hwnd, maxNodes);
 
-            // 用 FindAll 一次性取整棵子树，而不是靠 TreeWalker 逐层下钻。
-            // TreeWalker 在部分应用（尤其打包应用/XAML 岛）上会在中途停住，
-            // 只拿到顶层几个 Pane；FindAll(Subtree) 取的是 UIA 视图的完整集合。
-            AutomationElementCollection all =
-                root.FindAll(TreeScope.Subtree, System.Windows.Automation.Condition.TrueCondition);
-
-            int total = all.Count;
-            int limit = Math.Min(total, maxNodes);
-
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < limit; i++)
+            // 附加：Document/Edit 的文本内容，纯文本模型靠它判读界面
+            StringBuilder extra = new StringBuilder();
+            foreach (KeyValuePair<int, AutomationElement> kv in snap.Map)
             {
-                AutomationElement el = all[i];
-                string id = Register(el);
-                string role = Safe(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
-                string name = Safe(delegate { return el.Current.Name; });
-                string value = Safe(delegate
-                {
-                    if (el.Current.IsPassword) return "<password>";
-                    return el.GetCurrentPropertyValue(ValuePattern.ValueProperty, true) as string;
-                });
-
-                Native.RECT r;
-                GetElementRect(el, out r);
-
-                sb.Append("- ").Append(role);
-                if (!string.IsNullOrEmpty(name)) sb.Append(" \"").Append(Trim(name, 90)).Append('"');
-                if (!string.IsNullOrEmpty(value)) sb.Append(" = \"").Append(Trim(value, 70)).Append('"');
-                sb.Append(" [").Append(id).Append(']');
-                if (r.Right > r.Left)
-                    sb.Append(" @(").Append(r.Left).Append(',').Append(r.Top).Append(' ')
-                      .Append(r.Right - r.Left).Append('x').Append(r.Bottom - r.Top).Append(')');
-                sb.Append('\n');
-
-                // 文本内容：纯文本模型靠它判读界面
+                string role = SnapshotOps.SafeStr(delegate { return kv.Value.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
+                if (role != "Document" && role != "Edit") continue;
                 try
                 {
-                    if (role == "Document" || role == "Edit")
+                    object o;
+                    if (kv.Value.TryGetCurrentPattern(TextPattern.Pattern, out o))
                     {
-                        object o;
-                        if (el.TryGetCurrentPattern(TextPattern.Pattern, out o))
-                        {
-                            string t = ((TextPattern)o).DocumentRange.GetText(500);
-                            if (!string.IsNullOrEmpty(t))
-                                sb.Append("    text: ").Append(Trim(t, 320)).Append('\n');
-                        }
+                        string t = ((TextPattern)o).DocumentRange.GetText(600);
+                        if (!string.IsNullOrEmpty(t))
+                            extra.Append("[").Append(kv.Key).Append("] text: ")
+                                 .Append(SnapshotOps.Trim(t, 400)).Append('\n');
                     }
                 }
                 catch { }
             }
-            if (total > limit) sb.Append("… 另有 ").Append(total - limit).Append(" 个元素未列出\n");
+
+            string tree = snap.Tree;
+            if (extra.Length > 0) tree = tree + "\n" + extra.ToString().TrimEnd();
 
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("hwnd").Num(hwnd.ToInt64())
-                .Key("view").Val("findall-subtree")
-                .Key("total").Num(total)
-                .Key("listed").Num(limit)
-                .Key("tree").Val(sb.ToString().TrimEnd())
+                .Key("revision").Num(snap.Revision)
+                .Key("total").Num(snap.Total)
+                .Key("listed").Num(snap.Listed)
+                .Key("tree").Val(tree)
              .End();
             Console.WriteLine(j.ToString());
             return 0;
