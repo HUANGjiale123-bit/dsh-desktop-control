@@ -20,6 +20,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Automation;
@@ -74,6 +75,12 @@ namespace Dsc
 
         [DllImport("user32.dll")]
         public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, IntPtr dwExtraInfo);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        public const uint KEYEVENTF_KEYUP = 0x0002;
+        public const uint KEYEVENTF_UNICODE = 0x0004;
 
         public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
@@ -131,6 +138,49 @@ namespace Dsc
 
     internal static class Program
     {
+        /// <summary>
+        /// 急停闸门文件。
+        ///
+        /// 存在即表示用户按下了 ESC，此时**所有变更性动作一律拒绝**。
+        /// 观察类操作不受影响——急停的目的是停手，不是把眼睛也蒙上。
+        ///
+        /// 放在 %LOCALAPPDATA% 下，与其他用户数据同处一地。
+        /// </summary>
+        private static string GatePath()
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "dsh-desktop-control");
+            return Path.Combine(dir, "halt");
+        }
+
+        private static bool IsHalted()
+        {
+            try { return File.Exists(GatePath()); }
+            catch { return false; }
+        }
+
+        private static void EnsureHalt(string reason)
+        {
+            try
+            {
+                string p = GatePath();
+                Directory.CreateDirectory(Path.GetDirectoryName(p));
+                File.WriteAllText(p, reason + Environment.NewLine +
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine);
+            }
+            catch { }
+        }
+
+        /// <summary>变更性动作的统一入口：先过急停闸门。</summary>
+        private static void RequireNotHalted(string action)
+        {
+            if (!IsHalted()) return;
+            throw new InvalidOperationException(
+                "已被急停：闸门文件存在（" + GatePath() + "），拒绝执行 " + action + "。" +
+                "确认安全后用 `dsc.exe stop --clear` 解除。");
+        }
+
         /// <summary>本进程内的元素引用表：短 id → 无障碍元素。</summary>
         private static readonly Dictionary<string, AutomationElement> Elements =
             new Dictionary<string, AutomationElement>(StringComparer.Ordinal);
@@ -152,6 +202,10 @@ namespace Dsc
                     case "screenshot": return CmdScreenshot(args);
                     case "click": return CmdClick(args);
                     case "click_element": return CmdClickElement(args);
+                    case "type": return CmdType(args);
+                    case "press_key": return CmdPressKey(args);
+                    case "halt": return CmdHalt(args);
+                    case "stop": return CmdStop();
                     case "ping": return CmdPing();
                     default: return CmdHelp();
                 }
@@ -185,8 +239,49 @@ namespace Dsc
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("dpiAware").Bool(true)
+                .Key("halted").Bool(IsHalted())
+                .Key("gatePath").Val(GatePath())
                 .Key("clr").Val(Environment.Version.ToString())
                 .Key("os").Val(Environment.OSVersion.VersionString)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 拉起急停闸门。
+        ///
+        /// 用法：dsc.exe halt [原因]
+        /// 之后所有变更性动作（点击/输入/按键）一律失败，直到 stop --clear。
+        /// </summary>
+        private static int CmdHalt(string[] args)
+        {
+            string reason = args.Length > 1 ? args[1] : "由调用方触发";
+            EnsureHalt(reason);
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("halted").Bool(true)
+                .Key("gatePath").Val(GatePath())
+                .Key("reason").Val(reason)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>解除急停闸门。用法：dsc.exe stop --clear</summary>
+        private static int CmdStop()
+        {
+            bool cleared = false;
+            try
+            {
+                if (File.Exists(GatePath())) { File.Delete(GatePath()); cleared = true; }
+            }
+            catch { }
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("halted").Bool(IsHalted())
+                .Key("cleared").Bool(cleared)
+                .Key("gatePath").Val(GatePath())
              .End();
             Console.WriteLine(j.ToString());
             return 0;
@@ -248,6 +343,7 @@ namespace Dsc
         /// </summary>
         private static int CmdClick(string[] args)
         {
+            RequireNotHalted("click");
             if (args.Length < 3) throw new ArgumentException("click 需要 x y 参数（桌面绝对物理像素）");
             int x = int.Parse(args[1]);
             int y = int.Parse(args[2]);
@@ -333,6 +429,7 @@ namespace Dsc
         /// </summary>
         private static int CmdClickElement(string[] args)
         {
+            RequireNotHalted("click_element");
             if (args.Length < 3) throw new ArgumentException("click_element 需要 hwnd 与描述符");
             IntPtr hwnd = new IntPtr(long.Parse(args[1]));
             string desc = args[2];
@@ -432,6 +529,106 @@ namespace Dsc
                 try { child = TreeWalker.ControlViewWalker.GetNextSibling(child); } catch { break; }
             }
             return null;
+        }
+
+        /// <summary>
+        /// 输入一段文本。
+        ///
+        /// 走 KEYEVENTF_UNICODE：直接投递 UTF-16 码元，因此中文、emoji 都能进，
+        /// 也不受键盘布局影响。比"切成虚拟键码再模拟按键"可靠得多——
+        /// 中文没有对应的虚拟键码，那条路根本走不通。
+        ///
+        /// 字符成对发送（按下 + 抬起）。
+        /// </summary>
+        private static int CmdType(string[] args)
+        {
+            RequireNotHalted("type");
+            if (args.Length < 2) throw new ArgumentException("type 需要文本参数");
+            string text = args[1];
+
+            foreach (char c in text)
+            {
+                Native.keybd_event(0, (byte)c, Native.KEYEVENTF_UNICODE, UIntPtr.Zero);
+                Native.keybd_event(0, (byte)c, Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                System.Threading.Thread.Sleep(12);
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true).Key("typed").Num(text.Length).Key("text").Val(text).End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 发送组合键，形如 Ctrl+S、Alt+Tab、Enter。
+        ///
+        /// 先把所有修饰键按下，再按主键，然后逆序抬起——这个顺序是必须的，
+        /// 打乱会让应用把 Ctrl+S 读成普通的 s。
+        /// </summary>
+        private static int CmdPressKey(string[] args)
+        {
+            RequireNotHalted("press_key");
+            if (args.Length < 2) throw new ArgumentException("press_key 需要按键参数");
+            string[] parts = args[1].Split('+');
+            List<byte> mods = new List<byte>();
+            byte main = 0;
+
+            foreach (string raw in parts)
+            {
+                string p = raw.Trim();
+                if (p.Length == 0) continue;
+                string low = p.ToLowerInvariant();
+                byte vk;
+
+                if (low == "ctrl" || low == "control") vk = 0x11;
+                else if (low == "alt") vk = 0x12;
+                else if (low == "shift") vk = 0x10;
+                else if (low == "win") vk = 0x5B;
+                else if (low == "enter" || low == "return") vk = 0x0D;
+                else if (low == "tab") vk = 0x09;
+                else if (low == "esc" || low == "escape") vk = 0x1B;
+                else if (low == "space") vk = 0x20;
+                else if (low == "backspace") vk = 0x08;
+                else if (low == "delete" || low == "del") vk = 0x2E;
+                else if (low == "up") vk = 0x26;
+                else if (low == "down") vk = 0x28;
+                else if (low == "left") vk = 0x25;
+                else if (low == "right") vk = 0x27;
+                else if (low == "home") vk = 0x24;
+                else if (low == "end") vk = 0x23;
+                else if (low == "f5") vk = 0x74;
+                else if (p.Length == 1)
+                {
+                    char ch = char.ToUpperInvariant(p[0]);
+                    vk = (byte)ch;
+                }
+                else throw new ArgumentException("不认识的按键：" + p);
+
+                if (low == "ctrl" || low == "control" || low == "alt" || low == "shift" || low == "win")
+                    mods.Add(vk);
+                else
+                    main = vk;
+            }
+            if (main == 0) throw new ArgumentException("只给了修饰键，缺少主键：" + args[1]);
+
+            foreach (byte m in mods)
+            {
+                Native.keybd_event(m, 0, 0, UIntPtr.Zero);
+                System.Threading.Thread.Sleep(20);
+            }
+            Native.keybd_event(main, 0, 0, UIntPtr.Zero);
+            System.Threading.Thread.Sleep(40);
+            Native.keybd_event(main, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            for (int i = mods.Count - 1; i >= 0; i--)
+            {
+                System.Threading.Thread.Sleep(20);
+                Native.keybd_event(mods[i], 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true).Key("chord").Val(args[1]).End();
+            Console.WriteLine(j.ToString());
+            return 0;
         }
 
         private static string WindowTitle(IntPtr h)

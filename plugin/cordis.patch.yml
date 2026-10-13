@@ -1,0 +1,15 @@
+- insert:
+    - id: desktop-control
+      name: dsh-desktop-control
+      # inject 必须写在这里：loader 从条目选项填充注入表，模块导出不生效。
+      inject: ["tools"]
+      config:
+        # 辅助进程的绝对路径。插件装进 profile 后按自身位置找不到它，
+        # 因此必须显式指定，或用环境变量 DSC_HELPER 覆盖。
+        helperPath: "D:\\dsh workspace\\dsh-desktop-control\\helper\\bin\\dsc.exe"
+        # 截图输出目录（绝对路径，避免按宿主进程 cwd 解析而落到 C 盘）。
+        shotDir: "D:\\dsh workspace\\dsh-desktop-control\\.cache\\shots"
+        # 应用白名单，默认为空——只能观察，任何操作都会被拒绝。
+        # 放行某个应用即表示允许助手在该应用内自由操作。示例：
+        # allowedApps: ["notepad.exe"]
+        allowedApps: []
