@@ -284,6 +284,62 @@ namespace Dsc
         }
 
         /// <summary>变更性动作的统一入口：先过急停闸门。</summary>
+        /* ── AppContainer 自检 ──
+         *
+         * AppContainer 进程被 Windows 禁止向交互式桌面注入输入。症状是**静默的**：
+         * SendInput 返回成功、SetCursorPos 可能返回 False、光标不动、**没有任何报错**。
+         *
+         * 本项目已经吃过一次这个亏：把一次观察推广成"本环境阻断输入注入"，
+         * 写进 README，结果把两个真 bug 都"解释"掉了。
+         * 所以启动时直接查自己的令牌，是 AppContainer 就明确报错退出，
+         * 别让同样的静默失败再伪装成环境限制。
+         *
+         * 依据：Codex 复核（2026-10-14）——它在自己的环境里测得 IsAppContainer=1，
+         * 并判定这是注入无效的最可能根因（它标注为最强假设而非已证因果）。
+         */
+        private static bool? _isAppContainer;
+
+        // OpenProcessToken / GetTokenInformation 的声明在下面完整性检查那一段，
+        // 这里复用，不重复声明（C# 会报 CS0111 重复成员）。
+
+        private static bool IsAppContainer()
+        {
+            if (_isAppContainer.HasValue) return _isAppContainer.Value;
+            _isAppContainer = false;
+            IntPtr tok = IntPtr.Zero, buf = IntPtr.Zero;
+            try
+            {
+                if (!OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle,
+                                      TOKEN_QUERY, out tok)) return false;
+                buf = Marshal.AllocHGlobal(64);
+                int ret;
+                if (GetTokenInformation(tok, 29 /*TokenIsAppContainer*/, buf, 64, out ret))
+                    _isAppContainer = Marshal.ReadInt32(buf) != 0;
+            }
+            catch { }
+            finally
+            {
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+                if (tok != IntPtr.Zero) Native.CloseHandle(tok);
+            }
+            return _isAppContainer.Value;
+        }
+
+        /// <summary>
+        /// 在 AppContainer 里就拒绝执行注入类命令。
+        /// 注意：读类命令（list_windows / tree / screenshot）不受影响，它们不需要注入。
+        /// </summary>
+        private static void RequireNotAppContainer(string action)
+        {
+            if (!IsAppContainer()) return;
+            throw new InvalidOperationException(
+                "本进程运行在 AppContainer（沙箱）里，Windows 禁止由此向交互式桌面注入输入，拒绝执行 " +
+                action + "。症状是静默的：SendInput 会返回成功但光标不动、按键不进任何程序。" +
+                "常见原因：helper 是从 Codex/ChatGPT 会话的终端启动的，继承了它的沙箱。" +
+                "解决办法：从普通的命令提示符或快捷方式启动，不要从沙箱会话里启动。" +
+                "（观察类命令不受此限制。）");
+        }
+
         private static void RequireNotHalted(string action)
         {
             if (!IsHalted()) return;
@@ -500,6 +556,7 @@ namespace Dsc
         /// </summary>
         private static void RequireActivated(IntPtr hwnd, string action)
         {
+            RequireNotAppContainer(action);
             RequireIntegrityOk(hwnd, action);
 
             WindowActivator.Result r = WindowActivator.Activate(hwnd);
