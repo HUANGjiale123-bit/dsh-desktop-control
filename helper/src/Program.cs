@@ -54,6 +54,24 @@ namespace Dsc
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
+
+        /* ── 输入桌面绑定 ──
+         * 本机实测：进程可能在"名字叫 Default、但不是当前输入桌面"的桌面上启动
+         * （GetThreadDesktop=300 vs OpenInputDesktop=696），此时 SetCursorPos 报
+         * Win32 错误 2、SendInput 静默无效、低层钩子永不回调——因为输入不在那个桌面上。
+         * 修复：进程启动最早期 SetThreadDesktop(输入桌面)。
+         * 顺序是硬要求：一旦本线程建过窗口或装过钩子，SetThreadDesktop 必然失败。 */
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetThreadDesktop(uint tid);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SetThreadDesktop(IntPtr h);
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
+        public const uint DESKTOP_READOBJECTS = 0x0001;
+        public const uint DESKTOP_WRITEOBJECTS = 0x0080;
+        public const uint DESKTOP_SWITCHDESKTOP = 0x0100;
         [DllImport("user32.dll")]
         public static extern IntPtr WindowFromPoint(POINT p);
         [DllImport("user32.dll")]
@@ -281,6 +299,21 @@ namespace Dsc
         /// <summary>白名单：小写可执行文件名。来源是 --allow 参数或 DSC_ALLOWED_APPS 环境变量。</summary>
         private static string[] _allowlist;
 
+        /* ── 关于「绑定输入桌面」的实测记录（结论：不要做）──
+         *
+         * 曾观察到 GetThreadDesktop(tid)=328 与 OpenInputDesktop()=704 句柄不同，
+         * 据此推测进程在错误的桌面上，于是加了 BindInputDesktop() ——
+         * 在任何 COM/UIA 调用之前 SetThreadDesktop(输入桌面)。
+         *
+         * 实测（dsc-bindverify.exe）：
+         *   绑定前  SendInput 返回 1（被接受），光标位移 (0,0)   ← 无效但被接受
+         *   绑定后  SendInput 返回 0，err=5 拒绝访问            ← 更糟
+         *
+         * 所以绑定不是解药，反而有害，已移除。
+         * 另一个独立事实：句柄值不同**不能**推出桌面对象不同（同一桌面可以有两个句柄），
+         * 当时把它当成了证据，这是推断上的错误。
+         */
+
         private static string[] Allowlist()
         {
             if (_allowlist == null)
@@ -384,6 +417,11 @@ namespace Dsc
         {
             _argsRaw = args;
             Native.SetProcessDPIAware();   // ★ 必须先于任何窗口/坐标 API
+
+            // 注：曾在此处调用 BindInputDesktop() 想切到当前输入桌面。
+            // 实测撤销：SetThreadDesktop 确实成功（句柄从 328 变成 704），
+            // 但注入反而从"返回成功但无效"退化成"返回 0 + 拒绝访问(5)"。
+            // 即"修复"比不修更糟，故移除。桌面句柄不同不构成本次注入失败的原因。
             Console.OutputEncoding = Encoding.UTF8;
 
             // 剥掉全局选项（--allow x），它们可能出现在命令名之前。
