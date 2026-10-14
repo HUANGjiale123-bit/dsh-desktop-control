@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.4.0'
+const PLUGIN_VERSION = '0.5.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -183,6 +183,22 @@ function applyInner(ctx, config = {}) {
   const bundledEdge = join(pluginDir, 'bin', 'dsc-edge.exe')
   const repoEdge = join(pluginDir, '..', 'helper', 'bin', 'dsc-edge.exe')
   const edgePath = config.edgePath ?? (existsSync(bundledEdge) ? bundledEdge : repoEdge)
+
+  const bundledEsc = join(pluginDir, 'bin', 'dsc-esc.exe')
+  const repoEsc = join(pluginDir, '..', 'helper', 'bin', 'dsc-esc.exe')
+  const escPath = config.escPath ?? (existsSync(bundledEsc) ? bundledEsc : repoEsc)
+
+  /**
+   * 急停闸门路径。
+   *
+   * **必须显式指定**，不能靠 dsc-esc.exe / dsc.exe 各自从 exe 位置去推——
+   * 两个 exe 位置不同，推出来的路径可能不一致，那就成了"ESC 写了 A、
+   * dsc.exe 检查 B"，看起来像"按了 ESC 没反应"。
+   *
+   * 指向会话工作区的 .state 下：那是 dsc.exe 一定写得进去的位置
+   * （沙箱只放行工作区，插件又总是从工作区启动）。
+   */
+  const gatePath = config.gatePath ?? join(process.cwd(), '.state', 'halt')
 
   // 如果 helper 落在工作区目录里，明确警告。这不是风格问题：
   // 那种情况下鼠标/键盘注入会静默失效，而且没有任何报错。
@@ -430,15 +446,23 @@ function applyInner(ctx, config = {}) {
 
   const liveOverlays = new Map()   // key -> ChildProcess
 
-  function startIndicator(key, args) {
-    if (!existsSync(edgePath)) return { ok: false, reason: `找不到指示层程序：${edgePath}` }
+  function startIndicator(key, args, prog) {
+    const exe = prog ?? edgePath
+    if (!existsSync(exe)) return { ok: false, reason: `找不到程序：${exe}` }
 
     const prev = liveOverlays.get(String(key))
     if (prev && prev.exitCode === null) {
       try { prev.kill() } catch { }
     }
 
-    const child = spawn(edgePath, args, { windowsHide: false, detached: false, stdio: 'ignore' })
+    // DSC_HALT_GATE 交给子进程：闸门路径必须由插件统一决定，
+    // 不能让它自己从 exe 位置去推（dsc-esc 和 dsc-edge 位置不同，
+    // 推出来的可能不是同一个文件，那就成了"ESC 写了 A、dsc.exe 查 B"）。
+    const env = { ...process.env, DSC_HALT_GATE: gatePath }
+
+    const child = spawn(exe, args, {
+      windowsHide: false, detached: false, stdio: 'ignore', env,
+    })
     child.on('exit', () => { if (liveOverlays.get(String(key)) === child) liveOverlays.delete(String(key)) })
     child.on('error', () => { liveOverlays.delete(String(key)) })
     liveOverlays.set(String(key), child)
@@ -553,25 +577,36 @@ function applyInner(ctx, config = {}) {
     },
     async execute(args) {
       const label = args.label ?? '已激活'
-      // --escape 让逃生窗跟指示层一起起来。
-      //
-      // 为什么必须有它：本环境实测**低层键盘钩子不触发**（装得上、句柄非零、
-      // 消息循环正常、回调一次都不来），所以"按 ESC 停"不可靠。
-      // 没有逃生窗就等于"用户只能看着，停不下来"——那不算 computer use。
-      // 指示层负责"看得见"，逃生窗负责"停得下来"，两件事缺一不可。
-      const childArgs = ['--label', label, '--escape']
-      if (args.timeoutMs > 0) childArgs.push('--timeout', String(args.timeoutMs))
 
-      const r = startIndicator('indicator', childArgs)
-      if (!r.ok) throw new Error(r.reason)
+      // ① 边缘光带：屏幕四边的粒子光带，指示层。
+      const edgeArgs = ['--label', label]
+      if (args.timeoutMs > 0) edgeArgs.push('--timeout', String(args.timeoutMs))
+      const r1 = startIndicator('indicator', edgeArgs, edgePath)
+
+      // ② 逃生条 + ESC 捕获。
+      //
+      // 这两件事天然是同一件事：低层键盘钩子要求宿主进程有一个**可见且
+      // 被激活过**的窗口（实测：无窗口 0 次、隐藏窗口 0 次、可见但从未激活
+      // 0 次、可见并激活过一次之后稳定触发），而"逃生条"正好就是这个窗口。
+      // 所以它既显示状态，又负责在物理 ESC 按下时结束 computer use。
+      //
+      // 为什么必须有 ESC：鼠标可以被恶意程序抢（抢焦点、全屏覆盖、伪造点击），
+      // 键盘不行——低层钩子在系统把按键投递给任何窗口之前就能看到它。
+      // 所以"点按钮停"是方便，**"按 ESC 停"才是保险**。
+      const r2 = startIndicator('escape', [gatePath], escPath)
+
+      if (!r1.ok && !r2.ok) throw new Error(r1.reason)
+
+      const parts = []
+      if (r1.ok) parts.push('屏幕边缘的状态光带')
+      if (r2.ok) parts.push('屏幕上方的逃生条（按 ESC 或点它都能立刻停止）')
+      else parts.push(`逃生条启动失败（${r2.reason}）——此时只剩鼠标这条停止路径`)
+
       return {
         result:
-          '已在整屏边缘显示 computer use 状态指示层，并在屏幕中央显示逃生窗。' +
-          '点逃生窗上的"停止"按钮、或直接关掉那个窗口，都会立即停止' +
-          '（拉下急停闸门，此后所有变更性操作被拒绝）。' +
-          (args.timeoutMs > 0
-            ? `${args.timeoutMs} 毫秒后指示层自动消失。`
-            : '将常驻显示，直到调用 desktop_off 关闭。'),
+          `computer use 状态已开启：${parts.join('、')}。\n` +
+          `两种停止方式：**按物理 ESC 键**，或点逃生条上的文字。` +
+          (args.timeoutMs > 0 ? `\n${args.timeoutMs} 毫秒后自动消失。` : ''),
       }
     },
     presentCall: () => ({ card: 'generic', title: '显示 computer use 状态指示', kind: 'read' }),

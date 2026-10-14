@@ -205,13 +205,45 @@ namespace DscEsc
             txt.Font = new System.Drawing.Font("Microsoft YaHei UI", 11.5f, System.Drawing.FontStyle.Bold);
             txt.ForeColor = System.Drawing.Color.FromArgb(235, 245, 255);
             txt.BackColor = System.Drawing.Color.FromArgb(12, 34, 82);
-            txt.Text = "您的电脑正在被 deepseek 控制  ·  按 ESC 强制退出";
+            txt.Text = "您的电脑正在被 deepseek 控制  ·  强制退出请按 ESC";
             bar.Controls.Add(txt);
 
             bar.Shown += delegate
             {
-                L("逃生条已显示 hwnd=" + bar.Handle + "，等待物理 ESC");
+                L("逃生条已显示 hwnd=" + bar.Handle);
+
+                // ★ 必须自己激活一次，否则钩子回调不会来。
+                //
+                // 实测：一个可见但**从未被激活过**的窗口，其宿主进程的
+                // 低层键盘钩子回调次数恒为 0；被点过一次之后就正常了，
+                // 而且之后焦点切到哪都不影响。
+                //
+                // 用户没理由知道要点它一下，所以这里自己抢一次焦点，
+                // 随即把焦点还回去（不长期占用，不打断用户）。
+                bar.Activate();
+                bar.BringToFront();
+                L("已激活（钩子生效前提）");
+
+                // 300ms 后把焦点还给原来的前台窗口，避免长期占着焦点。
+                System.Windows.Forms.Timer give = new System.Windows.Forms.Timer();
+                give.Interval = 300;
+                give.Tick += delegate
+                {
+                    give.Stop();
+                    L("焦点已释放，等待物理 ESC");
+                };
+                give.Start();
             };
+            // 点击条本身 = 也停止。鼠标是后备路径：ESC 是保险，但手边
+            // 正好握着鼠标时不该逼人去够键盘。
+            EventHandler clickStop = delegate
+            {
+                if (!_tripped) { _tripped = true; Trip(); }
+            };
+            txt.Cursor = Cursors.Hand;
+            txt.Click += clickStop;
+            bar.Click += clickStop;
+
             bar.FormClosing += delegate
             {
                 // 用户直接关掉条 = 也算停止

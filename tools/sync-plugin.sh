@@ -38,7 +38,7 @@ cp "$REPO/server/toolset.mjs" "$SRC/toolset.mjs"
 echo "① server/toolset.mjs → plugin/toolset.mjs"
 
 # ② 辅助程序：helper/bin → plugin/bin
-for exe in dsc.exe dsc-edge.exe; do
+for exe in dsc.exe dsc-edge.exe dsc-esc.exe; do
   if [ -f "$REPO/helper/bin/$exe" ]; then
     mkdir -p "$SRC/bin"
     cp "$REPO/helper/bin/$exe" "$SRC/bin/$exe"
@@ -53,7 +53,7 @@ mkdir -p "$DEST/bin"
 for f in index.mjs toolset.mjs cordis.patch.yml package.json; do
   cp "$SRC/$f" "$DEST/$f"
 done
-for exe in dsc.exe dsc-edge.exe; do
+for exe in dsc.exe dsc-edge.exe dsc-esc.exe; do
   [ -f "$SRC/bin/$exe" ] && cp "$SRC/bin/$exe" "$DEST/bin/$exe"
 done
 echo "③ 已同步到 $DEST"
@@ -62,7 +62,7 @@ echo
 # ④ 校验：源与目标逐文件比对
 echo "校验（源 ↔ 目标）："
 fail=0
-for f in index.mjs toolset.mjs cordis.patch.yml package.json bin/dsc.exe bin/dsc-edge.exe; do
+for f in index.mjs toolset.mjs cordis.patch.yml package.json bin/dsc.exe bin/dsc-edge.exe bin/dsc-esc.exe; do
   a=$(md5sum "$SRC/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   b=$(md5sum "$DEST/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   if [ "$a" = "$b" ] && [ "$a" != "missing" ]; then

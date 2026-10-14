@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-control",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Desktop observation and control for DeepSeek Harness on Windows: read a window's accessibility tree, capture it, click and type. Application allowlist, empty by default.",
   "type": "module",
   "main": "index.mjs",
@@ -14,7 +14,8 @@
     "toolset.mjs",
     "cordis.patch.yml",
     "bin/dsc.exe",
-    "bin/dsc-edge.exe"
+    "bin/dsc-edge.exe",
+    "bin/dsc-esc.exe"
   ],
   "keywords": [
     "dsh-plugin",
