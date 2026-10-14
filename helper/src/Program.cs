@@ -391,20 +391,22 @@ namespace Dsc
         /// 焦点跑偏时文本会打进别的程序——那既是错误操作，也可能泄露内容。
         /// 所以先确认焦点在目标窗口上，不确认就不发。
         /// </summary>
-        private static void RequireFocus(IntPtr hwnd, string action)
+        /// <summary>
+        /// 注入前把目标窗口激活到前台，失败即拒绝。
+        ///
+        /// 为什么是"拒绝"而不是"尽力而为"：实测在非前台状态下注入会进入
+        /// 合成输入被系统压制的状态——SendInput 返回成功、光标不动、没有报错。
+        /// 那比明确失败危险得多。Codex 的做法也是先激活，激活是输入的前置条件。
+        ///
+        /// 覆盖注：本方法取代了原先只做"检查 + 一次性尝试"的 RequireFocus。
+        /// 区别在于 RequireFocus 不还原最小化窗口、不用 AttachThreadInput，
+        /// 也不在失败时说明清楚为什么不继续。
+        /// </summary>
+        private static void RequireActivated(IntPtr hwnd, string action)
         {
-            IntPtr fg = Native.GetForegroundWindow();
-            if (fg == hwnd) return;
-
-            // 尝试激活一次，然后复查
-            Native.SetForegroundWindow(hwnd);
-            System.Threading.Thread.Sleep(180);
-
-            fg = Native.GetForegroundWindow();
-            if (fg != hwnd)
-                throw new InvalidOperationException(
-                    "窗口 " + hwnd + " 不是前台窗口（当前前台是 " + fg + "），拒绝执行 " + action +
-                    "——输入会发到当前焦点窗口，可能打进别的程序。请先把目标窗口切到前台。");
+            WindowActivator.Result r = WindowActivator.Activate(hwnd);
+            if (r.Ok) return;
+            throw new InvalidOperationException("拒绝执行 " + action + "：" + r.Message);
         }
 
         /// <summary>本进程内的元素引用表：短 id → 无障碍元素。</summary>
@@ -633,6 +635,9 @@ namespace Dsc
                 throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口，拒绝点击。");
             RequireAllowedWindow(root, "click");
 
+            // 注入前必须激活：非前台状态下注入会被系统压制（实测）。
+            RequireActivated(root, "click");
+
             MoveCursorAbsolute(x, y);
             SendMouseButton(right, 1);
 
@@ -710,6 +715,9 @@ namespace Dsc
             string desc = args[2];
             bool right = args.Length > 3 && args[3] == "right";
 
+            // 注入前必须激活：非前台状态下注入会被系统压制（实测）。
+            RequireActivated(hwnd, "click_element");
+
             Dictionary<string, string> want = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (string part in desc.Split('/'))
             {
@@ -727,8 +735,38 @@ namespace Dsc
 
             Native.RECT r;
             GetElementRect(found, out r);
-            if (r.Right <= r.Left || r.Bottom <= r.Top)
-                throw new InvalidOperationException("匹配到的元素没有有效矩形，无法点击：" + desc);
+
+            // 最小化窗口的矩形是哨兵值（约 -32000 起，实测见到 -47976）。
+            // 那种情况下宽高可能仍是正常值，只判断宽高会算出荒唐的点击坐标。
+            //
+            // 即使已在前面激活过窗口，UIA 的坐标也可能还没跟上（刚还原时树要一点时间稳定），
+            // 所以这里按 Codex 的恢复流程重试一次：等待 → 重新定位 → 重新取矩形。
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                bool rectOk = !(r.Right <= r.Left || r.Bottom <= r.Top) &&
+                              r.Left > -30000 && r.Top > -30000 &&
+                              r.Left < 32000 && r.Top < 32000;
+                if (rectOk) break;
+
+                if (attempt == 0)
+                {
+                    // 重新激活并等待界面稳定，然后按描述符重新定位元素。
+                    // 等待时间取 800ms：实测 400ms 时 UIA 仍在报最小化的哨兵矩形，
+                    // 窗口从最小化还原到 UIA 更新坐标需要的时间比预期长。
+                    RequireActivated(hwnd, "click_element");
+                    System.Threading.Thread.Sleep(800);
+                    RequireActivated(hwnd, "click_element");   // 再确认一次前台
+                    AutomationElement again = FindByDescriptor(root, want, 0, 4000);
+                    if (again != null) { found = again; GetElementRect(found, out r); }
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        "元素矩形无效（" + r.Left + "," + r.Top + " " +
+                        (r.Right - r.Left) + "x" + (r.Bottom - r.Top) + "）。" +
+                        "已尝试重新激活并重新定位一次仍失败，通常是窗口仍处于最小化或不可见状态：" + desc);
+                }
+            }
 
             int cx = (r.Left + r.Right) / 2;
             int cy = (r.Top + r.Bottom) / 2;
@@ -833,6 +871,10 @@ namespace Dsc
 
             // 在同一次调用内重新抓一份快照再写：一次性进程模型下跨调用持不住快照，
             // 所以"索引仍然有效"只能靠这次重新绑定保证。
+            // set_value 走 UIA 不注入，但内部要 SetFocus；在非前台窗口上聚焦可能无效，
+            // 因此同样先激活（与 Codex 的"输入类方法自动激活"一致）。
+            RequireActivated(hwnd, "set_value");
+
             if (index < 0)
                 return FailJson("BadIndex", "element index must be >= 0, got " + index);
 
@@ -1124,7 +1166,7 @@ namespace Dsc
             if (args.Length < 3) throw new ArgumentException("type 需要 hwnd 与文本参数");
             IntPtr typeHwnd = new IntPtr(long.Parse(args[1]));
             RequireAllowedWindow(typeHwnd, "type");
-            RequireFocus(typeHwnd, "type");
+            RequireActivated(typeHwnd, "type");
             string text = args[2];
 
             // 用 SendInput + KEYEVENTF_UNICODE，不用 keybd_event。
@@ -1178,7 +1220,7 @@ namespace Dsc
             if (args.Length < 3) throw new ArgumentException("press_key 需要 hwnd 与按键参数");
             IntPtr keyHwnd = new IntPtr(long.Parse(args[1]));
             RequireAllowedWindow(keyHwnd, "press_key");
-            RequireFocus(keyHwnd, "press_key");
+            RequireActivated(keyHwnd, "press_key");
             string[] parts = args[2].Split('+');
             List<byte> mods = new List<byte>();
             byte main = 0;

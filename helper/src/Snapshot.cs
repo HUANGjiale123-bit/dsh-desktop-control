@@ -206,7 +206,14 @@ namespace Dsc
                 try
                 {
                     System.Windows.Rect b = el.Current.BoundingRectangle;
-                    if (!double.IsInfinity(b.Left) && !double.IsNaN(b.Left) && b.Width > 0)
+                    // 最小化窗口的矩形是哨兵值（约 -32000 起，实测见到 -47976），
+                    // 只判断 Width>0 会把这种无效矩形当成有效坐标渲染出去，
+                    // 后续按它点击就会算出荒唐的坐标。这里一并排除。
+                    bool plausible = !double.IsInfinity(b.Left) && !double.IsNaN(b.Left)
+                                     && b.Width > 0 && b.Height > 0
+                                     && b.Left > -30000 && b.Top > -30000
+                                     && b.Left < 32000 && b.Top < 32000;
+                    if (plausible)
                     {
                         left = (int)b.Left; top = (int)b.Top;
                         w = (int)b.Width; h = (int)b.Height;

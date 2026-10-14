@@ -76,7 +76,8 @@ echo "编译 dsc.exe ..."
     -r:"$FW/WPF/UIAutomationTypes.dll" \
     -r:"$FW/WPF/WindowsBase.dll" \
     'src\Program.cs' \
-    'src\Snapshot.cs'
+    'src\Snapshot.cs' \
+    'src\Activate.cs'
 
 # 按键读取能力探测工具（诊断用，不参与日常操作）
 echo
