@@ -249,12 +249,28 @@ namespace Dsc
             string fromEnv = Environment.GetEnvironmentVariable("DSC_HALT_GATE");
             if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
 
-            // AppContext.BaseDirectory = 可执行文件所在目录
+            // 闸门位置不能简单地从 exe 位置往上推。
+            //
+            // 实测：helper 部署到 %LOCALAPPDATA%\dsh-desktop-control\ 之后，
+            // "往上两级"会算成 %LOCALAPPDATA%\.state\halt —— 在用户目录根下建了
+            // 一个 .state 目录，既脏又不利于排查。
+            //
+            // 改为确定性优先级：
+            //   1. DSC_HALT_GATE 环境变量（部署时指定，最可靠）
+            //   2. 由 exe 位置推出的仓库根，**仅当该处确实有项目标记**时才用
+            //   3. 否则退回 exe 自己所在目录（不污染上级）
+            // 这样无论 helper 放在哪里，闸门位置都是可预测的。
             string binDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
-            string root = Path.GetDirectoryName(binDir);      // helper\bin -> helper
-            if (!string.IsNullOrEmpty(root)) root = Path.GetDirectoryName(root);  // helper -> 仓库根
-            if (string.IsNullOrEmpty(root)) root = binDir;
-            return Path.Combine(root, ".state", "halt");
+            string root = Path.GetDirectoryName(binDir);
+            if (!string.IsNullOrEmpty(root)) root = Path.GetDirectoryName(root);
+
+            // 项目标记：仓库根下应当同时存在 helper 与 plugin 两个目录
+            if (!string.IsNullOrEmpty(root) &&
+                Directory.Exists(Path.Combine(root, "helper")) &&
+                Directory.Exists(Path.Combine(root, "plugin")))
+                return Path.Combine(root, ".state", "halt");
+
+            return Path.Combine(binDir, ".state", "halt");
         }
 
         private static bool IsHalted()
