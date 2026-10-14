@@ -297,6 +297,36 @@ export function createDesktopToolset(options = {}) {
     },
 
     async click({ hwnd, x, y, button }) {
+      /* 先做范围检查，再走授权。
+       *
+       * 顺序很重要：点击是**桌面绝对坐标**，而 authorize 只按 hwnd 校验。
+       * 于是会出现"hwnd 是记事本、坐标却在 DSH 窗口里"这种组合——
+       * 授权白问了用户一次，然后被 helper 的 WindowFromPoint 挡掉。
+       * 实测遇到过：白名单里因此多出一个用户其实没打算放行的应用。
+       *
+       * 所以这里先用 list_windows 拿到该窗口的矩形做范围检查，
+       * 坐标不在窗口内就直接拒绝，并且**不触发授权询问**。
+       */
+      const pre = await runHelper(['list_windows'])
+      if (pre.ok) {
+        const w0 = (pre.windows ?? []).find((t) => String(t.hwnd) === String(hwnd))
+        if (w0) {
+          const inside =
+            x >= w0.x && x < w0.x + w0.width && y >= w0.y && y < w0.y + w0.height
+          if (!inside) {
+            return {
+              isError: true,
+              text:
+                `失败：坐标 (${x},${y}) 不在窗口 ${hwnd} 的范围内` +
+                `（该窗口位于 ${w0.x},${w0.y}，尺寸 ${w0.width}x${w0.height}）。\n` +
+                `点击用的是**桌面绝对坐标**，不是窗口内相对坐标。` +
+                `正确做法：用 desktop_screenshot 拿到窗口原点，再把图内坐标加上原点。\n` +
+                `已跳过授权询问——这个点击本来就到不了目标窗口。`,
+            }
+          }
+        }
+      }
+
       const auth = await authorize(hwnd, 'click')
       if (!auth.ok) return { isError: true, text: auth.message }
 
