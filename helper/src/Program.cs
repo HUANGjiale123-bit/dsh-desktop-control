@@ -619,9 +619,19 @@ namespace Dsc
             // click 是裸坐标点击，没有目标窗口参数——按"点击点落在哪个窗口上"校验，
             // 用 WindowFromPoint 取该点处的窗口。这样点击才不会误伤白名单之外的程序。
             IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+            IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
+            uint hitPid = 0;
+            if (root != IntPtr.Zero) Native.GetWindowThreadProcessId(root, out hitPid);
+
+            Console.Error.WriteLine("[click 诊断] 目标=(" + x + "," + y + ")" +
+                " WindowFromPoint=" + hit + " root=" + root + " pid=" + hitPid +
+                " exe=\"" + BaseName(ProcessPath(hitPid)) + "\"" +
+                " 前台=" + Native.GetForegroundWindow() +
+                " 白名单=[" + string.Join(",", Allowlist()) + "]");
+
             if (hit == IntPtr.Zero)
                 throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口，拒绝点击。");
-            RequireAllowedWindow(Native.GetAncestor(hit, Native.GA_ROOT), "click");
+            RequireAllowedWindow(root, "click");
 
             MoveCursorAbsolute(x, y);
             SendMouseButton(right, 1);
