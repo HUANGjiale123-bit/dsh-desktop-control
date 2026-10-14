@@ -104,6 +104,15 @@ namespace Dsc
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SetCursorPos(int x, int y);
 
+        /* mouse_event 是 SendInput 之前的经典注入 API。
+         * 实测（用 Codex 的验证脚本在本机跑）：在失败环境里
+         *   SendInput 相对移动 ret=1 但光标不动
+         *   SetCursorPos            ret=True 且光标真的移动
+         * 即 SendInput 被系统接受但不生效，而经典 API 正常。
+         * 因此鼠标按键也改用 mouse_event，与 SetCursorPos 保持同一条路径。 */
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT { public int X, Y; }
 
@@ -1428,19 +1437,10 @@ namespace Dsc
 
             for (int i = 0; i < Math.Max(1, clickCount); i++)
             {
-                Native.INPUT[] dn = new Native.INPUT[1];
-                dn[0].type = Native.INPUT_MOUSE;
-                dn[0].mi.dwFlags = down;
-                Native.INPUT[] us = new Native.INPUT[1];
-                us[0].type = Native.INPUT_MOUSE;
-                us[0].mi.dwFlags = up;
-
                 System.Threading.Thread.Sleep(40);
-                if (Native.SendInput(1, dn, Marshal.SizeOf(typeof(Native.INPUT))) == 0)
-                    throw new InvalidOperationException("SendInput 按下鼠标失败，err=" + Marshal.GetLastWin32Error());
+                Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
                 System.Threading.Thread.Sleep(40);
-                if (Native.SendInput(1, us, Marshal.SizeOf(typeof(Native.INPUT))) == 0)
-                    throw new InvalidOperationException("SendInput 抬起鼠标失败，err=" + Marshal.GetLastWin32Error());
+                Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
             }
         }
 
