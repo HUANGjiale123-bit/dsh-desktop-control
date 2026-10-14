@@ -30,3 +30,5 @@ local.config.json
 
 # 急停闸门等运行期状态
 /.state/
+dist/
+tools/diag/bin/
