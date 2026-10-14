@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -33,13 +34,53 @@ export function createDesktopToolset(options = {}) {
     process.env.DSC_HELPER ??
     join(REPO_ROOT, 'helper', 'bin', 'dsc.exe')
 
-  const allowlist = (options.allowedApps ?? process.env.DSC_ALLOWED_APPS ?? '')
+  const staticAllowlist = (options.allowedApps ?? process.env.DSC_ALLOWED_APPS ?? '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean)
 
+  /**
+   * 会话级授权钩子（可选）。
+   *
+   * 静态白名单是**持久**的：写进配置就一直是放行的，人不在场也照样能操作。
+   * 对"能操纵鼠标键盘"的能力来说这太重了——一个被投毒的应用会因此自动获得
+   * 操作权。所以加一层**会话级**授权：
+   *
+   *   · 静态白名单命中 → 直接放行（用户显式配置过的，属于预授权）
+   *   · 未命中 → 调这个钩子，由外层（DSH 插件）走 approval 服务问用户
+   *   · 用户同意 → 只对**当前会话 + 当前应用**生效，会话结束即失效
+   *
+   * 钩子做成回调而不是直接依赖 approval 服务，是因为这个 toolset 同时被
+   * MCP 服务器使用（server/mcp.mjs）——那条路径没有 approval 服务，
+   * 传 undefined 即退回纯静态白名单，行为不变。
+   *
+   * 契约：async (app) => boolean —— true 表示"本次会话内放行这个应用"。
+   * 钩子自身抛错一律视为拒绝（fail closed）。
+   */
+  const requestApproval =
+    typeof options.requestApproval === 'function' ? options.requestApproval : null
+
+  /** 本进程内已被会话授权放行的应用。键是应用名，值是授权来源说明。 */
+  const grants = new Map()
+
+  /**
+   * 当前生效的白名单 = 静态配置 ∪ 本会话已授权的。
+   *
+   * helper 也要拿到这份合成名单：否则会出现"插件放行但 helper 因自身名单
+   * 为空而拒绝"的矛盾（这个坑本项目踩过，见 docs/当前状态.md）。
+   */
+  function effectiveAllowlist() {
+    return [...staticAllowlist, ...grants.keys()]
+  }
+
+  /** 对外暴露的名单仍是数组（静态 ∪ 已授权），供日志与展示使用。 */
+  const allowlist = staticAllowlist
+
+  // 截图目录默认放系统临时目录：插件装到别人机器上时，仓库路径不存在。
   const shotDir =
-    options.shotDir ?? process.env.DSC_SHOT_DIR ?? join(REPO_ROOT, '.cache', 'shots')
+    options.shotDir ??
+    process.env.DSC_SHOT_DIR ??
+    join(tmpdir(), 'dsh-desktop-control-shots')
 
   /* ───────────── dsc.exe 调用 ───────────── */
 
@@ -68,7 +109,9 @@ export function createDesktopToolset(options = {}) {
 
       let env = process.env
       if (allow === 'configured') {
-        env = { ...process.env, DSC_ALLOWED_APPS: allowlist.join(',') }
+        // 传**合成**名单（静态 ∪ 本会话已授权），否则会话授权放行的应用
+        // 会在 helper 那一层被自己的空名单挡掉。
+        env = { ...process.env, DSC_ALLOWED_APPS: effectiveAllowlist().join(',') }
       } else if (allow && allow.exe) {
         const base = String(allow.exe).split(/[\\/]/).pop().toLowerCase()
         if (base) env = { ...process.env, DSC_ALLOWED_APPS: base }
@@ -129,7 +172,7 @@ export function createDesktopToolset(options = {}) {
    *
    * 白名单为空时一律拒绝操作，只允许观察。
    */
-  async function authorize(hwnd) {
+  async function authorize(hwnd, toolName) {
     const r = await runHelper(['list_windows'])
     if (!r.ok) return { ok: false, message: failMessage(r) }
 
@@ -143,28 +186,59 @@ export function createDesktopToolset(options = {}) {
 
     const base = w.exe ? w.exe.split(/[\\/]/).pop().toLowerCase() : ''
 
-    if (allowlist.length === 0) {
-      return {
-        ok: false,
-        message:
-          '失败：WhitelistEmpty — 应用白名单为空，拒绝执行任何操作。' +
-          '设置 DSC_ALLOWED_APPS（逗号分隔的可执行文件名，例如 notepad.exe）后再试。' +
-          '观察类工具不受此限制。',
-      }
-    }
     if (!base) {
       return {
         ok: false,
         message: `失败：无法确定窗口 ${hwnd} 所属的可执行文件，拒绝操作（无法校验白名单）。`,
       }
     }
-    if (!allowlist.includes(base)) {
+
+    // ① 静态白名单：用户显式配置过的，属于预授权，直接放行。
+    if (staticAllowlist.includes(base)) return { ok: true, window: w, via: 'static' }
+
+    // ② 本会话已授权：同一个应用不重复问。
+    if (grants.has(base)) return { ok: true, window: w, via: 'session' }
+
+    // ③ 都没有 → 走会话级授权（问用户）。
+    //
+    // 顺序很重要：静态名单为空时也走这里，而不是像早先那样直接拒绝。
+    // 早先的行为是"名单为空则一律拒绝"，那意味着唯一放行途径是永久配置
+    // ——对能操纵鼠标键盘的能力来说太重了。
+    if (!requestApproval) {
+      // 没有授权通道（MCP 路径）：退回纯静态白名单，fail closed。
       return {
         ok: false,
-        message: `失败：目标应用 "${base}" 不在白名单内。当前白名单：${allowlist.join(', ')}`,
+        message:
+          (staticAllowlist.length === 0
+            ? '失败：WhitelistEmpty — 应用白名单为空，且当前没有会话授权通道，拒绝执行任何操作。'
+            : `失败：目标应用 "${base}" 不在白名单内。当前白名单：${staticAllowlist.join(', ')}`) +
+          '设置 allowedApps（逗号分隔的可执行文件名，例如 notepad.exe）后再试。' +
+          '观察类工具不受此限制。',
       }
     }
-    return { ok: true, window: w }
+
+    let approved = false
+    try {
+      approved = await requestApproval(base, toolName ?? 'desktop')
+    } catch (e) {
+      // 钩子抛错 = 拒绝。授权通道出问题时必须 fail closed。
+      return {
+        ok: false,
+        message: `失败：会话授权检查出错，按拒绝处理 — ${e?.message ?? e}`,
+      }
+    }
+
+    if (!approved) {
+      return {
+        ok: false,
+        message:
+          `失败：用户未授权操作 "${base}"，已拒绝。` +
+          `本次授权是会话级的——同意后仅对当前会话的这一个应用生效。`,
+      }
+    }
+
+    grants.set(base, 'session')
+    return { ok: true, window: w, via: 'session-new' }
   }
 
   /* ───────────── 工具实现 ───────────── */
@@ -223,7 +297,7 @@ export function createDesktopToolset(options = {}) {
     },
 
     async click({ hwnd, x, y, button }) {
-      const auth = await authorize(hwnd)
+      const auth = await authorize(hwnd, 'click')
       if (!auth.ok) return { isError: true, text: auth.message }
 
       const r = await runHelper(['click', String(x), String(y), button ?? 'left'], 'configured')
@@ -232,7 +306,7 @@ export function createDesktopToolset(options = {}) {
     },
 
     async clickElement({ hwnd, descriptor, button }) {
-      const auth = await authorize(hwnd)
+      const auth = await authorize(hwnd, 'clickElement')
       if (!auth.ok) return { isError: true, text: auth.message }
 
       const r = await runHelper(['click_element', String(hwnd), descriptor, button ?? 'left'], auth.window)
@@ -245,7 +319,7 @@ export function createDesktopToolset(options = {}) {
     },
 
     async type({ hwnd, text }) {
-      const auth = await authorize(hwnd)
+      const auth = await authorize(hwnd, 'type')
       if (!auth.ok) return { isError: true, text: auth.message }
 
       // hwnd 必须传给 helper：它会在发送前确认该窗口就是前台窗口。
@@ -256,7 +330,7 @@ export function createDesktopToolset(options = {}) {
     },
 
     async pressKey({ hwnd, chord }) {
-      const auth = await authorize(hwnd)
+      const auth = await authorize(hwnd, 'pressKey')
       if (!auth.ok) return { isError: true, text: auth.message }
 
       const r = await runHelper(['press_key', String(hwnd), String(chord)], auth.window)
@@ -274,7 +348,7 @@ export function createDesktopToolset(options = {}) {
      * 不做 LegacyIAccessible 回退——偷偷换路写进去会让结论不可信。
      */
     async setValue({ hwnd, index, value }) {
-      const auth = await authorize(hwnd)
+      const auth = await authorize(hwnd, 'setValue')
       if (!auth.ok) return { isError: true, text: auth.message }
 
       const r = await runHelper(['set_value', String(hwnd), String(index), String(value)], auth.window)
@@ -307,7 +381,7 @@ export function createDesktopToolset(options = {}) {
      * 同样不经过输入注入。
      */
     async doAction({ hwnd, index, action }) {
-      const auth = await authorize(hwnd)
+      const auth = await authorize(hwnd, 'doAction')
       if (!auth.ok) return { isError: true, text: auth.message }
 
       const r = await runHelper(['do_action', String(hwnd), String(index), String(action)], auth.window)
@@ -316,5 +390,22 @@ export function createDesktopToolset(options = {}) {
     },
   }
 
-  return { helperPath, allowlist, shotDir, runHelper, tools }
+  return {
+    helperPath,
+    /** 静态白名单（配置里写的）。 */
+    allowlist,
+    /** 当前生效名单 = 静态 ∪ 本会话已授权。展示与日志用这个。 */
+    effectiveAllowlist,
+    /** 本会话已授权的应用（应用名 → 授权来源）。 */
+    grants,
+    /** 撤销本会话的全部授权（会话结束、或用户主动收回时调用）。 */
+    revokeGrants() {
+      const n = grants.size
+      grants.clear()
+      return n
+    },
+    shotDir,
+    runHelper,
+    tools,
+  }
 }
