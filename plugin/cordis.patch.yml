@@ -2,14 +2,26 @@
     - id: desktop-control
       name: dsh-desktop-control
       # inject 必须写在这里：loader 从条目选项填充注入表，模块导出不生效。
-      inject: ["tools"]
+      #
+      # tools    —— 注册工具
+      # approval —— 会话级授权（每次操作现场问用户）
+      # agents   —— 取当前会话，用于把授权限定在本次会话内
+      inject: ["tools", "approval", "agents"]
       config:
-        # 辅助进程的绝对路径。插件装进 profile 后按自身位置找不到它，
-        # 因此必须显式指定，或用环境变量 DSC_HELPER 覆盖。
-        helperPath: "D:\\dsh workspace\\dsh-desktop-control\\helper\\bin\\dsc.exe"
+        # 辅助进程的绝对路径。
+        #
+        # ★ 不要指回工作区目录。实测：同一份 dsc.exe 放在 D:\dsh workspace\
+        # 下面时，鼠标/键盘注入会**静默失效**（SetCursorPos 返回 False、
+        # 光标不动、没有任何报错）；放到 %LOCALAPPDATA% 下的独立目录后
+        # 立刻 3/3 精确命中。原因未查明，但边界是确定的。
+        # 详见 docs/当前状态.md 与 docs/定案-注入取决于启动上下文.md
+        helperPath: "C:\\Users\\a1838\\AppData\\Local\\dsh-desktop-control\\dsc.exe"
+        edgePath: "C:\\Users\\a1838\\AppData\\Local\\dsh-desktop-control\\dsc-edge.exe"
         # 截图输出目录（绝对路径，避免按宿主进程 cwd 解析而落到 C 盘）。
         shotDir: "D:\\dsh workspace\\dsh-desktop-control\\.cache\\shots"
-        # 应用白名单，默认为空——只能观察，任何操作都会被拒绝。
-        # 放行某个应用即表示允许助手在该应用内自由操作。示例：
+        # 静态白名单：**持久**放行，写在这里就一直有效，人不在场也照样能操作。
+        # 默认留空——任何变更性操作都会先通过 approval 服务询问，
+        # 同意后仅对**当前会话**的**该应用**有效，会话结束即失效。
+        # 只有确实需要长期免问的应用才写进来。示例：
         # allowedApps: ["notepad.exe"]
         allowedApps: []

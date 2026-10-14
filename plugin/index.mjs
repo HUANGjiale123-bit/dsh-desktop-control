@@ -37,7 +37,7 @@ export const name = 'dsh-desktop-control'
  * 这个导出保留是为了元数据完整（其他 DSH 插件也这么写），但改注入清单时
  * 必须改 YAML，否则不会生效。
  */
-export const inject = ['tools']
+export const inject = ['tools', 'approval', 'agents']
 
 /**
  * 插件版本，只用于日志与工具输出。
@@ -47,7 +47,7 @@ export const inject = ['tools']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.1.6'
+const PLUGIN_VERSION = '0.2.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -67,15 +67,106 @@ export function apply(ctx, config = {}) {
 }
 
 function applyInner(ctx, config = {}) {
+  /* ───────────── 会话级授权 ─────────────
+   *
+   * 静态白名单（config.allowedApps）是**持久**的：写进配置就一直放行，
+   * 人不在场也照样能操作。对"能操纵鼠标键盘"的能力来说这太重了——
+   * 一个被投毒的应用会因此自动获得操作权，而人不在场。
+   *
+   * 所以加一层会话级授权，走 DSH 自带的 approval 服务：
+   *
+   *   approval.request({ agent, toolName, reason })
+   *     → 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+   *
+   * 其中只有 'allowed-once' 是授权。任何异常路径（无 answerer、钩子抛错、
+   * 状态不对）都归到拒绝，即 fail closed。
+   *
+   * 授权的作用域是**当前会话 + 当前应用**：同一个应用在本次会话里不重复问，
+   * 会话结束即失效。这不依赖"记得撤销"，而是让授权天生就没有跨会话的生命。
+   */
+
+  /** 本会话已授权的应用（小写应用名 → true）。 */
+  const sessionGrants = new Map()
+  /** 已经问过但被拒绝的，记下来避免反复骚扰；值为拒绝原因。 */
+  const sessionDenials = new Map()
+
+  /** 当前会话的标识，用于检测"换会话了"并清空授权。 */
+  let grantedForSession = null
+
+  function currentSessionId() {
+    try {
+      const agent = ctx.get('agents')?.currentInitiator?.()
+      return agent?.id ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 问用户是否允许在本次会话内操作某个应用。
+   *
+   * 返回 true 仅当 approval 服务给出 'allowed-once'。
+   */
+  async function requestApproval(app, toolName) {
+    const approval = ctx.get('approval')
+    const agents = ctx.get('agents')
+
+    if (!approval?.request) {
+      // 没有 approval 服务：不静默放行，交给 toolset 走 fail-closed 分支。
+      throw new Error('approval 服务不可用')
+    }
+
+    const agent = agents?.currentInitiator?.()
+    if (!agent) {
+      throw new Error('当前没有会话上下文，无法发起授权')
+    }
+
+    // 换了会话就重来：这是"会话级"的落点，授权不跨会话。
+    const sid = agent.id
+    if (grantedForSession !== null && grantedForSession !== sid) {
+      sessionGrants.clear()
+      sessionDenials.clear()
+    }
+    grantedForSession = sid
+
+    if (sessionDenials.has(app)) return false
+
+    const outcome = await approval.request({
+      agent,
+      // 不传 callId：这是工具内部发起的授权，不是可寻址的单次调用。
+      // 传了反而会在会话日志里产生对不上的 tool/result 配对。
+      toolName: `desktop:${app}`,
+      reason:
+        `允许在当前会话中操作「${app}」吗？\n` +
+        `同意后，本次会话内对该应用的鼠标/键盘操作不再询问；` +
+        `会话结束即失效，不会写入任何配置。\n` +
+        `（触发工具：${toolName}）`,
+    })
+
+    if (outcome === 'allowed-once') {
+      sessionGrants.set(app, true)
+      return true
+    }
+
+    sessionDenials.set(app, outcome)
+    ctx.logger?.info?.(
+      `[desktop-control] 会话授权未通过: app=${app} outcome=${outcome} tool=${toolName}`,
+    )
+    return false
+  }
+
   const set = createDesktopToolset({
     helperPath: config.helperPath,
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
+    requestApproval,
   })
 
   const allowNote = set.allowlist.length
-    ? `当前白名单：${set.allowlist.join(', ')}。`
-    : '当前白名单为空——这些工具只能观察，任何操作都会被拒绝。'
+    ? `静态白名单：${set.allowlist.join(', ')}（持久放行）。` +
+      '其它应用会在操作时询问——同意后仅对当前会话有效。'
+    : '静态白名单为空。任何变更性操作都会先询问——同意后仅对当前会话有效，' +
+      '不会写入配置。观察类工具不受限制。'
 
   // 记录已注册的工具名：日志里报数量与名单，这样"哪个版本跑起来了"
   // 可以直接从日志读出来，不必靠工具是否可调来推断。
@@ -489,11 +580,56 @@ function applyInner(ctx, config = {}) {
     presentCall: () => ({ card: 'generic', title: '关闭 computer use', kind: 'other' }),
   })
 
+  register({
+    name: 'desktop_revoke_grants',
+    description:
+      '收回本次会话内已经授予的全部应用授权。授权本身随会话结束自动失效，' +
+      '这个工具用于**中途主动收回**——比如意识到刚才放行了不该放行的应用。' +
+      '收回后，下次操作该应用会重新询问。不影响静态白名单（那是配置里的持久放行）。' +
+      '不碰任何窗口。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          revoked: { type: 'array', items: { type: 'string' }, required: true },
+          note: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [
+        {
+          type: 'text',
+          text: value.revoked.length
+            ? `已收回 ${value.revoked.length} 项会话授权：${value.revoked.join(', ')}。${value.note}`
+            : `本次会话没有已授予的授权。${value.note}`,
+        },
+      ],
+    },
+    async execute() {
+      const revoked = [...sessionGrants.keys()]
+      sessionGrants.clear()
+      sessionDenials.clear()
+      // toolset 那一层也有自己的授权表，必须一起清——否则插件这边清了、
+      // toolset 仍然放行，看起来像"收回了却还生效"。
+      set.revokeGrants()
+
+      return {
+        revoked,
+        note: set.allowlist.length
+          ? `静态白名单（${set.allowlist.join(', ')}）不受影响，仍然放行。`
+          : '静态白名单为空，此后所有变更性操作都会重新询问。',
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: '收回会话授权', kind: 'other' }),
+  })
+
   ctx.logger?.info?.(
     `[desktop-control] v${PLUGIN_VERSION} 已注册 ${registered.length} 个工具` +
     `（${registered.join(', ')}）；helper=${set.helperPath}；` +
     `指示层=${edgePath}；` +
-    `白名单=${set.allowlist.length ? set.allowlist.join(', ') : '（空）'}`,
+    `静态白名单=${set.allowlist.length ? set.allowlist.join(', ') : '（空）'}；` +
+    `会话授权=${ctx.get('approval')?.request ? '可用' : '不可用（将 fail closed）'}`,
   )
 
   // 插件卸载时收掉所有浮层，不留孤儿窗口
