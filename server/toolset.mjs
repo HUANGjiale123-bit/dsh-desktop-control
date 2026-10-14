@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -75,8 +76,11 @@ export function createDesktopToolset(options = {}) {
   /** 对外暴露的名单仍是数组（静态 ∪ 已授权），供日志与展示使用。 */
   const allowlist = staticAllowlist
 
+  // 截图目录默认放系统临时目录：插件装到别人机器上时，仓库路径不存在。
   const shotDir =
-    options.shotDir ?? process.env.DSC_SHOT_DIR ?? join(REPO_ROOT, '.cache', 'shots')
+    options.shotDir ??
+    process.env.DSC_SHOT_DIR ??
+    join(tmpdir(), 'dsh-desktop-control-shots')
 
   /* ───────────── dsc.exe 调用 ───────────── */
 

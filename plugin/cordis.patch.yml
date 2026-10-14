@@ -8,17 +8,21 @@
       # agents   —— 取当前会话，用于把授权限定在本次会话内
       inject: ["tools", "approval", "agents"]
       config:
-        # 辅助进程的绝对路径。
+        # 这里**刻意不写 helperPath / edgePath**：
+        # 辅助程序随插件包一起安装（bin/dsc.exe、bin/dsc-edge.exe），
+        # 插件按自身位置自动解析，用户装完即可用，不需要填任何路径。
         #
-        # ★ 不要指回工作区目录。实测：同一份 dsc.exe 放在 D:\dsh workspace\
-        # 下面时，鼠标/键盘注入会**静默失效**（SetCursorPos 返回 False、
-        # 光标不动、没有任何报错）；放到 %LOCALAPPDATA% 下的独立目录后
-        # 立刻 3/3 精确命中。原因未查明，但边界是确定的。
-        # 详见 docs/当前状态.md 与 docs/定案-注入取决于启动上下文.md
-        helperPath: "C:\\Users\\a1838\\AppData\\Local\\dsh-desktop-control\\dsc.exe"
-        edgePath: "C:\\Users\\a1838\\AppData\\Local\\dsh-desktop-control\\dsc-edge.exe"
-        # 截图输出目录（绝对路径，避免按宿主进程 cwd 解析而落到 C 盘）。
-        shotDir: "D:\\dsh workspace\\dsh-desktop-control\\.cache\\shots"
+        # 解析顺序：config.helperPath → 环境变量 DSC_HELPER → 插件 bin/ → 仓库布局。
+        #
+        # 为什么随包安装在插件目录下就能用：实测鼠标/键盘注入在**工作区目录**里
+        # 会静默失效（SetCursorPos 返回 False、光标不动、无报错），而在插件目录
+        # （profile 的 node_modules 下）正常。随包安装正好落在正确的位置。
+        # 详见 docs/当前状态.md
+        #
+        # 截图输出目录。留空则用系统临时目录下的子目录——
+        # 早期版本默认落到仓库 .cache/，对装完即用的用户不存在那个目录。
+        # shotDir: "D:\\some\\dir"
+        #
         # 静态白名单：**持久**放行，写在这里就一直有效，人不在场也照样能操作。
         # 默认留空——任何变更性操作都会先通过 approval 服务询问，
         # 同意后仅对**当前会话**的**该应用**有效，会话结束即失效。

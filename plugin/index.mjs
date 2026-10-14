@@ -20,6 +20,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createDesktopToolset } from './toolset.mjs'
 
@@ -47,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.2.0'
+const PLUGIN_VERSION = '0.3.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -155,8 +156,46 @@ function applyInner(ctx, config = {}) {
     return false
   }
 
+  /* ───────────── helper 位置解析 ─────────────
+   *
+   * 目标是"装完就能用"，不要求用户填任何路径。解析顺序：
+   *
+   *   1. 配置里的 helperPath        —— 部署方显式指定，优先级最高
+   *   2. 环境变量 DSC_HELPER        —— 便于临时替换
+   *   3. 插件自带：<插件目录>/bin/dsc.exe
+   *   4. 仓库布局：<插件目录>/../helper/bin/dsc.exe   （开发时直接用）
+   *
+   * 为什么把 helper 放进插件包里：这样它落在 profile 的 node_modules 下，
+   * 而那**不是工作区目录**——实测注入在工作区目录里会静默失效，
+   * 在插件目录里正常。用户不需要知道这件事，装完就落在对的位置。
+   *
+   * 注意：绝不回退到"工作区里的构建产物"。那会让注入静默失效，
+   * 而症状是"调用成功但什么也没发生"，极难排查（本项目为此花了一整天）。
+   */
+  const pluginDir = dirname(fileURLToPath(import.meta.url))
+  const bundledHelper = join(pluginDir, 'bin', 'dsc.exe')
+  const repoHelper = join(pluginDir, '..', 'helper', 'bin', 'dsc.exe')
+  const helperPath =
+    config.helperPath ??
+    process.env.DSC_HELPER ??
+    (existsSync(bundledHelper) ? bundledHelper : repoHelper)
+
+  const bundledEdge = join(pluginDir, 'bin', 'dsc-edge.exe')
+  const repoEdge = join(pluginDir, '..', 'helper', 'bin', 'dsc-edge.exe')
+  const edgePath = config.edgePath ?? (existsSync(bundledEdge) ? bundledEdge : repoEdge)
+
+  // 如果 helper 落在工作区目录里，明确警告。这不是风格问题：
+  // 那种情况下鼠标/键盘注入会静默失效，而且没有任何报错。
+  if (/[\\/]dsh workspace[\\/]/i.test(helperPath)) {
+    ctx.logger?.warn?.(
+      `[desktop-control] helper 位于工作区目录内（${helperPath}）。` +
+        `实测该位置下鼠标/键盘注入会静默失效（调用返回成功但光标不动）。` +
+        `请把 helper 放到工作区之外，或用 config.helperPath / DSC_HELPER 指定别处。`,
+    )
+  }
+
   const set = createDesktopToolset({
-    helperPath: config.helperPath,
+    helperPath,
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
     requestApproval,
@@ -384,13 +423,10 @@ function applyInner(ctx, config = {}) {
    * 切换，跟着它画既不稳定也容易看漏；整屏边缘位置恒定，不可能被遮住。
    *
    * 由宿主进程持有子进程，所以它不会随我的会话或沙箱消失而消失。
+   *
+   * edgePath 已在上面按"配置 → 插件自带 → 仓库布局"的顺序解析好，
+   * 这里不再重复解析（重复声明会直接是语法错误）。
    */
-
-  const edgePath =
-    config.edgePath ??
-    config.overlayPath ??          // 兼容旧配置名
-    process.env.DSC_EDGE ??
-    join(dirname(set.helperPath), 'dsc-edge.exe')
 
   const liveOverlays = new Map()   // key -> ChildProcess
 
