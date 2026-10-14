@@ -384,6 +384,93 @@ namespace Dsc
                 string.Join(", ", allow) + "。");
         }
 
+        /* ── 完整性级别检查 ──
+         * 照 Codex 的做法：读目标进程令牌的完整性级别，与自身比较。
+         * 目标更高时 Codex 的文案是：
+         *   "Accessibility is limited because the target window has higher Windows
+         *    integrity than the Computer Use helper."
+         * 用户取证的结论是：不存在"读受限但写仍可"，应按**基本不可用**处理，
+         * 检测到就报错交还用户，而不是硬试。
+         */
+        private static int _selfIntegrityRid = -1;
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetTokenInformation(IntPtr t, int cls, IntPtr info, int len, out int ret);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool GetSidSubAuthorityCount(IntPtr sid, out byte count);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+
+        private const uint TOKEN_QUERY = 0x0008;
+
+        /// <summary>读进程令牌的完整性级别 RID；读不到返回 -1。</summary>
+        private static int IntegrityRid(uint pid)
+        {
+            IntPtr proc = IntPtr.Zero, tok = IntPtr.Zero, buf = IntPtr.Zero;
+            try
+            {
+                proc = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+                if (proc == IntPtr.Zero) return -1;
+                if (!OpenProcessToken(proc, TOKEN_QUERY, out tok)) return -1;
+                buf = Marshal.AllocHGlobal(512);
+                int ret;
+                if (!GetTokenInformation(tok, 25 /*TokenIntegrityLevel*/, buf, 512, out ret)) return -1;
+                IntPtr sid = Marshal.ReadIntPtr(buf);
+                byte cnt;
+                if (!GetSidSubAuthorityCount(sid, out cnt) || cnt == 0) return -1;
+                IntPtr pSub = GetSidSubAuthority(sid, (uint)(cnt - 1));
+                return Marshal.ReadInt32(pSub);
+            }
+            catch { return -1; }
+            finally
+            {
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+                if (tok != IntPtr.Zero) Native.CloseHandle(tok);
+                if (proc != IntPtr.Zero) Native.CloseHandle(proc);
+            }
+        }
+
+        private static string IntegrityName(int rid)
+        {
+            if (rid < 0) return "未知";
+            if (rid < 0x1000) return "Untrusted";
+            if (rid < 0x2000) return "Low";
+            if (rid < 0x3000) return "Medium";
+            if (rid < 0x4000) return "Medium-Plus";
+            if (rid < 0x5000) return "High(管理员)";
+            return "System";
+        }
+
+        /// <summary>
+        /// 目标完整性高于自身时拒绝——照 Codex 的处理方式。
+        /// 不做"读受限但写仍可"的尝试，因为那种情况不存在。
+        /// </summary>
+        private static void RequireIntegrityOk(IntPtr hwnd, string action)
+        {
+            uint pid;
+            Native.GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == 0) return;
+
+            if (_selfIntegrityRid < 0)
+            {
+                uint self;
+                Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out self);  // 仅用于占位
+                _selfIntegrityRid = IntegrityRid((uint)System.Diagnostics.Process.GetCurrentProcess().Id);
+            }
+
+            int target = IntegrityRid(pid);
+            if (target < 0 || _selfIntegrityRid < 0) return;   // 读不到就不阻断
+
+            if (target > _selfIntegrityRid)
+                throw new InvalidOperationException(
+                    "Accessibility is limited because the target window has higher Windows " +
+                    "integrity than this helper. 目标完整性=" + IntegrityName(target) +
+                    "，自身=" + IntegrityName(_selfIntegrityRid) +
+                    "。按已验证的结论，这种情况不存在\"读受限但写仍可\"，因此拒绝执行 " + action + "。");
+        }
+
         /// <summary>
         /// 把目标窗口提到前台并把焦点交给它，然后校验确实到位了。
         ///
@@ -404,6 +491,8 @@ namespace Dsc
         /// </summary>
         private static void RequireActivated(IntPtr hwnd, string action)
         {
+            RequireIntegrityOk(hwnd, action);
+
             WindowActivator.Result r = WindowActivator.Activate(hwnd);
             if (r.Ok) return;
             throw new InvalidOperationException("拒绝执行 " + action + "：" + r.Message);
