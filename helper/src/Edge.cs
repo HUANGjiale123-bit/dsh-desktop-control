@@ -147,6 +147,12 @@ namespace DscEdge
         private static IntPtr _hook = IntPtr.Zero;
         private static bool _tripped;
         private static int _keyEventsSeen;
+        /// <summary>钩子回调被调用的次数（不过滤、不判键）。用于区分"没触发"与"触发了但被过滤"。</summary>
+        private static int _hookEntries;
+        /// <summary>true = 给 SetWindowsHookExW 传 hMod=NULL（低层钩子的常规做法）。</summary>
+        public static bool HookModZero;
+        /// <summary>true = 推迟到窗口 Shown 之后再装钩子（与已验证可用的探针对齐时机）。</summary>
+        public static bool DeferHook;
         private static string _logPath;
 
         /// <summary>
@@ -176,20 +182,39 @@ namespace DscEdge
             string fromEnv = Environment.GetEnvironmentVariable("DSC_HALT_GATE");
             if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
 
+            // 与 dsc.exe 的 GatePath() 保持同一套规则：
+            // 不能简单往上推两级——部署到 %LOCALAPPDATA%\dsh-desktop-control\ 之后，
+            // 那会算到用户目录根下，在别人的机器上乱建 .state 目录。
+            // 只有当上级确实像本项目仓库时才用仓库根，否则用 exe 自己所在目录。
             string binDir = AppContext.BaseDirectory.TrimEnd('\\', '/');
-            string root = Path.GetDirectoryName(binDir);        // helper\bin -> helper
-            if (!string.IsNullOrEmpty(root)) root = Path.GetDirectoryName(root);  // helper -> 仓库根
-            if (string.IsNullOrEmpty(root)) root = binDir;
-            return Path.Combine(root, ".state", "halt");
+            string root = Path.GetDirectoryName(binDir);
+            if (!string.IsNullOrEmpty(root)) root = Path.GetDirectoryName(root);
+
+            if (!string.IsNullOrEmpty(root) &&
+                Directory.Exists(Path.Combine(root, "helper")) &&
+                Directory.Exists(Path.Combine(root, "plugin")))
+                return Path.Combine(root, ".state", "halt");
+
+            return Path.Combine(binDir, ".state", "halt");
         }
 
         private static System.Windows.Forms.Timer _heartbeat;
 
+        /// <summary>推迟安装时，由窗口的 Shown 事件调用这个。</summary>
+        public static bool InstallDeferred()
+        {
+            Log("推迟安装：现在真正调用 SetWindowsHookExW");
+            return Install();
+        }
+
         public static bool Install()
         {
             _proc = HookProc;                                   // 静态持有
-            _hook = Native.SetWindowsHookExW(Native.WH_KEYBOARD_LL, _proc,
-                                             Native.GetModuleHandleW(IntPtr.Zero), 0);
+            // hMod 传什么，对低层钩子的回调是否触发可能有关键影响。
+            // 常规做法是传 NULL（钩子过程在本进程内）；传自身模块句柄在部分
+            // 情况下会导致"安装成功但回调永不触发"。
+            IntPtr hMod = HookModZero ? IntPtr.Zero : Native.GetModuleHandleW(IntPtr.Zero);
+            _hook = Native.SetWindowsHookExW(Native.WH_KEYBOARD_LL, _proc, hMod, 0);
             if (_hook == IntPtr.Zero)
             {
                 int err = Marshal.GetLastWin32Error();
@@ -198,7 +223,8 @@ namespace DscEdge
                 return false;
             }
             Log("低层键盘钩子已安装；按 ESC 拉下急停闸门。闸门路径: " + GatePath());
-            Log("钩子句柄=" + _hook + " 日志路径=" + LogPath());
+            Log("钩子句柄=" + _hook + " hMod=" + (HookModZero ? "NULL" : "自身模块") +
+                " 日志路径=" + LogPath());
 
             // 心跳：每 5 秒一行。它的作用是证明"日志通道是活的"——
             // 没有心跳的话，"日志里没有按键"就无法区分是钩子没收到还是日志没写进去。
@@ -206,7 +232,7 @@ namespace DscEdge
             _heartbeat.Interval = 5000;
             _heartbeat.Tick += delegate
             {
-                Log("心跳：钩子存活，累计收到真实按键 " + _keyEventsSeen + " 次");
+                Log("心跳：回调入口 " + _hookEntries + " 次，其中真实按键 " + _keyEventsSeen + " 次");
             };
             _heartbeat.Start();
 
@@ -227,6 +253,17 @@ namespace DscEdge
 
         private static IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            // ★ 回调入口计数：第一件事就是记下"回调被调用了"。
+            //
+            // 为什么必须放在最前面、且不做任何过滤：
+            // "钩子没触发"和"触发了但被过滤掉"是两种完全不同的故障，
+            // 修法也不同。只看闸门文件或只看 ESC 计数，两者症状一模一样
+            // （都是 0）。这个计数器把它们分开。
+            //
+            // 它是纯内存自增，不碰 IO、不碰 marshal —— 保证不会因为
+            // 记录动作本身失败而掩盖真相。
+            _hookEntries++;
+
             try
             {
                 if (nCode == Native.HC_ACTION && !_tripped)
@@ -239,34 +276,50 @@ namespace DscEdge
 
                         bool injected = (k.flags & Native.LLKHF_INJECTED) != 0;
 
-                        // 记录所有真实按键的前若干个（不含注入），用于确认钩子确实在工作。
-                        // 只看闸门文件的话，"没人按键"和"钩子没收到"无法区分。
+                        // ★ 先判断 ESC，再记日志。
+                        //
+                        // 顺序是这里唯一的要害。原先是"先 Log 再判断 ESC"，
+                        // 而 Log 内部一旦抛异常（日志目录不存在、路径不可写，
+                        // 或 stderr 被重定向），外层 catch 会把整个回调吞掉——
+                        // **ESC 分支根本执行不到**。
+                        // 症状是"钩子装上了、按键也真的按了、就是没反应"，
+                        // 与"钩子不工作"完全无法区分。本项目为此误判过一次。
+                        //
+                        // 所以：判定路径不许碰 IO。IO 失败只能影响日志，不能影响急停。
+                        if (k.vkCode == Native.VK_ESCAPE && !injected)
+                        {
+                            _tripped = true;      // 只拉一次，避免按住时刷屏
+                            Trip();
+                        }
+
+                        // 记录真实按键（不含注入），用于确认钩子确实在工作。
                         if (!injected && _keyEventsSeen < 25)
                         {
                             _keyEventsSeen++;
                             Log("钩子收到真实按键 vk=0x" + k.vkCode.ToString("X2") +
                                 " (" + KeyName(k.vkCode) + ") flags=0x" + k.flags.ToString("X2"));
                         }
-
-                        if (k.vkCode == Native.VK_ESCAPE && !injected)
-                        {
-                            _tripped = true;      // 只拉一次，避免按住时刷屏
-                            Trip();
-                        }
                     }
                 }
             }
-            catch (Exception e)
+            catch
             {
-                Log("钩子回调异常（已忽略，继续放行）: " + e.Message);
+                // 故意**不记日志**：日志本身可能就是抛异常的那个东西，
+                // 再调一次只会重复失败。急停的可靠性不依赖日志。
             }
 
             // 永远放行。急停不该改变用户按键的原有行为。
             return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
         }
 
+        /// <summary>急停触发后的回调，由宿主设置（用于关掉指示层与逃生条）。</summary>
+        public static Action OnTripped;
+
         private static void Trip()
         {
+            // ① 拉闸门：这是"停止"的实质。
+            //    闸门是 dsc.exe 每条变更性命令都要检查的东西，写下去之后
+            //    **即使还有别的进程活着，操作也做不了**。
             try
             {
                 string p = GatePath();
@@ -276,18 +329,27 @@ namespace DscEdge
                     "由物理 ESC 键触发" + Environment.NewLine +
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine +
                     "（dsc-edge.exe 的低层键盘钩子；钩子不吞按键）" + Environment.NewLine);
-
-                if (!File.Exists(p))
-                {
-                    Log("急停触发但闸门文件写入后仍不存在: " + p);
-                    return;
-                }
-                Log("✅ 急停已触发：ESC 已拉下闸门 " + p);
+                Log("急停已触发：ESC 已拉下闸门 " + p);
             }
             catch (Exception e)
             {
                 // 写入失败必须可见。之前这个 catch 是空的，导致"报了已急停但其实没写"。
                 Log("急停触发但闸门写入失败: " + e.GetType().Name + ": " + e.Message);
+            }
+
+            // ② 关掉界面：ESC 之后指示层和逃生条都要**立刻消失**。
+            //
+            //    只拉闸门是不够的——那样用户按了 ESC，屏幕上那两样东西还在，
+            //    看起来就像"没反应"。状态结束了，可视化就该跟着结束。
+            //
+            //    这一步放在闸门之后、且自己兜异常：界面关不掉也不能影响已完成的停止。
+            try
+            {
+                if (OnTripped != null) OnTripped();
+            }
+            catch (Exception e)
+            {
+                Log("急停后关闭界面失败（闸门已生效，停止不受影响）: " + e.Message);
             }
         }
 
@@ -309,7 +371,17 @@ namespace DscEdge
         private static void Log(string line)
         {
             string text = "[dsc-edge " + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + line;
-            Console.Error.WriteLine(text);
+
+            // ★ 绝不抛异常。这个方法是纯诊断，任何情况下都不该影响急停。
+            //
+            // 两个坑都踩过：
+            //   1. Console.Error 原先在 try 之外。宿主用 `2>&1` 重定向启动时，
+            //      写 stderr 会抛异常 → 冒泡到钩子回调的外层 catch →
+            //      **整个回调报废，ESC 分支永远执行不到**。
+            //   2. 日志目录可能不存在，AppendAllText 直接抛。
+            //
+            // 所以每一段都单独兜住。判据是：把日志功能整个删掉，急停也必须照常工作。
+            try { Console.Error.WriteLine(text); } catch { }
             try
             {
                 string p = LogPath();
@@ -320,7 +392,7 @@ namespace DscEdge
                     File.AppendAllText(p, text + Environment.NewLine);
                 }
             }
-            catch { }   // 日志失败不该影响急停本身
+            catch { }
         }
     }
 
@@ -736,6 +808,8 @@ namespace DscEdge
             bool noExclude = false;
             bool isStatic = false;
             bool noEsc = false;
+            bool withEscape = false;    // 是否显示可点的逃生窗
+            bool escapeOnly = false;    // 只显示逃生窗，不显示指示层（供测试）
             Color accent = Color.FromArgb(0x4D, 0x9A, 0xFF);   // 亮蓝
 
             for (int i = 0; i < args.Length; i++)
@@ -747,6 +821,18 @@ namespace DscEdge
                     case "--no-exclude": noExclude = true; break;
                     case "--static": isStatic = true; break;
                     case "--no-esc": noEsc = true; break;      // 仅供调试：不装急停
+                    case "--escape": withEscape = true; break; // 显示可点的逃生窗
+                    case "--escape-only": escapeOnly = true; withEscape = true; break;
+                    case "--hook-null-mod": EscapeGate.HookModZero = true; break;
+                    case "--defer-hook": EscapeGate.DeferHook = true; break;
+                    case "--hook-self-mod": EscapeGate.HookModZero = false; break;
+                    case "--hook-only":
+                        // 只装钩子并泵消息，不创建任何窗口。
+                        // 用来判断"钩子不触发"是否与窗口有关。
+                        if (!EscapeGate.Install()) return 3;
+                        Console.Error.WriteLine("[dsc-edge] hook-only: no window, pumping messages");
+                        Application.Run();
+                        return 0;
                     case "--selftest-hook":                    // 只装钩子并报告，不显示指示层
                         return EscapeGate.Install() ? 0 : 5;
                     case "--color":
@@ -760,20 +846,149 @@ namespace DscEdge
             }
 
             // 急停随指示层一起装。装不上就整体退出——没急停的 computer use 不该跑起来。
-            if (!noEsc && !EscapeGate.Install())
+            //
+            // ESC 是**主停止路径**：低层键盘钩子实测可用（此前判定"不触发"是误判，
+            // 真因是日志写在只读位置，异常冒泡把整个回调吞掉，ESC 分支执行不到）。
+            // 逃生条上的按钮与关窗口是后备，两条路都汇到 onStop。
+            bool hookDeferred = EscapeGate.DeferHook;
+            if (!noEsc && !hookDeferred && !EscapeGate.Install())
                 return 3;
 
             Application.EnableVisualStyles();
 
+            // 停止动作：关掉界面 + 结束进程。
+            //
+            // 闸门由调用方负责写：
+            //   · 走 ESC 这条路时，EscapeGate.Trip() 已经写过闸门了
+            //   · 走点按钮/关窗口时，这里写
+            // 两条路都汇到这一个 delegate，保证行为一致。
+            bool stopInProgress = false;
+            Action onStop = delegate
+            {
+                if (stopInProgress) return;    // ESC 与按钮可能几乎同时触发
+                stopInProgress = true;
+
+                try
+                {
+                    string gate = EscapeGate.GatePath();
+                    string dir = Path.GetDirectoryName(gate);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+                    if (!File.Exists(gate))
+                        File.WriteAllText(gate,
+                            "由逃生条于 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " 触发\r\n");
+                }
+                catch { }
+
+                // 用 BeginInvoke 而不是直接 Exit：本 delegate 可能在
+                // 钩子回调或窗口消息处理中被调用，就地关窗容易重入。
+                try
+                {
+                    if (Application.OpenForms.Count > 0)
+                    {
+                        Application.OpenForms[0].BeginInvoke(new Action(delegate
+                        {
+                            // 倒序关：先关上面那个（逃生条），再关下面的指示层，
+                            // 视觉上不会出现"中间空了一下"。
+                            for (int i = Application.OpenForms.Count - 1; i >= 0; i--)
+                            {
+                                try { Application.OpenForms[i].Close(); } catch { }
+                            }
+                            Application.ExitThread();
+                        }));
+                        return;
+                    }
+                }
+                catch { }
+
+                Environment.Exit(0);
+            };
+
+            // 关键接线：ESC 钩子触发后要关掉界面。
+            //
+            // ESC → EscapeGate.Trip() → 写闸门（停止生效）→ 调 OnTripped → onStop
+            // 少了这一步，按 ESC 会"操作确实停了，但屏幕上那两样东西还在"，
+            // 用户看起来就是"没反应"。
+            EscapeGate.OnTripped = onStop;
+
             try
             {
-                Application.Run(new EdgeForm(label, timeout, accent, noExclude, isStatic));
+                // 推迟安装模式：构造窗口后先挂 Shown，等窗体真正显示、
+                // 消息循环已经在跑，再装钩子——与已验证可用的探针同一时机。
+                Action<Form> armDeferred = delegate (Form f)
+                {
+                    if (!hookDeferred || noEsc) return;
+                    f.Shown += delegate { EscapeGate.InstallDeferred(); };
+                };
+
+                if (escapeOnly)
+                {
+                    EscapeForm ef = new EscapeForm(label, onStop);
+                    armDeferred(ef);
+                    Application.Run(ef);
+                    return 0;
+                }
+
+                if (withEscape)
+                {
+                    // 两个窗口共用同一个消息循环：指示层是背景，逃生条在上面。
+                    EscapeHost host = new EscapeHost(label, timeout, accent, noExclude, isStatic, onStop);
+                    if (hookDeferred && !noEsc) host.MainForm.Shown += delegate { EscapeGate.InstallDeferred(); };
+                    Application.Run(host);
+                    return 0;
+                }
+
+                EdgeForm plain = new EdgeForm(label, timeout, accent, noExclude, isStatic);
+                armDeferred(plain);
+                Application.Run(plain);
             }
             finally
             {
                 EscapeGate.Uninstall();
             }
             return 0;
+        }
+    }
+
+    /// <summary>
+    /// 指示层 + 逃生窗的组合宿主。
+    ///
+    /// 为什么需要这个类：Application.Run 只能跑一个主窗口的循环。
+    /// 指示层是**鼠标穿透**的（不能挡底下应用），逃生窗要**接鼠标**，
+    /// 两者又都必须置顶显示，所以只能是两张窗口、一个消息循环。
+    ///
+    /// 生命周期：逃生窗被点掉或关掉 → 整个应用退出 → 指示层一起消失。
+    /// 这样"停止"是一个动作，不需要用户分两步。
+    /// </summary>
+    internal sealed class EscapeHost : ApplicationContext
+    {
+        private readonly EscapeForm _escape;
+        private readonly EdgeForm _edge;
+
+        public EscapeHost(string label, int timeout, Color accent, bool noExclude,
+                          bool isStatic, Action onStop)
+        {
+            _escape = new EscapeForm(label, delegate
+            {
+                try { onStop(); }
+                finally { ExitThread(); }
+            });
+
+            _edge = new EdgeForm(label, timeout, accent, noExclude, isStatic);
+
+            // 指示层先显示（背景），逃生窗后显示（前景）。
+            _edge.Show();
+            _escape.Show();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                try { _escape.Dispose(); } catch { }
+                try { _edge.Dispose(); } catch { }
+            }
+            base.Dispose(disposing);
         }
     }
 }

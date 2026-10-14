@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.3.0'
+const PLUGIN_VERSION = '0.4.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -536,11 +536,11 @@ function applyInner(ctx, config = {}) {
       '让使用者看得见"有人正在操作这台电脑"。' +
       '指示层**不拦截鼠标键盘**（点击穿透）、不抢焦点，且从截图中排除。' +
       '它只是状态提示，不含任何控制能力。' +
-      '要停止请用 desktop_off——本环境实测无法捕获全局按键，' +
-      '因此没有"按 ESC 停"这个功能，不要这样告诉使用者。' +
+      '同时在屏幕正中显示一个**逃生窗**——可点的"停止"按钮，' +
+      '让使用者随时停得下来，不必等助手配合。' +
       '不受白名单限制。建议在开始操作桌面前调用。',
     parameters: {
-      label: { type: 'string', description: '徽标上显示的文本，默认"已激活"。' },
+      label: { type: 'string', description: '徽标与逃生窗上显示的文本，默认"已激活"。' },
       timeoutMs: { type: 'integer', description: '多久后自动消失（毫秒）；0 或省略表示常驻，直到调用 desktop_off。' },
     },
     output: {
@@ -553,18 +553,24 @@ function applyInner(ctx, config = {}) {
     },
     async execute(args) {
       const label = args.label ?? '已激活'
-      const childArgs = ['--label', label]
+      // --escape 让逃生窗跟指示层一起起来。
+      //
+      // 为什么必须有它：本环境实测**低层键盘钩子不触发**（装得上、句柄非零、
+      // 消息循环正常、回调一次都不来），所以"按 ESC 停"不可靠。
+      // 没有逃生窗就等于"用户只能看着，停不下来"——那不算 computer use。
+      // 指示层负责"看得见"，逃生窗负责"停得下来"，两件事缺一不可。
+      const childArgs = ['--label', label, '--escape']
       if (args.timeoutMs > 0) childArgs.push('--timeout', String(args.timeoutMs))
 
       const r = startIndicator('indicator', childArgs)
       if (!r.ok) throw new Error(r.reason)
       return {
         result:
-          '已在整屏边缘显示 computer use 状态指示层。' +
-          '注意：本环境无法捕获全局按键，所以没有"按 ESC 停"；' +
-          '要停止请调用 desktop_off。' +
+          '已在整屏边缘显示 computer use 状态指示层，并在屏幕中央显示逃生窗。' +
+          '点逃生窗上的"停止"按钮、或直接关掉那个窗口，都会立即停止' +
+          '（拉下急停闸门，此后所有变更性操作被拒绝）。' +
           (args.timeoutMs > 0
-            ? `${args.timeoutMs} 毫秒后自动消失。`
+            ? `${args.timeoutMs} 毫秒后指示层自动消失。`
             : '将常驻显示，直到调用 desktop_off 关闭。'),
       }
     },
