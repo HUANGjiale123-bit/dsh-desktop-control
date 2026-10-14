@@ -262,13 +262,25 @@ export function createDesktopToolset(options = {}) {
           `title=${JSON.stringify(w.title ?? '')}`,
         ].filter(Boolean).join('  '))
 
+      // 文案必须反映**真实**的准入规则，否则用户会按错的模型操作。
+      //
+      // 早期版本这里写"白名单为空——只能观察"，那在只有静态白名单时是对的。
+      // 加了会话级授权之后就不对了：静态名单为空**不等于**不能操作，
+      // 变更性操作会弹询问。说成"只能观察"会让人以为功能坏了。
+      const eff = effectiveAllowlist()
+      const grantRows = [...grants.keys()]
+
       return {
         text:
           `本机可见窗口 ${rows.length} 个（坐标为物理像素）：\n` +
           rows.join('\n') +
-          (allowlist.length
-            ? `\n\n当前白名单：${allowlist.join(', ')}`
-            : '\n\n当前白名单为空——只能观察，不能操作任何应用。'),
+          (eff.length
+            ? `\n\n当前可操作的应用：${eff.join(', ')}` +
+              (grantRows.length
+                ? `（其中 ${grantRows.join(', ')} 是本次会话授权的，会话结束即失效）`
+                : '（来自配置里的静态白名单，属持久放行）')
+            : '\n\n当前没有已放行的应用。变更性操作会先询问你——' +
+              '同意后仅对当前会话的该应用有效，不会写入配置；观察类工具不受限制。'),
       }
     },
 
