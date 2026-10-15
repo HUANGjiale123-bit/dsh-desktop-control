@@ -134,8 +134,19 @@ namespace DscEsc
                 L("闸门写入失败: " + e.GetType().Name + ": " + e.Message);
             }
 
-            // ② 退出。父进程监视本进程，随即收掉界面。
-            //    用 BeginInvoke 到消息队列，避免在钩子回调里直接结束进程。
+            // ② 只在**闸门确实写成功**时退出。
+            //
+            // 写失败还照样退出，就等于"界面消失了，但操作一点没停"——
+            // 用户以为停住了，实际完全没有。这比不退出危险得多。
+            // 所以失败时**保持运行**：指示条还在屏幕上，就是"还没停成"的信号。
+            if (!File.Exists(_gate))
+            {
+                L("闸门写入失败，保持运行（界面继续显示，表示未停止）");
+                _tripped = false;      // 允许再按一次 ESC 重试
+                return;
+            }
+
+            // ③ 退出。父进程监视本进程，随即收掉两个界面。
             try
             {
                 System.Threading.ThreadPool.QueueUserWorkItem(delegate
@@ -151,7 +162,19 @@ namespace DscEsc
         private static int Main(string[] args)
         {
             _gate = args.Length > 0 ? args[0] : "";
-            _log = args.Length > 1 ? args[1] : "";
+
+            // 日志路径默认与闸门同目录，**不再依赖调用方传第二个参数**。
+            //
+            // 插件只传闸门路径，于是 _log 为空、L() 直接 return——整个程序
+            // 静默运行。后果很严重：写闸门失败时没有任何痕迹，而外部看到的
+            // 现象是"按了 ESC 界面消失、操作照旧"，与"ESC 没抓到"完全无法区分。
+            //
+            // 诊断信息必须由程序自己产生，不能指望调用方记得传。
+            _log = args.Length > 1 && !string.IsNullOrEmpty(args[1])
+                ? args[1]
+                : (string.IsNullOrEmpty(_gate)
+                    ? Path.Combine(Path.GetTempPath(), "dsc-esc.log")
+                    : Path.Combine(Path.GetDirectoryName(_gate) ?? ".", "esc.log"));
 
             L("=== dsc-esc 启动 ===");
             L("闸门=" + _gate);
