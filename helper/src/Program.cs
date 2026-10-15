@@ -1867,6 +1867,52 @@ namespace Dsc
             string tree = snap.Tree;
             if (extra.Length > 0) tree = tree + "\n" + extra.ToString().TrimEnd();
 
+            // ── 树的"可用性"度量 ──
+            //
+            // 为什么要量它：部分打包应用（Electron、WinUI/XAML）会把界面暴露成
+            // 一大片无名的 Pane，树上看着有几百个节点，实际上**没有一个能用来
+            // 定位或描述**。模型拿到这种树会以为"读到了界面"，然后基于空洞的
+            // 信息做判断——问题不是"树不好用"，而是"树不好用的时候没人说"。
+            //
+            // 所以统计两件事：
+            //   · 有多少节点**带名字或文本**（有内容的）
+            //   · 有多少节点是**可交互角色**（Button/Edit/ListItem/MenuItem 等，
+            //     这些才能写进元素描述符被 click_element 使用）
+            // 两者都低就说明这棵树没有信息量，应当改用截图。
+            Dictionary<string, int> roleCount = new Dictionary<string, int>();
+            int named = 0;
+            foreach (KeyValuePair<int, AutomationElement> kv in snap.Map)
+            {
+                string role = SnapshotOps.SafeStr(delegate
+                {
+                    return kv.Value.Current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+                });
+                if (string.IsNullOrEmpty(role)) role = "?";
+                int c;
+                roleCount.TryGetValue(role, out c);
+                roleCount[role] = c + 1;
+
+                string nm = SnapshotOps.SafeStr(delegate { return kv.Value.Current.Name; });
+                if (!string.IsNullOrEmpty(nm)) named++;
+            }
+
+            int actionable = 0;
+            string[] actionableRoles = new string[]
+            {
+                "Button", "Edit", "ComboBox", "CheckBox", "RadioButton", "Hyperlink",
+                "ListItem", "MenuItem", "TabItem", "TreeItem", "Slider", "Spinner",
+                "SplitButton", "DataItem", "Document", "Text",
+            };
+            foreach (string r in actionableRoles)
+            {
+                int c;
+                if (roleCount.TryGetValue(r, out c)) actionable += c;
+            }
+
+            // 树是否值得用：要么有可交互元素，要么有带名字的节点。
+            // 两个都少就意味着这棵树描述不了界面。
+            bool usable = actionable >= 5 || named >= 12;
+
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("hwnd").Num(hwnd.ToInt64())
@@ -1874,10 +1920,32 @@ namespace Dsc
                 .Key("total").Num(snap.Total)
                 .Key("listed").Num(snap.Listed)
                 .Key("truncated").Bool(snap.Truncated)
+                .Key("named").Num(named)
+                .Key("actionable").Num(actionable)
+                .Key("usable").Bool(usable)
+                .Key("roles").Val(string.Join(", ",
+                    new List<string>(SortedRoles(roleCount, 12)).ToArray()))
                 .Key("tree").Val(tree)
              .End();
             Console.WriteLine(j.ToString());
             return 0;
+        }
+
+        /// <summary>按数量降序取前 N 个"角色=数量"，供质量度量展示。</summary>
+        private static IEnumerable<string> SortedRoles(Dictionary<string, int> counts, int top)
+        {
+            List<KeyValuePair<string, int>> list = new List<KeyValuePair<string, int>>(counts);
+            list.Sort(delegate (KeyValuePair<string, int> a, KeyValuePair<string, int> b)
+            {
+                int c = b.Value.CompareTo(a.Value);
+                return c != 0 ? c : string.CompareOrdinal(a.Key, b.Key);
+            });
+            int n = 0;
+            foreach (KeyValuePair<string, int> kv in list)
+            {
+                if (n++ >= top) break;
+                yield return kv.Key + "=" + kv.Value;
+            }
         }
 
         private static int _nodeCount;

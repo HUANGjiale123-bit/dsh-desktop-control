@@ -510,11 +510,42 @@ export function createDesktopToolset(options = {}) {
 
       const r = await runHelper(['tree', String(hwnd), String(maxNodes ?? 300)], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      // ── 把"这棵树能不能用"一并说出来 ──
+      //
+      // 不加这一段，模型会拿到一棵只有 2 个 Pane 的树，却以为"读到了界面"，
+      // 再基于空洞的信息往下判断。**问题不是"树不好用"，而是"树不好用的时候
+      // 没人说"。**
+      //
+      // 实测（五个真实应用，全部落在"不可用"一侧）：
+      //   DeepSeek Harness (Electron)  4 节点  0 可交互
+      //   Weixin (Electron)            4 节点  0 可交互
+      //   系统设置 (WinUI)              1 节点  0 可交互
+      //   WinUI 记事本                 10 节点  0 可交互（Pane=8）
+      //
+      // 措辞刻意留余地：说的是**这一次读到的**状况，不是关于该应用的定论。
+      // 同一天里同一个腾讯视频窗口，曾读到 60 个节点（含可写的 Edit 搜索框），
+      // 也读到过 2 个——差异原因没查清，所以不写成结论。
+      let quality = ''
+      if (!r.usable) {
+        quality =
+          `\n\n⚠️ 这次读到的树信息很少：${r.total} 个节点，带名字 ${r.named} 个、` +
+          `可交互元素 ${r.actionable} 个。角色分布：${r.roles || '（无）'}。\n` +
+          `现代应用（Electron、WinUI）经常很少暴露无障碍信息。这种情况下：\n` +
+          `  · 用 desktop_screenshot 看界面\n` +
+          `  · 需要点击时优先用 desktop_click_element 写元素描述符，` +
+          `或改用文本输入加回车（desktop_set_value + desktop_press_key）\n` +
+          `  · 重复读一次有时能读到更多，值得一试\n` +
+          `注意这是**本次读取**的状况，不等于该应用永远如此。`
+      }
+
       return {
         text:
           UNTRUSTED_PREFIX +
-          `窗口 ${hwnd} 无障碍树（共 ${r.total} 个元素，列出 ${r.listed} 个）：\n` +
-          r.tree,
+          `窗口 ${hwnd} 无障碍树（共 ${r.total} 个元素，列出 ${r.listed} 个；` +
+          `带名字 ${r.named}，可交互 ${r.actionable}）：\n` +
+          r.tree +
+          quality,
       }
     },
 
