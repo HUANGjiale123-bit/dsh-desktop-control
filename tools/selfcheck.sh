@@ -110,6 +110,20 @@ else
   echo "  （跳过：找不到 node 或部署的 toolset.mjs）"
 fi
 
+head_ "8. 部署目录自洽（相对 import 都有对应文件）"
+# 这一条来自一次真事故：新增 tooldsl.mjs 后 sync 的硬编码文件列表没带上它，
+# 于是部署目录缺文件 → 模块加载失败 → 插件激活失败 → 所有工具消失。
+# 源码目录和 tgz 里文件都齐，所以只有"部署目录"这一处能暴露它。
+if [ -n "$NODE" ] && [ -d "$DEST" ]; then
+  if "$NODE" tools/check-deploy.mjs "$DEST"; then
+    ok "部署目录自洽"
+  else
+    bad "部署目录不自洽 —— 见上面明细"
+  fi
+else
+  echo "  （跳过：找不到 node 或部署目录）"
+fi
+
 echo
 echo "══════════════════════════════"
 if [ "$FAIL" -eq 0 ]; then

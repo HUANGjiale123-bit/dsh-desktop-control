@@ -50,7 +50,7 @@ done
 
 # ③ 同步到目标
 mkdir -p "$DEST/bin"
-for f in index.mjs toolset.mjs cordis.patch.yml package.json; do
+for f in index.mjs toolset.mjs tooldsl.mjs cordis.patch.yml package.json; do
   cp "$SRC/$f" "$DEST/$f"
 done
 for exe in dsc.exe dsc-esc.exe; do
@@ -62,7 +62,7 @@ echo
 # ④ 校验：源与目标逐文件比对
 echo "校验（源 ↔ 目标）："
 fail=0
-for f in index.mjs toolset.mjs cordis.patch.yml package.json bin/dsc.exe bin/dsc-esc.exe; do
+for f in index.mjs toolset.mjs tooldsl.mjs cordis.patch.yml package.json bin/dsc.exe bin/dsc-esc.exe; do
   a=$(md5sum "$SRC/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   b=$(md5sum "$DEST/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   if [ "$a" = "$b" ] && [ "$a" != "missing" ]; then

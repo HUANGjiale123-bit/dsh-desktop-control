@@ -97,29 +97,83 @@ export function compileParameters(parameters, toolName) {
   return schema
 }
 
-/** 校验输出 schema 的形状（与宿主用到的键保持一致）。 */
-function assertOutputSchema(schema, toolName) {
+/**
+ * 规范化输出 schema：把属性节点上的 `required: true` 提到父级数组。
+ *
+ * ── 为什么必须做这一步（重要）──
+ *
+ * `output.schema` 是**author-facing 规格**，不是裸 JSON Schema ——
+ * 原版 defineTool 也一样会转换它（`compileValueSchema`）。
+ * 而本插件所有工具写的都是这种形式：
+ *
+ *     properties: { result: { type: 'string', required: true } }
+ *
+ * 那是 author-facing 的写法。**裸 JSON Schema 里 required 是父级对象的数组**，
+ * 不是属性自身的键。
+ *
+ * 我第一版把它当裸 schema 原样透传，结果"能用"——因为宿主的校验恰好容忍了
+ * 这种写法。**但这是挂在未验证的容忍行为上**：哪天它严格起来，
+ * 注册就抛异常，表现为插件激活失败、所有工具消失（今天下午刚见过这种症状）。
+ * 所以这里自己规范化，不依赖宿主宽容。
+ *
+ * 这也让插件内两套规则统一：参数走 compileParameters、输出走这里，
+ * 都是"author-facing 进、规范 JSON Schema 出"。
+ */
+function normalizeOutputSchema(schema, toolName) {
   const where = `${toolName}.output.schema`
-  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) {
-    schemaError(`${where} 必须是对象`)
-  }
-  for (const k of Object.keys(schema)) {
-    if (!ALLOWED_OUTPUT_KEYS.has(k)) {
-      schemaError(
-        `${where} 含不支持的键 "${k}"。支持的键：${[...ALLOWED_OUTPUT_KEYS].join(', ')}。`,
-      )
+
+  function walk(node, path) {
+    if (node === null || typeof node !== 'object' || Array.isArray(node)) {
+      schemaError(`${path} 必须是对象`)
     }
-  }
-  if (typeof schema.type !== 'string') schemaError(`${where} 缺少 type`)
-  if (schema.type === 'object' && schema.required !== undefined) {
-    if (!Array.isArray(schema.required)) schemaError(`${where}.required 必须是数组`)
-    for (const r of schema.required) {
-      if (typeof r !== 'string') schemaError(`${where}.required 只能含字符串`)
-      if (!schema.properties || !Object.hasOwn(schema.properties, r)) {
-        schemaError(`${where}.required 里的 "${r}" 不在 properties 里`)
+    for (const k of Object.keys(node)) {
+      if (!ALLOWED_OUTPUT_KEYS.has(k)) {
+        schemaError(
+          `${path} 含不支持的键 "${k}"。支持的键：${[...ALLOWED_OUTPUT_KEYS].join(', ')}。`,
+        )
       }
     }
+    if (typeof node.type !== 'string') schemaError(`${path} 缺少 type`)
+
+    const out = { type: node.type }
+    for (const k of Object.keys(node)) {
+      if (k !== 'type' && k !== 'properties' && k !== 'required' && k !== 'items') {
+        out[k] = node[k]
+      }
+    }
+
+    if (node.type === 'object') {
+      const props = {}
+      const required = []
+      for (const [name, sub] of Object.entries(node.properties ?? {})) {
+        props[name] = walk(sub, `${path}.properties.${name}`)
+        if (sub && sub.required === true) required.push(name)
+      }
+      out.properties = props
+
+      // 作者写的 required 数组（如果有）与属性上的标注合并，去重。
+      const explicit = Array.isArray(node.required) ? node.required : []
+      if (node.required !== undefined && !Array.isArray(node.required)) {
+        schemaError(`${path}.required 必须是数组（或改用属性上的 required: true）`)
+      }
+      for (const r of explicit) {
+        if (typeof r !== 'string') schemaError(`${path}.required 只能含字符串`)
+        if (!Object.hasOwn(props, r)) {
+          schemaError(`${path}.required 里的 "${r}" 不在 properties 里`)
+        }
+      }
+      const merged = [...new Set([...required, ...explicit])]
+      if (merged.length > 0) out.required = merged
+    }
+
+    if (node.type === 'array' && node.items !== undefined) {
+      out.items = walk(node.items, `${path}.items`)
+    }
+
+    return out
   }
+
+  return walk(schema, where)
 }
 
 /**
@@ -173,7 +227,8 @@ export function defineTool(options) {
   if (!options.output || typeof options.output.render !== 'function') {
     schemaError(`${name}: output.render 必须是函数`)
   }
-  assertOutputSchema(options.output.schema, name)
+  // 输出 schema 是 author-facing 规格，要规范化成裸 JSON Schema 再交给宿主。
+  const outputSchema = normalizeOutputSchema(options.output.schema, name)
   if (typeof options.execute !== 'function') schemaError(`${name}: execute 必须是函数`)
 
   const parameters = compileParameters(options.parameters, name)
@@ -185,7 +240,7 @@ export function defineTool(options) {
     description: options.description,
     parameters,
     output: {
-      schema: options.output.schema,
+      schema: outputSchema,
       render: (args, value) => options.output.render(args, value),
     },
     async execute(args, exec) {

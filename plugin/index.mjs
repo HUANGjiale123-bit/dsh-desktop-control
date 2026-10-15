@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.5.1'
+const PLUGIN_VERSION = '2.5.2'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -509,7 +509,7 @@ function applyInner(ctx, config = {}) {
     ? `静态白名单：${set.allowlist.join(', ')}（持久放行）。` +
       '其它应用会在操作时询问——同意后仅对当前会话有效。'
     : '静态白名单为空。任何变更性操作都会先询问——同意后仅对当前会话有效，' +
-      '不会写入配置。观察类工具不受限制。'
+      '不会写入配置。**读取界面内容（读树、截图）同样要先授权**——观察也是访问。'
 
   // 记录已注册的工具名：日志里报数量与名单，这样"哪个版本跑起来了"
   // 可以直接从日志读出来，不必靠工具是否可调来推断。
@@ -522,7 +522,7 @@ function applyInner(ctx, config = {}) {
   register({
     name: 'desktop_list_apps',
     description:
-      '列出本机已安装的应用（名字、可执行文件路径、版本）。**只读，不受白名单限制。**' +
+      '列出本机已安装的应用（名字、可执行文件路径、版本）。**不需要授权**——它只给出名字与路径，不读任何界面内容。' +
       '配合 desktop_launch_app 使用：先看清单确认准确的名字，再启动。' +
       '清单来自注册表里声明了显示名的程序，不包含系统组件与更新补丁。',
     parameters: {
@@ -939,7 +939,7 @@ function applyInner(ctx, config = {}) {
       '它只是状态提示，不含任何控制能力。' +
       '同时在屏幕正中显示一个**逃生窗**——可点的"停止"按钮，' +
       '让使用者随时停得下来，不必等助手配合。' +
-      '不受白名单限制。建议在开始操作桌面前调用。',
+      '不需要授权。**任何变更性操作放行后，插件会自动拉起指示层**，所以多数情况下不必手动调用；这个工具用于提前开启。',
     parameters: {
       label: { type: 'string', description: '徽标与逃生窗上显示的文本，默认"已激活"。' },
       timeoutMs: { type: 'integer', description: '多久后自动消失（毫秒）；0 或省略表示常驻，直到调用 desktop_off。' },
@@ -989,10 +989,12 @@ function applyInner(ctx, config = {}) {
   register({
     name: 'desktop_off',
     description:
-      '立即关闭 computer use 状态指示层，并拉下急停闸门让后续任何桌面操作被拒绝。' +
-      '**这是本插件唯一的停止方式**——本环境无法捕获全局按键，因此没有"按 ESC 停"。' +
-      '它不依赖按键通道或前台窗口，无论指示层是怎么起来的都收得掉。' +
-      '想停手时调用它。',
+      '正常结束 computer use：关掉状态指示层（光带 + 逃生条），并让闸门回到未触发状态。' +
+      '**这是"这段结束了"的意思，不是"我被劫持了"**——所以它不留下闸门，' +
+      '后续操作不会被无条件拒绝。' +
+      '要立刻打断正在进行的操作，让用户**按物理 ESC**，或点屏幕上方的逃生条：' +
+      '那两条路会留下闸门，之后的操作一律被拒，直到显式解除。' +
+      '本工具不依赖按键通道或前台窗口，无论指示层是怎么起来的都收得掉。',
     parameters: {},
     output: {
       schema: {

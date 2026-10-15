@@ -83,6 +83,39 @@ for (const f of siblings) {
 }
 const hasHardcodedWorkspace = hardcodedLines.length > 0
 
+// ── 工具描述不能与行为矛盾 ──
+//
+// 工具描述是**模型读到的契约**。它过时了，模型就会照着对用户说假话，
+// 而这件事没有任何报错：代码对不对是另一回事，描述错了照样"通过"。
+//
+// 实测踩到过：desktop_off 的描述写着"这是本插件唯一的停止方式——
+// 本环境无法捕获全局按键，因此没有'按 ESC 停'"，而那时 ESC 早就
+// 实机验证过两次能用。用户问"怎么停"，模型会照描述答"没有 ESC"。
+//
+// 这类问题只能靠已知的过时说法清单来拦——不优雅，但比没有强。
+const STALE_CLAIMS = [
+  '无法捕获全局按键', // ESC 钩子早已可用
+  '唯一的停止', // ESC / 逃生条 / desktop_off 三条路
+  '不受限制', // 读树与截图现在要授权
+  '不受白名单限制', // 同上；措辞也不准确（用的是会话授权）
+]
+const staleFound = []
+for (const f of siblings) {
+  let text
+  try {
+    text = readFileSync(f, 'utf8')
+  } catch {
+    continue
+  }
+  const short = f.split(/[\\/]/).pop()
+  for (const claim of STALE_CLAIMS) {
+    for (const m of text.matchAll(new RegExp(`^.*${claim}.*$`, 'gm'))) {
+      const line = m[0].trim()
+      if (!/^(\/\/|\*|\/\*)/.test(line)) staleFound.push(`${short}: ${line.slice(0, 90)}`)
+    }
+  }
+}
+
 for (const [name, needAuth] of Object.entries(WANT)) {
   const body = bodyOf(src, name)
   if (body === null) {
@@ -98,10 +131,11 @@ for (const [name, needAuth] of Object.entries(WANT)) {
   }
 }
 
-if (problems.length === 0 && !hasHardcodedWorkspace) {
+if (problems.length === 0 && !hasHardcodedWorkspace && staleFound.length === 0) {
   console.log('  ✓ 授权策略符合预期：')
   for (const s of summary) console.log(s)
   console.log('  ✓ 无硬编码的本机工作区路径')
+  console.log('  ✓ 工具描述无过时说法')
   process.exit(0)
 }
 
@@ -110,6 +144,13 @@ if (hasHardcodedWorkspace) {
   for (const line of hardcodedLines) console.log(`      ${line}`)
   console.log('      插件的判定不能依赖某台机器的目录名——换一个工作区就会误报。')
   console.log('      需要判断位置时用 workspaceRegistry 反查，或改为功能性探测。')
+}
+
+if (staleFound.length > 0) {
+  console.log('  ✗ 工具描述里有与行为矛盾的说法：')
+  for (const line of staleFound) console.log(`      ${line}`)
+  console.log('      描述是模型读到的契约；它过时了，模型就会照着对用户说假话，')
+  console.log('      而这件事不会有任何报错。改描述，或把这条说法从清单里去掉（仅当它已不适用）。')
 }
 
 if (problems.length > 0) {

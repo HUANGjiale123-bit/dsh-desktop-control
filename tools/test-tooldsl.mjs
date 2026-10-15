@@ -175,6 +175,115 @@ if (enumOk) ok('enum 内的值 → 通过')
 else bad('enum 内的值被拒了')
 
 console.log()
+console.log('── 7. 输出 schema 的规范化（author-facing → 裸 JSON Schema）──')
+
+// 这一节是补上的，因为**第一版没有覆盖它**，而那里藏着一个真问题：
+// 插件的 15 个工具都写 `properties: { result: { type:'string', required:true } }`，
+// 那是 author-facing 写法（原版 defineTool 会转换它）。我的 shim 第一版
+// 原样透传，恰好因宿主校验宽容而能用——**挂在未验证的容忍行为上**。
+// 宿主一旦严格起来，注册就抛异常、插件激活失败、所有工具消失。
+
+const t7 = defineTool({
+  name: 'norm',
+  description: 'd',
+  parameters: {},
+  output: {
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { result: { type: 'string', required: true } },
+    },
+    render: () => [],
+  },
+  async execute() { return { result: '' } },
+})
+if (t7.output.schema.required?.[0] === 'result') ok('属性上的 required 提到父级数组')
+else bad(`required 没提层: ${JSON.stringify(t7.output.schema.required)}`)
+if (!('required' in t7.output.schema.properties.result)) ok('属性节点上的 required 已清除')
+else bad('属性节点上仍残留 required —— 裸 JSON Schema 里这是错的')
+if (t7.output.schema.additionalProperties === false) ok('其他键（additionalProperties）保留')
+else bad('additionalProperties 被丢了')
+
+// 嵌套也要处理
+const t7b = defineTool({
+  name: 'norm2',
+  description: 'd',
+  parameters: {},
+  output: {
+    schema: {
+      type: 'object',
+      properties: {
+        list: {
+          type: 'array',
+          items: { type: 'object', properties: { x: { type: 'string', required: true } } },
+        },
+      },
+    },
+    render: () => [],
+  },
+  async execute() { return {} },
+})
+const nested = t7b.output.schema.properties.list.items
+if (nested.required?.[0] === 'x' && !('required' in nested.properties.x)) ok('嵌套 items 里也规范化了')
+else bad(`嵌套没规范化: ${JSON.stringify(nested)}`)
+
+console.log()
+console.log('── 8. 用【实际的全部工具定义】验输出规范化 ──')
+
+// 与第 1 节同样的思路：不看手写样例，看 index.mjs 里真实写了什么。
+// 每个工具定义都要能通过 defineTool 的完整校验，且规范化后
+// 不能有任何属性节点残留 required —— 那正是交给宿主的东西。
+const outputSchemas = []
+{
+  const re = /output:\s*\{\s*schema:\s*\{/g
+  let m
+  while ((m = re.exec(src))) {
+    let i = m.index + m[0].length - 1   // 指向 schema 的 {
+    let depth = 0
+    let j = i
+    while (j < src.length) {
+      if (src[j] === '{') depth++
+      else if (src[j] === '}') { depth--; if (depth === 0) break }
+      j++
+    }
+    outputSchemas.push(src.slice(i, j + 1))
+  }
+}
+console.log(`     从 index.mjs 抽出 ${outputSchemas.length} 处 output.schema`)
+
+let normOk = 0
+let normBad = 0
+for (const [idx, literal] of outputSchemas.entries()) {
+  try {
+    const schema = new Function(`return (${literal})`)()
+    const tool = defineTool({
+      name: `t${idx}`,
+      description: 'd',
+      parameters: {},
+      output: { schema, render: () => [] },
+      async execute() { return {} },
+    })
+    // 规范化后，任何属性节点上都不该再有 required
+    let leaked = false
+    const scan = (n) => {
+      if (!n || typeof n !== 'object') return
+      for (const [k, v] of Object.entries(n.properties ?? {})) {
+        if (v && Object.hasOwn(v, 'required')) leaked = true
+        scan(v)
+      }
+      if (n.items) scan(n.items)
+    }
+    scan(tool.output.schema)
+    if (leaked) { bad(`第 ${idx + 1} 处规范化后仍有属性节点带 required`); normBad++ }
+    else normOk++
+  } catch (e) {
+    bad(`第 ${idx + 1} 处输出 schema 处理失败: ${e.message}`)
+    normBad++
+  }
+}
+if (normBad === 0) ok(`全部 ${normOk} 处输出 schema 规范化通过（无属性节点残留 required）`)
+
+console.log()
 console.log('══════════════════════════════')
 console.log(fail === 0 ? `  全部通过（${pass} 项）` : `  ${pass} 项通过，${fail} 项失败  ← 先修`)
 console.log('══════════════════════════════')
