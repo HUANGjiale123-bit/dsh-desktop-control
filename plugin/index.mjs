@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.0.0'
+const PLUGIN_VERSION = '2.1.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -379,6 +379,9 @@ function applyInner(ctx, config = {}) {
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
     requestApproval,
+    // 变更性操作放行后自动确保指示层在跑——把"看得见"绑到 computer use
+    // 状态本身，而不是绑到"助手记得开提示"。
+    onAuthorized: () => ensureIndicator(),
     // 闸门路径交给 toolset，它每次 spawn dsc.exe 时都要带上 DSC_HALT_GATE，
     // 否则 dsc.exe 会自己从 exe 位置推一个不同的路径，于是
     // "ESC 写了 A、dsc.exe 查 B"——界面消失了但操作没停。
@@ -616,6 +619,29 @@ function applyInner(ctx, config = {}) {
    */
 
   const liveOverlays = new Map()   // key -> ChildProcess
+
+  /**
+   * 确保指示层在跑。已经在跑就什么都不做。
+   *
+   * 由每一个变更性操作在放行之后自动调用——**不依赖助手记得调
+   * desktop_indicate**。理由很直接：指示层的作用是让用户知道自己的电脑
+   * 正被操控，而依赖"操控方记得开提示"的提示等于没有提示。
+   *
+   * 刚才操作腾讯视频时就是这个缺口：我全程没调 desktop_indicate，
+   * 于是你在没有任何提示的情况下被操控了好几轮。用户指出"你操作腾讯视频
+   * 不就是 computer use 吗"——对的，那就是 computer use，就该有提示。
+   */
+  function ensureIndicator() {
+    const cur = liveOverlays.get('escape')
+    if (cur && cur.exitCode === null) return { ok: true, already: true }
+    const r = startIndicator('escape', [gateChecked()], escPath)
+    if (r.ok) {
+      ctx.logger?.info?.(
+        '[desktop-control] 检测到变更性操作，已自动拉起指示层（光带 + 逃生条）',
+      )
+    }
+    return r
+  }
 
   function startIndicator(key, args, prog) {
     const exe = prog ?? escPath

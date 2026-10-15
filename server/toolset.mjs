@@ -215,10 +215,16 @@ export function createDesktopToolset(options = {}) {
     }
 
     // ① 静态白名单：用户显式配置过的，属于预授权，直接放行。
-    if (staticAllowlist.includes(base)) return { ok: true, window: w, via: 'static' }
+    if (staticAllowlist.includes(base)) {
+      await afterAuthorize(toolName, base)
+      return { ok: true, window: w, via: 'static' }
+    }
 
     // ② 本会话已授权：同一个应用不重复问。
-    if (grants.has(base)) return { ok: true, window: w, via: 'session' }
+    if (grants.has(base)) {
+      await afterAuthorize(toolName, base)
+      return { ok: true, window: w, via: 'session' }
+    }
 
     // ③ 都没有 → 走会话级授权（问用户）。
     //
@@ -259,7 +265,31 @@ export function createDesktopToolset(options = {}) {
     }
 
     grants.set(base, 'session')
+    await afterAuthorize(toolName, base)
     return { ok: true, window: w, via: 'session-new' }
+  }
+
+  /**
+   * 变更性操作放行后的钩子（可选）：把"指示层"绑到 computer use 状态上。
+   *
+   * 为什么必须自动：指示层的意义是**让用户知道自己的电脑正被操控**。
+   * 如果它依赖助手主动调 desktop_indicate，那助手一旦忘了——刚才操作
+   * 腾讯视频就是——用户就在毫无提示的情况下被操控。
+   * **提示的价值恰恰在于它不依赖被提示者的配合。**
+   *
+   * 放在 authorize() 通过之后、实际动作之前：
+   *   · 太早 → 还没确定能不能操作，就先把"正在被操控"亮起来
+   *   · 太晚 → 已经点下去了，提示跟不上
+   *
+   * 钩子抛错不阻断操作：指示层是提示，不是闸门。
+   */
+  async function afterAuthorize(toolName, app) {
+    if (typeof options.onAuthorized !== 'function') return
+    try {
+      await options.onAuthorized(toolName, app)
+    } catch {
+      // 提示起不来不该让操作失败
+    }
   }
 
   /* ───────────── 工具实现 ───────────── */
