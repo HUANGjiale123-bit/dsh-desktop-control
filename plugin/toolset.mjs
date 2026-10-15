@@ -126,9 +126,17 @@ export function createDesktopToolset(options = {}) {
       //
       // 这不是假设，是实测踩到的：插件传了 DSC_HALT_GATE 给 dsc-esc，
       // 却漏了 dsc.exe，两个路径分别落在 profile 与仓库目录下。
-      if (options.gatePath) {
-        env = { ...env, DSC_HALT_GATE: options.gatePath }
-      }
+      // 闸门路径可能是**函数**：它要等会话上下文建立后才能解析出来
+      // （workspaceRegistry 反查依赖 currentInitiator()，而插件加载时还没有
+      // 会话）。toolset 每次 spawn 都在会话内，所以在这里求值正好。
+      //
+      // 不传的话 dsc.exe 会自己从 exe 位置推一个路径，和 dsc-esc 写的位置
+      // 不一致 —— 那种情况下按 ESC 只关界面、拦不住操作。
+      const gate =
+        typeof options.getGatePath === 'function'
+          ? options.getGatePath()
+          : options.gatePath
+      if (gate) env = { ...env, DSC_HALT_GATE: gate }
 
       let child
       try {

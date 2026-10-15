@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.7.0'
+const PLUGIN_VERSION = '0.8.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -209,6 +209,20 @@ function applyInner(ctx, config = {}) {
    * 正确做法是**问 DSH**：workspaceRegistry 里每个 workspace 带 path 和
    * sessionIds，用当前会话 id 反查就能拿到工作区路径。
    */
+  let _gatePath = null
+
+  /**
+   * 解析闸门路径（**首次用到时才算**，不在插件加载时算）。
+   *
+   * 为什么不放在加载时：workspaceRegistry 的反查依赖
+   * `agents.currentInitiator()`，而那个"当前会话"是在**工具调用期间**
+   * 才建立的进程内因果链。插件 apply 的时候还没有会话，取到 undefined，
+   * 于是永远走兜底分支、闸门落到工作区外。
+   *
+   * 这个坑很隐蔽：代码看着没问题、列表数据里也确实有本会话 id，
+   * 只是问得太早。所以改成惰性求值——第一次真正要用闸门时再问，
+   * 那时必然在会话上下文里。
+   */
   function resolveGatePath() {
     if (config.gatePath) return config.gatePath
 
@@ -232,16 +246,27 @@ function applyInner(ctx, config = {}) {
     return join(process.cwd(), '.desktop-control', 'halt')
   }
 
-  const gatePath = resolveGatePath()
+  /** 闸门路径 getter：首次调用时解析并缓存。 */
+  function gate() {
+    if (_gatePath === null) _gatePath = resolveGatePath()
+    return _gatePath
+  }
 
   // 闸门落在工作区外就明确告警——那种情况下 ESC 能拉闸但解除不了，
   // 而且 dsc.exe 根本看不见它，症状是"按了 ESC 好像没停"。
-  if (!config.gatePath && !/dsh workspace/i.test(gatePath)) {
-    ctx.logger?.warn?.(
-      `[desktop-control] 闸门路径 ${gatePath} 可能不在会话工作区内。` +
-        `dsc.exe 是沙箱子进程、只能写工作区，若它读不到这道闸门，` +
-        `按 ESC 会只关掉界面而拦不住操作。可用 config.gatePath 显式指定。`,
-    )
+  // 放在 gate() 里而不是加载时：解析本身就是惰性的。
+  let _gateWarned = false
+  function gateChecked() {
+    const g = gate()
+    if (!_gateWarned && !config.gatePath && !/dsh workspace/i.test(g)) {
+      _gateWarned = true
+      ctx.logger?.warn?.(
+        `[desktop-control] 闸门路径 ${g} 可能不在会话工作区内。` +
+          `dsc.exe 是沙箱子进程、只能写工作区，若它读不到这道闸门，` +
+          `按 ESC 会只关掉界面而拦不住操作。可用 config.gatePath 显式指定。`,
+      )
+    }
+    return g
   }
 
   // 如果 helper 落在工作区目录里，明确警告。这不是风格问题：
@@ -259,10 +284,13 @@ function applyInner(ctx, config = {}) {
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
     requestApproval,
-    // 闸门路径必须同时交给 toolset：它每次 spawn dsc.exe 都要带上
-    // DSC_HALT_GATE，否则 dsc.exe 会自己从 exe 位置推一个不同的路径，
-    // 于是"ESC 写了 A、dsc.exe 查 B"——界面消失了但操作没停。
-    gatePath,
+    // 闸门路径交给 toolset，它每次 spawn dsc.exe 时都要带上 DSC_HALT_GATE，
+    // 否则 dsc.exe 会自己从 exe 位置推一个不同的路径，于是
+    // "ESC 写了 A、dsc.exe 查 B"——界面消失了但操作没停。
+    //
+    // 传**函数**而不是值：路径要等会话上下文建立之后才能解析出来
+    // （见 resolveGatePath 的注释），而 toolset 是在每次调用时才读它。
+    getGatePath: () => gateChecked(),
   })
 
   const allowNote = set.allowlist.length
@@ -641,7 +669,7 @@ function applyInner(ctx, config = {}) {
       // 为什么必须有 ESC：鼠标可以被恶意程序抢（抢焦点、全屏覆盖、伪造点击），
       // 键盘不行——低层钩子在系统把按键投递给任何窗口之前就能看到它。
       // 所以"点按钮停"是方便，**"按 ESC 停"才是保险**。
-      const r2 = startIndicator('escape', [gatePath], escPath)
+      const r2 = startIndicator('escape', [gateChecked()], escPath)
 
       if (!r1.ok && !r2.ok) throw new Error(r1.reason)
 
