@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-control",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "让 DSH 看见屏幕、操作鼠标键盘，带会话级授权与随时可停的急停机制",
   "type": "module",
   "main": "index.mjs",
@@ -13,6 +13,7 @@
     "README.md",
     "index.mjs",
     "toolset.mjs",
+    "tooldsl.mjs",
     "cordis.patch.yml",
     "bin/dsc.exe",
     "bin/dsc-esc.exe"
@@ -31,8 +32,5 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "*"
   }
 }

@@ -21,7 +21,14 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+// 工具定义用本地的实现，而不是 `@deepseek-ai/dsh-tools`。
+//
+// 那个包不在 profile 的 node_modules 里，而是由宿主的 `bareModuleBaseUrl`
+// 解析到宿主安装位置。宿主能解析时一切正常；解析不到时**模块加载直接失败**，
+// 而且失败在模块顶层——插件自己的 try/catch 兜底都进不去，外面只看到
+// "所有 desktop_* 工具都不存在"。作者无法控制宿主的解析行为，
+// 所以不依赖它才是稳的。转换逻辑就十几行，见 tooldsl.mjs。
+import { defineTool } from './tooldsl.mjs'
 import { createDesktopToolset } from './toolset.mjs'
 
 export const name = 'dsh-desktop-control'
@@ -48,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.4.0'
+const PLUGIN_VERSION = '2.5.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
