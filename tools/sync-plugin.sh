@@ -91,8 +91,28 @@ else
   fail=1
 fi
 
+# 检查"删了定义但留下引用"这类错误。
+#
+# 两次踩到同一个坑：删掉一个常量（gatePath、edgePath），却漏掉某处引用。
+# 未定义标识符是**合法语法**，`node --check` 查不出来，只在运行时抛异常；
+# 而插件 apply 抛异常的表现是"所有工具消失"——连诊断工具也没了，
+# 于是失去了排查手段。所以在这里静态挡一道。
 echo
-if [ "$fail" -eq 0 ]; then
+echo "检查残留的未定义引用："
+LEFTOVER=0
+for name in edgePath gatePath bundledEdge repoEdge overlayPath; do
+  # 排除合法写法：config.X / _X / X: / 'X' 之类的定义或属性访问
+  hits=$(grep -n "${name}" "$DEST/index.mjs" 2>/dev/null          | grep -vE "config\.${name}|_${name}|${name}:|'${name}'|\* |// " || true)
+  if [ -n "$hits" ]; then
+    echo "  ✗ ${name} 可能有未定义引用："
+    echo "$hits" | head -3 | sed 's/^/      /'
+    LEFTOVER=1
+  fi
+done
+[ "$LEFTOVER" -eq 0 ] && echo "  ✓ 未发现残留引用"
+
+echo
+if [ "$fail" -eq 0 ] && [ "$LEFTOVER" -eq 0 ]; then
   echo "同步完成。重启 DSH 让插件重新加载。"
 else
   echo "同步有问题，见上面 ✗ 标记。" >&2

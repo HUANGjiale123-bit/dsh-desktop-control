@@ -63,6 +63,45 @@ export function apply(ctx, config = {}) {
   } catch (e) {
     const where = e && e.stack ? String(e.stack).split('\n').slice(0, 6).join(' | ') : ''
     ctx.logger?.error?.(`[desktop-control] v${PLUGIN_VERSION} 激活失败: ${e?.message}  :: ${where}`)
+
+    /* 激活失败时，尽量留下一个能干活的诊断工具。
+     *
+     * 为什么值得单独做：这个插件出过两次"删了常量定义却漏了引用"的事故，
+     * 而未定义标识符在 apply 里抛异常的表现是**所有工具一起消失**——
+     * 连 desktop_diagnose 也没了，于是同时失去了排查手段，只剩一句
+     * "unknown tool"，看不出是哪一行坏的。
+     *
+     * 所以失败路径上单独注册一个最小工具，只做一件事：把错误原文和堆栈
+     * 交出来。它不依赖任何出问题的代码路径。注册本身再失败就算了——
+     * 至少原始错误已经进了 logger。
+     */
+    try {
+      ctx.tools.register(defineTool({
+        name: 'desktop_diagnose',
+        description:
+          '桌面控制插件激活失败时注册的应急诊断工具。返回激活时的异常与堆栈，' +
+          '用于定位是哪一行坏的（正常情况下这个工具由插件主体注册，信息更全）。',
+        parameters: {},
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { result: { type: 'string', required: true } },
+          },
+          render: (_args, value) => [{ type: 'text', text: value.result }],
+        },
+        async execute() {
+          return {
+            result:
+              `插件 v${PLUGIN_VERSION} **激活失败**，当前只有这个应急工具。\n\n` +
+              `错误: ${e?.message ?? e}\n\n` +
+              `堆栈:\n${e?.stack ?? '（无堆栈）'}`,
+          }
+        },
+        presentCall: () => ({ card: 'generic', title: '激活失败（应急诊断）', kind: 'read' }),
+      }))
+    } catch { }
+
     throw e
   }
 }
