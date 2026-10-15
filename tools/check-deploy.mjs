@@ -32,7 +32,7 @@ if (!existsSync(dir) || !statSync(dir).isDirectory()) {
 }
 
 // 检查入口 + 它可能相对引用的所有模块
-const entries = ['index.mjs', 'toolset.mjs', 'tooldsl.mjs']
+const entries = ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs']
 const problems = []
 const checked = []
 

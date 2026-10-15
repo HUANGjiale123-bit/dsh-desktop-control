@@ -14,6 +14,9 @@ import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// 应用清单与解析 —— 走插件自己的实现，不经过 helper。
+// 理由见 launchApp 里关于沙箱与打包应用的注释。
+import { resolveApp, listInstalledApps, searchApps } from './apps.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const REPO_ROOT = resolve(HERE, '..')
@@ -38,6 +41,25 @@ export function createDesktopToolset(options = {}) {
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean)
+
+  /**
+   * 闸门文件当前存在吗（= 已急停）。
+   *
+   * 为什么 toolset 自己也要看闸门：launchApp 现在**由插件自己 spawn**，
+   * 不经过 helper，所以不能指望 helper 那层替它检查（理由见 launchApp 里
+   * 关于沙箱与打包应用的注释）。其它操作仍然经 helper 检查一遍。
+   */
+  function gateExists() {
+    try {
+      const g =
+        typeof options.getGatePath === 'function' ? options.getGatePath() : options.gatePath
+      return typeof g === 'string' && g.length > 0 && existsSync(g)
+    } catch {
+      // 拿不到闸门路径时**不阻断**：那是"检查不了"，不是"已急停"。
+      // 但也不静默——交给调用方看日志。
+      return false
+    }
+  }
 
   /**
    * 会话级授权钩子（可选）。
@@ -358,13 +380,21 @@ export function createDesktopToolset(options = {}) {
      * 只读，不需要授权——但它只给出名字与路径，不读任何界面内容。
      */
     async listApps({ query, limit } = {}) {
-      const args = ['list_apps']
-      if (query) args.push(String(query))
-      if (limit) args.push('--limit', String(limit))
-      const r = await runHelper(args)
-      if (!r.ok) return { isError: true, text: failMessage(r) }
+      // 走**插件自己的**清单（apps.mjs），不走 helper。
+      //
+      // 为什么和 launchApp 统一：两者必须给出**同一份**清单。
+      // 一边列举、另一边解析，如果实现分叉，会出现"清单里有它、
+      // 却说解析不到"这种自相矛盾。所以两边同一个来源。
+      let all
+      try {
+        all = query ? searchApps(query, Number(limit) || 200) : listInstalledApps()
+      } catch (e) {
+        return { isError: true, text: `读取已安装应用清单出错：${e?.message ?? e}` }
+      }
 
-      const apps = r.apps ?? []
+      const total = all.length
+      const cap = Number(limit) > 0 ? Number(limit) : 200
+      const apps = all.slice(0, cap)
       if (apps.length === 0) {
         return { text: `没有匹配的已安装应用${query ? `（关键词「${query}」）` : ''}。` }
       }
@@ -372,8 +402,8 @@ export function createDesktopToolset(options = {}) {
         (a) => `  ${a.name}${a.version ? `  v${a.version}` : ''}\n      ${a.exe}`,
       )
       // 被截断时要说出来，否则"已安装应用 N 个"会被读成"总共就这些"。
-      const total = typeof r.total === 'number' ? r.total : apps.length
-      const head = r.truncated
+      const clipped = apps.length < total
+      const head = clipped
         ? `已安装应用共 ${total} 个，这里列出前 ${apps.length} 个` +
           `${query ? `（匹配「${query}」）` : ''}——要更多请加大 limit：`
         : `已安装应用 ${apps.length} 个${query ? `（匹配「${query}」）` : ''}：`
@@ -415,60 +445,97 @@ export function createDesktopToolset(options = {}) {
       // 于是应用先被打开（未经检查），然后才问"能不能操作它"——
       // 授权发生在既成事实之后。
       //
-      // 所以第一步**只解析、不启动**（helper 的 resolve_app 专门为此拆出来）。
-      // 一次调用里既解析又启动的话，调用方就没有机会在启动前问许可。
+      // 第一步**只解析、不启动**。一次调用里既解析又启动的话，
+      // 调用方就没有机会在启动前问许可。
 
-      // 第一步只查不动。runHelper 直接把 JSON 解析好返回，
-      // ok:false 是"解析不到"的正常结果，会带上 candidates。
-      const resolved = await runHelper(['resolve_app', wanted])
+      // ① 解析。走**插件自己的**清单（apps.mjs），不走 helper。
+      //
+      // 为什么解析也要放在插件侧：启动必须在插件进程里做（理由见下面 ③），
+      // 而"启动"依赖"解析出的路径"——两边各实现一份判定迟早会分叉，
+      // 所以解析与启动待在同一个信任边界内。
+      let resolved
+      try {
+        resolved = resolveApp(wanted)
+      } catch (e) {
+        return { isError: true, text: `失败：读取已安装应用清单出错 — ${e?.message ?? e}` }
+      }
 
       if (!resolved.ok) {
-        // helper 已经把两种失败分开了（NoMatch = 一个都没匹配，
-        // Ambiguous = 匹配到多个），各自文案不同。直接用它的，
-        // 不要在插件层重新拼一句更含糊的——那会把区分抹掉。
-        //
-        // 早先这里自己拼的是"没有唯一解析到可执行文件，可能是这几个"，
-        // 候选为空时读起来像系统出错。实测触发：问"记事本"（清单里叫 Notepad）。
         const cands = (resolved.candidates ?? [])
           .map((c) => `  ${c.name}\n      ${c.exe}`)
           .join('\n')
-        const head =
-          resolved.message ??
-          (cands ? '没有唯一解析到可执行文件，可能是这几个：' : '没有匹配到任何已安装应用。')
+        if (resolved.reason === 'Ambiguous') {
+          return {
+            isError: true,
+            text:
+              `失败：匹配到多个应用，无法确定要启动哪一个（宁可不动，也不要启错程序）。` +
+              `请用更准确的名字，或直接给 .exe 完整路径。\n${cands}`,
+          }
+        }
         return {
           isError: true,
-          text: `失败：${head}` + (cands ? `\n${cands}` : ''),
+          text:
+            `失败：清单里没有任何应用匹配「${wanted}」。\n` +
+            `请用 desktop_list_apps 查看准确的名字——` +
+            `清单里的名字是安装时登记的显示名，未必和俗称一致` +
+            `（例如中文系统里的记事本登记为 "Notepad"）。`,
         }
       }
 
+      const app = resolved.app
+      const appBase = String(app.exe).split(/[\\/]/).pop().toLowerCase()
+
       // ② 授权：用**解析出来的应用名**问，而不是用户输入的那个词——
       //    授权记录按可执行文件名校验，名字对不上就白授权了。
-      const appBase = String(resolved.exe).split(/[\\/]/).pop().toLowerCase()
-      const auth = await authorizeApp(appBase, resolved.name, 'launchApp')
+      const auth = await authorizeApp(appBase, app.name, 'launchApp')
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      // ③ 授权通过，才真的启动
-      const launched = await runHelper(['launch', resolved.exe])
-      if (!launched.ok) {
-        // "已授权"不是这次失败的重点，重点是谁拒绝了。
-        // 实测触发：闸门拉下时启动，得到的是"已授权，但启动失败：…已被急停"——
-        // 读起来像授权出了问题，而实际是急停在起作用，且这正是期望行为。
-        const denied = /已被急停/.test(String(launched.message ?? ''))
+      // ③ 授权通过，才真的启动。**由插件自己 spawn，不经过 helper。**
+      //
+      // ── 为什么不能用 helper 启动（实测，2026-10-15）──
+      //
+      //   Store/MSIX 应用（记事本、画图）经 helper 启动 → 约 4 秒后自己退出，
+      //     事件日志：ucrtbase.dll 里 __fastfail（0xc0000409）
+      //   传统安装的应用（腾讯视频 D:\QQLive）经 helper 启动 → 存活，有窗口
+      //   同一个 exe 从沙箱外启动 → 全程正常
+      //
+      // 打包应用启动时要访问自己的包数据目录（%LOCALAPPDATA%\Packages\...），
+      // 而 helper 是 DSH 的**沙箱子进程**（写受限 token + 能力 SID ACL），
+      // 访问失败就自我终止。插件跑在 DSH 宿主里，不在沙箱内，所以由它启动。
+      //
+      // 闸门检查仍然生效：helper 那层做过一次，这里再做一次——
+      // 因为启动这个动作现在不经过 helper 了，不能指望它。
+      if (gateExists()) {
         return {
           isError: true,
-          text: denied
-            ? `未启动「${resolved.name}」：**急停闸门生效中**，所有操作被拒绝。\n` +
-              `这是预期行为——有人按了 ESC 或点了逃生条。` +
-              `确认安全后用 \`dsc.exe stop --clear\` 解除。`
-            : `启动「${resolved.name}」失败：${failMessage(launched)}`,
+          text:
+            `未启动「${app.name}」：**急停闸门生效中**，所有操作被拒绝。\n` +
+            `这是预期行为——有人按了 ESC 或点了逃生条。` +
+            `确认安全后用 \`dsc.exe stop --clear\` 解除。`,
+        }
+      }
+
+      let pid = 0
+      try {
+        const child = spawn(app.exe, [], {
+          detached: true,      // 脱离，插件退出后应用仍在
+          stdio: 'ignore',
+          windowsHide: false,
+        })
+        child.unref()
+        pid = child.pid ?? 0
+      } catch (e) {
+        return {
+          isError: true,
+          text: `启动「${app.name}」失败：${e?.message ?? e}\n  目标：${app.exe}`,
         }
       }
 
       return {
         text:
-          `已启动「${resolved.name}」：\n` +
-          `  可执行文件：${resolved.exe}\n` +
-          `  进程 pid：${launched.pid}\n` +
+          `已启动「${app.name}」：\n` +
+          `  可执行文件：${app.exe}\n` +
+          `  进程 pid：${pid}\n` +
           `\n应用可能还需要几秒才出现窗口，之后用 desktop_list_windows 找它。` +
           `\n本会话内已授权操作该应用。`,
       }

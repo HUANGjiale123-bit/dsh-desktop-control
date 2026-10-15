@@ -9,7 +9,7 @@
 
 ## 安装
 
-**不需要任何外部依赖**（2.5.7 起）——插件只用相对路径与 Node 内置模块，
+**不需要任何外部依赖**（2.6.0 起）——插件只用相对路径与 Node 内置模块，
 所以装到哪都能加载。
 
 需要 DSH 版本支持 `ctx.approval`（会话授权）。装好后**重启 DSH**。
@@ -17,7 +17,7 @@
 **方式一：从 tarball 装**
 
 ```bash
-# 把 dsh-desktop-control-2.5.7.tgz 放到某处，然后：
+# 把 dsh-desktop-control-2.6.0.tgz 放到某处，然后：
 cd <你的 DSH profile 目录>
 pnpm add file:<tarball 的绝对路径>
 ```

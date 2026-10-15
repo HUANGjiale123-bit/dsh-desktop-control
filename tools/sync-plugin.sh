@@ -35,6 +35,9 @@ if [ ! -f "$REPO/server/toolset.mjs" ]; then
   exit 1
 fi
 cp "$REPO/server/toolset.mjs" "$SRC/toolset.mjs"
+# apps.mjs 也住在 server/：toolset.mjs import 它，所以测试要能直接在
+# server/ 下 import（放 plugin/ 的话，测 server/toolset.mjs 就会找不到）。
+cp "$REPO/server/apps.mjs" "$SRC/apps.mjs"
 echo "① server/toolset.mjs → plugin/toolset.mjs"
 
 # ② 辅助程序：helper/bin → plugin/bin
@@ -50,7 +53,7 @@ done
 
 # ③ 同步到目标
 mkdir -p "$DEST/bin"
-for f in index.mjs toolset.mjs tooldsl.mjs cordis.patch.yml package.json; do
+for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json; do
   cp "$SRC/$f" "$DEST/$f"
 done
 for exe in dsc.exe dsc-esc.exe; do
@@ -62,7 +65,7 @@ echo
 # ④ 校验：源与目标逐文件比对
 echo "校验（源 ↔ 目标）："
 fail=0
-for f in index.mjs toolset.mjs tooldsl.mjs cordis.patch.yml package.json bin/dsc.exe bin/dsc-esc.exe; do
+for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json bin/dsc.exe bin/dsc-esc.exe; do
   a=$(md5sum "$SRC/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   b=$(md5sum "$DEST/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   if [ "$a" = "$b" ] && [ "$a" != "missing" ]; then
