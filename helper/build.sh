@@ -83,24 +83,17 @@ echo
 echo "完成: bin/dsc.exe ($(stat -c%s bin/dsc.exe) bytes)"
 
 echo
-echo "编译 dsc-edge.exe （整屏 computer use 状态指示 + 逃生窗）..."
+echo "编译 dsc-esc.exe （逃生条 + 边缘光带 + 唯一的 ESC 钩子）..."
 "$CSC" \
     -nologo \
     -target:winexe \
     -platform:x64 \
-    -out:bin/dsc-edge.exe \
+    -out:bin/dsc-esc.exe \
     -r:System.dll \
     -r:System.Drawing.dll \
     -r:System.Windows.Forms.dll \
-    'src\Edge.cs' \
-    'src\Escape.cs'
-
-echo "完成: bin/dsc-edge.exe ($(stat -c%s bin/dsc-edge.exe) bytes)"
-
-
-echo
-echo "编译 dsc-esc.exe （专职监听物理 ESC 的独立进程）..."
-"$CSC"     -nologo     -target:winexe     -platform:x64     -out:bin/dsc-esc.exe     -r:System.dll     -r:System.Drawing.dll     -r:System.Windows.Forms.dll     'src\Esc.cs'
+    'src\Esc.cs' \
+    'src\Band.cs'
 
 echo "完成: bin/dsc-esc.exe ($(stat -c%s bin/dsc-esc.exe) bytes)"
 

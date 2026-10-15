@@ -273,8 +273,36 @@ namespace DscEsc
                 if (!_tripped) { _tripped = true; Trip(); }
             };
 
+            // ★ 同时拉起屏幕边缘的光带。
+            //
+            // 两者在**同一个进程**里：钩子只需要一个宿主进程，而宿主已经
+            // 有了（就是逃生条那个窗口）。原先光带由独立的 dsc-edge 承担，
+            // 结果两个程序各装一套钩子，说不清谁负责停止——合并成一个进程
+            // 之后，钩子、光带、逃生条三者天然同步，不会出现"界面停了但
+            // 控制没停"那种不一致。
+            BandForm band = null;
+            try
+            {
+                band = new BandForm(System.Drawing.Color.FromArgb(0x2E, 0x6F, 0xD6));
+                band.Show();
+                L("光带已显示 hwnd=" + band.Handle);
+            }
+            catch (Exception ex)
+            {
+                // 光带是纯装饰，起不来不该拖垮停止功能
+                L("光带启动失败（不影响 ESC 停止）: " + ex.Message);
+                band = null;
+            }
+
+            bar.FormClosed += delegate
+            {
+                try { if (band != null) band.Close(); } catch { }
+            };
+
             L("进入 Application.Run（逃生条窗体）");
             Application.Run(bar);
+
+            try { if (band != null) band.Close(); } catch { }
 
             L("消息循环结束（_tripped=" + _tripped + "），退出");
             return 0;
