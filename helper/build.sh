@@ -77,7 +77,8 @@ echo "编译 dsc.exe ..."
     -r:"$FW/WPF/WindowsBase.dll" \
     'src\Program.cs' \
     'src\Snapshot.cs' \
-    'src\Activate.cs'
+    'src\Activate.cs' \
+    'src\Launcher.cs'
 
 echo
 echo "完成: bin/dsc.exe ($(stat -c%s bin/dsc.exe) bytes)"

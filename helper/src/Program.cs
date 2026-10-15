@@ -626,6 +626,9 @@ namespace Dsc
                     case "stop": return CmdStop(args);
                     case "ping": return CmdPing();
                     case "allowcheck": return CmdAllowCheck(args);
+                    case "list_apps": return CmdListApps(args);
+                    case "resolve_app": return CmdResolveApp(args);
+                    case "launch": return CmdLaunch(args);
                     default: return CmdHelp();
                 }
             }
@@ -704,6 +707,187 @@ namespace Dsc
                 .Key("reason").Val(reason)
              .End();
             Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 列出已安装的应用。用法：dsc.exe list_apps [关键词] [--limit N]
+        ///
+        /// launch 的配套：**必须先能看到清单，才谈得上"选择要启动哪个"**。
+        /// 清单只取注册表里声明了显示名的程序，不扫开始菜单快捷方式——
+        /// 后者会把卸载入口、帮助文档也算进来，清单就没法用了。
+        /// </summary>
+        private static int CmdListApps(string[] args)
+        {
+            string query = "";
+            int limit = 200;
+            // ★ 从 1 开始，跳过 args[0] —— 那是命令名本身。
+            //
+            // 踩过的坑：Main 收到的 args 包含命令名，所以从 0 开始遍历会把
+            // "list_apps" 当成搜索关键词，于是不带参数时去搜"list_apps"、
+            // 返回 0 条；而带关键词时正好被覆盖，看起来又是对的。
+            // 这种"只在某一个用法下出错"的 bug 最难看出来。
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--limit")
+                {
+                    // 把随后的数字当作参数值吃掉，否则它会被当成搜索关键词。
+                    if (i + 1 < args.Length) int.TryParse(args[++i], out limit);
+                    continue;
+                }
+                if (args[i].Length > 0 && args[i][0] != '-') query = args[i];
+            }
+
+            List<Launcher.AppEntry> all =
+                string.IsNullOrEmpty(query) ? Launcher.List() : Launcher.Search(query, limit);
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true).Key("total").Num(all.Count);
+            j.Key("apps").Arr();
+            int n = 0;
+            foreach (Launcher.AppEntry a in all)
+            {
+                if (n++ >= limit) break;
+                j.Obj().Key("name").Val(a.Name).Key("exe").Val(a.Exe).Key("version").Val(a.Version).End();
+            }
+            j.EndArr().End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 启动一个已安装的应用。用法：dsc.exe launch &lt;名字或路径&gt;
+        ///
+        /// **安全边界**：只接受两种目标——
+        ///   ① 应用清单里的显示名或 exe 文件名
+        ///   ② 调用方明确给出的 .exe 完整路径
+        /// **不接受任意命令行**，否则这个接口等同于"以用户权限执行任意程序"，
+        /// 比不提供它危险得多。
+        ///
+        /// 为什么它必须存在：插件原来只能操作**已经打开的**窗口，
+        /// "打开应用"只能从 shell 做，而 shell 不归插件白名单管——
+        /// 结果是**授权顺序整个反了**：应用先被打开（未经检查），
+        /// 然后才问"能不能操作它"。有了 launch，正确顺序才成立：
+        /// 授权 → 启动 → 操作。
+        /// </summary>
+        /// <summary>
+        /// 只解析应用名到可执行文件，**不启动**。用法：dsc.exe resolve_app &lt;名字&gt;
+        ///
+        /// 为什么必须把"解析"和"启动"分开：
+        /// 授权必须在启动**之前**发生。如果只有一个既解析又启动的命令，
+        /// 调用方就没机会在启动前问"允许吗"——只能先启动、再补问，
+        /// 那正是要修的授权顺序问题。
+        ///
+        /// 所以拆成两步：resolve_app（查，不动）→ 调用方授权 → launch（动）。
+        /// </summary>
+        private static int CmdResolveApp(string[] args)
+        {
+            string target = "";
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i].Length > 0 && args[i][0] != '-') { target = args[i]; break; }
+            }
+
+            if (string.IsNullOrEmpty(target))
+            {
+                Jw bad = new Jw();
+                bad.Obj().Key("ok").Bool(false).Key("error").Val("BadArgs")
+                    .Key("message").Val("用法：dsc.exe resolve_app <应用名>").End();
+                Console.WriteLine(bad.ToString());
+                return 2;
+            }
+
+            // 只有"exe 完整路径"这一种目标不走清单
+            string exe = Launcher.Resolve(target);
+
+            Jw j = new Jw();
+            if (string.IsNullOrEmpty(exe))
+            {
+                j.Obj().Key("ok").Bool(false).Key("error").Val("NotFound")
+                    .Key("message").Val("没有唯一解析到可执行文件。");
+                j.Key("candidates").Arr();
+                foreach (Launcher.AppEntry a in Launcher.Search(target, 8))
+                    j.Obj().Key("name").Val(a.Name).Key("exe").Val(a.Exe).End();
+                j.EndArr().End();
+                Console.WriteLine(j.ToString());
+                return 3;
+            }
+
+            // 顺便给出"这个 exe 属于哪个应用名"——授权时要显示给用户看
+            string displayName = target;
+            foreach (Launcher.AppEntry a in Launcher.List())
+            {
+                if (string.Equals(a.Exe, exe, StringComparison.OrdinalIgnoreCase))
+                {
+                    displayName = a.Name;
+                    break;
+                }
+            }
+
+            j.Obj().Key("ok").Bool(true).Key("exe").Val(exe).Key("name").Val(displayName).End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        private static int CmdLaunch(string[] args)
+        {
+            string target = "";
+            // ★ 从 1 开始：args[0] 是命令名 "launch"，不是目标。
+            // 从 0 开始会把 "launch" 当应用名去解析，然后报"找不到"。
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i].Length > 0 && args[i][0] != '-') { target = args[i]; break; }
+            }
+
+            if (string.IsNullOrEmpty(target))
+            {
+                Jw bad = new Jw();
+                bad.Obj().Key("ok").Bool(false)
+                    .Key("error").Val("BadArgs")
+                    .Key("message").Val("用法：dsc.exe launch <应用名或 .exe 路径>。先用 list_apps 看清单。")
+                 .End();
+                Console.WriteLine(bad.ToString());
+                return 2;
+            }
+
+            string exe = Launcher.Resolve(target);
+            if (string.IsNullOrEmpty(exe))
+            {
+                // 没解析到就给候选，而不是只说"没找到"——
+                // 使用者需要知道的是"这个名字对应哪些真实存在的应用"。
+                List<Launcher.AppEntry> cands = Launcher.Search(target, 8);
+                Jw j = new Jw();
+                j.Obj().Key("ok").Bool(false)
+                    .Key("error").Val("NotFound")
+                    .Key("message").Val("没有唯一解析到可执行文件，拒绝启动——宁可不动，也不要启错程序。");
+                j.Key("candidates").Arr();
+                foreach (Launcher.AppEntry a in cands)
+                    j.Obj().Key("name").Val(a.Name).Key("exe").Val(a.Exe).End();
+                j.EndArr().End();
+                Console.WriteLine(j.ToString());
+                return 3;
+            }
+
+            string err;
+            int pid = Launcher.Launch(exe, out err);
+            if (pid == 0)
+            {
+                Jw bad = new Jw();
+                bad.Obj().Key("ok").Bool(false)
+                    .Key("error").Val("LaunchFailed")
+                    .Key("message").Val(err)
+                    .Key("exe").Val(exe)
+                 .End();
+                Console.WriteLine(bad.ToString());
+                return 4;
+            }
+
+            Jw ok = new Jw();
+            ok.Obj().Key("ok").Bool(true)
+                .Key("pid").Num(pid)
+                .Key("exe").Val(exe)
+             .End();
+            Console.WriteLine(ok.ToString());
             return 0;
         }
 

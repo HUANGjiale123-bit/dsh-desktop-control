@@ -298,7 +298,158 @@ export function createDesktopToolset(options = {}) {
    * 每个工具返回 { text, isError? }，与传输层无关。
    * 两个消费方（MCP、DSH 插件）各自把它渲染成自己的形状。
    */
+  /**
+   * 按应用名授权（还没有窗口时用）。
+   *
+   * 与 authorize(hwnd) 的区别：launch 的时候应用**还没启动**，没有窗口可以
+   * 枚举校验，所以只能按"要启动的可执行文件名"问许可。
+   *
+   * 判定顺序与窗口版一致：静态白名单 → 本会话已授权 → 问用户。
+   * 任何失败一律拒绝。
+   */
+  async function authorizeApp(appBase, displayName, toolName) {
+    if (!appBase) {
+      return { ok: false, message: '失败：无法确定要启动的可执行文件名，拒绝。' }
+    }
+    const shown = displayName || appBase
+
+    if (staticAllowlist.includes(appBase)) {
+      await afterAuthorize(toolName, appBase)
+      return { ok: true }
+    }
+    if (grants.has(appBase)) {
+      await afterAuthorize(toolName, appBase)
+      return { ok: true }
+    }
+    if (!requestApproval) {
+      return {
+        ok: false,
+        message:
+          `失败：应用 "${shown}" 不在白名单内，且当前没有会话授权通道，拒绝启动。` +
+          '设置 allowedApps 后再试。',
+      }
+    }
+
+    let approved = false
+    try {
+      approved = await requestApproval(appBase, toolName ?? 'launchApp')
+    } catch (e) {
+      return { ok: false, message: `失败：会话授权检查出错，按拒绝处理 — ${e?.message ?? e}` }
+    }
+    if (!approved) {
+      return {
+        ok: false,
+        message:
+          `失败：用户未授权启动 "${shown}"，已拒绝。` +
+          '本次授权是会话级的——同意后仅对当前会话的这一个应用生效。',
+      }
+    }
+
+    grants.set(appBase, 'session')
+    await afterAuthorize(toolName, appBase)
+    return { ok: true }
+  }
+
   const tools = {
+    /**
+     * 列出已安装的应用。
+     *
+     * 这是 launchApp 的配套：**必须先能看到清单，才谈得上"选择要启动哪个"**。
+     * 只读，不需要授权——但它只给出名字与路径，不读任何界面内容。
+     */
+    async listApps({ query, limit } = {}) {
+      const args = ['list_apps']
+      if (query) args.push(String(query))
+      if (limit) args.push('--limit', String(limit))
+      const r = await runHelper(args)
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      const apps = r.apps ?? []
+      if (apps.length === 0) {
+        return { text: `没有匹配的已安装应用${query ? `（关键词「${query}」）` : ''}。` }
+      }
+      const rows = apps.map(
+        (a) => `  ${a.name}${a.version ? `  v${a.version}` : ''}\n      ${a.exe}`,
+      )
+      return {
+        text:
+          `已安装应用 ${apps.length} 个${query ? `（匹配「${query}」）` : ''}：\n` +
+          rows.join('\n') +
+          '\n\n要启动其中一个，用 desktop_launch_app 传它的名字。',
+      }
+    },
+
+    /**
+     * 启动一个已安装的应用。
+     *
+     * ── 为什么必须有这个工具 ──
+     *
+     * 在这之前，插件只能操作**已经打开的**窗口，"把应用打开"只能从 shell 做，
+     * 而 shell 不归插件白名单管。后果不是"少了个功能"，而是
+     * **授权顺序整个反了**：应用先被打开（未经检查），然后才问"能不能操作它"。
+     *
+     * 正确顺序是：**授权 → 启动 → 操作**。这个工具就是让顺序成立的那一环，
+     * 所以它先过授权，通过了才真的启动。
+     *
+     * ── 安全边界 ──
+     *
+     * 只接受应用清单里的显示名，或调用方明确给出的 .exe 完整路径。
+     * **不接受任意命令行**——否则它就等于"以用户权限执行任意程序"。
+     */
+    async launchApp({ name } = {}) {
+      const wanted = String(name ?? '').trim()
+      if (!wanted) {
+        return { isError: true, text: '失败：需要给出应用名（先用 desktop_list_apps 查看清单）。' }
+      }
+
+      // ── 正确的三步顺序：解析 → 授权 → 启动 ──
+      //
+      // 这个顺序是整个工具存在的理由。在这之前，"打开应用"只能从 shell 做，
+      // 于是应用先被打开（未经检查），然后才问"能不能操作它"——
+      // 授权发生在既成事实之后。
+      //
+      // 所以第一步**只解析、不启动**（helper 的 resolve_app 专门为此拆出来）。
+      // 一次调用里既解析又启动的话，调用方就没有机会在启动前问许可。
+
+      // 第一步只查不动。runHelper 直接把 JSON 解析好返回，
+      // ok:false 是"解析不到"的正常结果，会带上 candidates。
+      const resolved = await runHelper(['resolve_app', wanted])
+
+      if (!resolved.ok) {
+        const cands = (resolved.candidates ?? [])
+          .map((c) => `  ${c.name}\n      ${c.exe}`)
+          .join('\n')
+        return {
+          isError: true,
+          text:
+            `失败：没有唯一解析到可执行文件${cands ? '，可能是这几个：' : '。'}` +
+            (cands ? `\n${cands}` : '') +
+            '\n请用 desktop_list_apps 确认准确的名字。',
+        }
+      }
+
+      // ② 授权：用**解析出来的应用名**问，而不是用户输入的那个词——
+      //    授权记录按可执行文件名校验，名字对不上就白授权了。
+      const appBase = String(resolved.exe).split(/[\\/]/).pop().toLowerCase()
+      const auth = await authorizeApp(appBase, resolved.name, 'launchApp')
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      // ③ 授权通过，才真的启动
+      const launched = await runHelper(['launch', resolved.exe])
+      if (!launched.ok) {
+        return { isError: true, text: `已授权，但启动失败：${failMessage(launched)}` }
+      }
+
+      return {
+        text:
+          `已启动「${resolved.name}」：\n` +
+          `  可执行文件：${resolved.exe}\n` +
+          `  进程 pid：${launched.pid}\n` +
+          `\n应用可能还需要几秒才出现窗口，之后用 desktop_list_windows 找它。` +
+          `\n本会话内已授权操作该应用。`,
+      }
+    },
+
     async listWindows() {
       const r = await runHelper(['list_windows'])
       if (!r.ok) return { isError: true, text: failMessage(r) }

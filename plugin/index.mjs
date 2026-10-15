@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.1.0'
+const PLUGIN_VERSION = '2.2.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -404,6 +404,63 @@ function applyInner(ctx, config = {}) {
     registered.push(definition.name)
     return ctx.tools.register(defineTool(definition))
   }
+
+  register({
+    name: 'desktop_list_apps',
+    description:
+      '列出本机已安装的应用（名字、可执行文件路径、版本）。**只读，不受白名单限制。**' +
+      '配合 desktop_launch_app 使用：先看清单确认准确的名字，再启动。' +
+      '清单来自注册表里声明了显示名的程序，不包含系统组件与更新补丁。',
+    parameters: {
+      query: { type: 'string', description: '可选：按名字或文件名筛选，例如"腾讯"。' },
+      limit: { type: 'integer', description: '最多列出多少个，默认 200。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute(args) {
+      const r = await set.tools.listApps(args)
+      if (r.isError) throw new Error(r.text)
+      return { result: r.text }
+    },
+    presentCall: () => ({ card: 'generic', title: '列出已安装应用', kind: 'search' }),
+  })
+
+  register({
+    name: 'desktop_launch_app',
+    description:
+      '启动一个已安装的应用。**顺序是先授权、再启动。**' +
+      '只接受 desktop_list_apps 里出现的名字，或明确的 .exe 完整路径；' +
+      '不接受任意命令行——否则这个工具等同于"以你的权限执行任意程序"。' +
+      '启动后会登记该应用的会话授权，之后的观察与操作都按同一个授权走。' +
+      '注意：应用可能需要几秒才出现窗口，之后用 desktop_list_windows 找它。',
+    parameters: {
+      name: { type: 'string', description: '应用名（来自 desktop_list_apps）或 .exe 完整路径。', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute(args) {
+      const r = await set.tools.launchApp(args)
+      if (r.isError) throw new Error(r.text)
+      return { result: r.text }
+    },
+    presentCall: (args) => ({
+      card: 'generic',
+      title: `启动 ${args.name}`,
+      kind: 'execute',
+    }),
+  })
 
   register({
     name: 'desktop_list_windows',
