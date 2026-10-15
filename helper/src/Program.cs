@@ -623,7 +623,7 @@ namespace Dsc
                     case "type": return CmdType(args);
                     case "press_key": return CmdPressKey(args);
                     case "halt": return CmdHalt(args);
-                    case "stop": return CmdStop();
+                    case "stop": return CmdStop(args);
                     case "ping": return CmdPing();
                     case "allowcheck": return CmdAllowCheck(args);
                     default: return CmdHelp();
@@ -707,20 +707,78 @@ namespace Dsc
             return 0;
         }
 
-        /// <summary>解除急停闸门。用法：dsc.exe stop --clear</summary>
-        private static int CmdStop()
+        /// <summary>
+        /// 急停闸门：拉下或解除。用法：dsc.exe stop [--clear] [--open]
+        ///
+        /// 三个动作的区别容易混，写下来：
+        ///   · 无参数   → 拉下闸门（拒绝后续所有变更性操作）
+        ///   · --clear  → 解除闸门（恢复操作）
+        ///   · --open   → 与 --clear 同义，名字更贴合"开启 computer use"的语境
+        ///
+        /// 为什么 --clear 必须**回读确认**：
+        /// File.Delete 失败时**不抛异常**（只设 last-error），所以
+        /// "删过了"不等于"删掉了"。原先的写法删完就无条件报 cleared=true，
+        /// 结果是"报了已解除、实际还锁着"——用户看到 ok 却什么都做不了。
+        /// 现在删完回读一次，删不掉就报 false 并把原因说出来。
+        /// </summary>
+        private static int CmdStop(string[] args)
         {
-            bool cleared = false;
-            try
+            bool wantClear = false;
+            foreach (string a in args)
             {
-                if (File.Exists(GatePath())) { File.Delete(GatePath()); cleared = true; }
+                if (a == "--clear" || a == "--open") wantClear = true;
             }
-            catch { }
+
+            string gate = GatePath();
+            bool cleared = false;
+            string note;
+
+            if (wantClear)
+            {
+                if (!File.Exists(gate))
+                {
+                    note = "闸门本来就不存在";
+                }
+                else
+                {
+                    try
+                    {
+                        File.Delete(gate);
+                        // 回读：File.Delete 不抛异常也可能没删掉
+                        cleared = !File.Exists(gate);
+                        note = cleared
+                            ? "闸门已解除"
+                            : "闸门仍存在——删除被拒绝（检查文件是否只读或权限不足）";
+                    }
+                    catch (Exception e)
+                    {
+                        note = "解除失败：" + e.GetType().Name + ": " + e.Message;
+                    }
+                }
+            }
+            else
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(gate);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    File.WriteAllText(gate,
+                        "由 dsc.exe stop 触发（" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "）" +
+                        Environment.NewLine);
+                    note = "闸门已拉下";
+                }
+                catch (Exception e)
+                {
+                    note = "拉下失败：" + e.GetType().Name + ": " + e.Message;
+                }
+            }
+
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("halted").Bool(IsHalted())
                 .Key("cleared").Bool(cleared)
-                .Key("gatePath").Val(GatePath())
+                .Key("note").Val(note)
+                .Key("gatePath").Val(gate)
              .End();
             Console.WriteLine(j.ToString());
             return 0;

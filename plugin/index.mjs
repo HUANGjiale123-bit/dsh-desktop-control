@@ -191,14 +191,25 @@ function applyInner(ctx, config = {}) {
   /**
    * 急停闸门路径。
    *
-   * **必须显式指定**，不能靠 dsc-esc.exe / dsc.exe 各自从 exe 位置去推——
-   * 两个 exe 位置不同，推出来的路径可能不一致，那就成了"ESC 写了 A、
-   * dsc.exe 检查 B"，看起来像"按了 ESC 没反应"。
+   * **必须放在 dsc.exe 写得进去的地方**，这不是习惯问题而是权限问题：
+   *   · dsc-esc.exe 由宿主直接 spawn，没被沙箱套住，哪都能写
+   *   · dsc.exe 是沙箱子进程，**只能写工作区**——实测往 profile 目录写
+   *     直接 UnauthorizedAccessException
+   * 所以闸门位置要迁就权限更小的那一方。放错地方的后果很隐蔽：
+   * "ESC 能拉闸，但 stop --clear 解除不了，报访问被拒绝"，
+   * 用户会以为插件坏了。
    *
-   * 指向会话工作区的 .state 下：那是 dsc.exe 一定写得进去的位置
-   * （沙箱只放行工作区，插件又总是从工作区启动）。
+   * 解析顺序：
+   *   1. config.gatePath      —— 部署方显式指定
+   *   2. 插件上级目录的 .state —— 本地安装时插件就在仓库里，那里一定可写
+   *   3. cwd/.state           —— 兜底
+   *
+   * 刻意**不用 process.cwd()**：DSH 宿主的工作目录是 profile 目录（只读），
+   * 昨天就是这里选错，导致闸门能拉不能解。
    */
-  const gatePath = config.gatePath ?? join(process.cwd(), '.state', 'halt')
+  const gatePath =
+    config.gatePath ??
+    join(existsSync(join(pluginDir, '..', 'helper')) ? join(pluginDir, '..', '.state') : process.cwd(), 'halt')
 
   // 如果 helper 落在工作区目录里，明确警告。这不是风格问题：
   // 那种情况下鼠标/键盘注入会静默失效，而且没有任何报错。
