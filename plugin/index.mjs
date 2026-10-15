@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.5.0'
+const PLUGIN_VERSION = '0.6.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -651,21 +651,40 @@ function applyInner(ctx, config = {}) {
       }
       liveOverlays.clear()
 
-      // ② 拉下急停闸门：即使还有进程活着，动作也做不了
+      // ② 拉下闸门：即使还有进程活着，动作也做不了。
+      //
+      // 为什么"停止"和"闸门"是两件事，这里必须分清：
+      //   · ESC / 逃生条 = **停止信号**。它要留下闸门，因为那是"别再动我电脑"
+      //     的持久表达——按了 ESC 之后再来的操作应当被拒绝，而不是悄悄放行。
+      //   · desktop_off  = **正常关闭**。它由助手主动调用，意图是"这段结束了"，
+      //     不是"我被劫持了"。此时如果也留一道永久闸门，下一次操作会被无条件
+      //     拒绝，用户看到的是"插件坏了"，而且没有任何提示告诉他怎么解。
+      //
+      // 所以 desktop_off 拉闸门（确保关闭瞬间就生效）之后**立即解除**，
+      // 让闸门回到"未触发"的初始状态。ESC 留下的闸门则保持不动，由用户
+      // 显式用 stop --clear 解除。
       let gateNote
       try {
-        const g = await set.runHelper(['halt', '由 desktop_off 触发'])
-        gateNote = g.ok
-          ? `急停闸门已拉下（${g.gatePath}）`
-          : `急停闸门拉下失败：${g.message ?? g.error ?? '未知原因'}`
+        const h = await set.runHelper(['halt', '由 desktop_off 触发'])
+        if (!h.ok) {
+          gateNote = `闸门操作失败：${h.message ?? h.error ?? '未知原因'}`
+        } else {
+          const c = await set.runHelper(['stop', '--clear'])
+          gateNote = c.ok && c.cleared
+            ? '闸门已拉下并随即解除（正常关闭，不留永久封锁）'
+            : c.ok
+              ? `闸门已拉下；解除时报告：${c.note ?? '未清除'}`
+              : `闸门已拉下，但解除失败：${c.message ?? c.error ?? '未知原因'}`
+        }
       } catch (e) {
-        gateNote = '急停闸门拉下异常：' + (e?.message ?? e)
+        gateNote = '闸门操作异常：' + (e?.message ?? e)
       }
 
       return {
         result:
-          `已关闭 ${killed} 个由本插件拉起的指示浮层。${gateNote}。` +
-          `此后任何桌面操作都会被拒绝。` +
+          `已关闭 ${killed} 个由本插件拉起的指示浮层与逃生条。${gateNote}。` +
+          `注意：如果是**按 ESC 停止**的，闸门会保留，后续操作会被拒绝——` +
+          `确认安全后用 \`dsc.exe stop --clear\` 解除。` +
           `若屏幕上仍有残留边框，可在终端执行：taskkill /IM dsc-edge.exe /F`,
       }
     },
