@@ -515,6 +515,25 @@ export function createDesktopToolset(options = {}) {
         }
       }
 
+      // ── 必须接 'error' 事件，否则会崩掉整个宿主 ──
+      //
+      // Node 的 spawn 失败分两类，**只有一类能被 try/catch 抓到**：
+      //   目标不存在 / 是目录  → **异步**发 'error' 事件（ENOENT）
+      //   目标存在但不能执行  → 同步抛出（Windows 上是 UNKNOWN/EACCES）
+      //
+      // 所以 try/catch 只覆盖了一半。异步那一半如果没人接，就是
+      // `fatal uncaught exception` —— **整个 DSH 宿主进程死掉**，
+      // 用户看到的是"应用无法启动或已意外停止"。
+      //
+      // 实测依据：另一台机器上的崩溃日志正是这个形状
+      //   dsh: fatal uncaught exception: Error: spawn ... EACCES
+      //   at ChildProcess._handle.onexit (node:internal/child_process:287:19)
+      // 那次不是本插件引起的（是另一个工具启动网易UU加速器），但它说明
+      // **无人接管的 spawn error 会以这种方式杀死宿主**，所以这里必须堵上。
+      //
+      // 来不及在返回前拿到失败时，至少让它不再崩：错误写进日志，
+      // 调用方随后用 desktop_list_windows 看不到窗口就能发现没起来。
+      let spawnError = null
       let pid = 0
       try {
         const child = spawn(app.exe, [], {
@@ -522,12 +541,52 @@ export function createDesktopToolset(options = {}) {
           stdio: 'ignore',
           windowsHide: false,
         })
+        child.on('error', (e) => {
+          spawnError = e
+          // 只用 options 里传进来的 logger，**不要在 error 回调里引用外部变量**。
+          // 这里踩过一次：写成 `ctx?.logger?.error?.(...)`，而 toolset 里根本没有
+          // ctx —— 那会在 error 回调里抛 ReferenceError，正好造成这个回调
+          // 本来要防止的崩溃。回调里能用的东西越少越好。
+          try {
+            options.logger?.error?.(
+              `[desktop-control] 启动「${app.name}」失败（异步）：${e?.code ?? ''} ${e?.message ?? e}`,
+            )
+          } catch {
+            /* 日志失败绝不能再抛 */
+          }
+        })
         child.unref()
         pid = child.pid ?? 0
       } catch (e) {
         return {
           isError: true,
           text: `启动「${app.name}」失败：${e?.message ?? e}\n  目标：${app.exe}`,
+        }
+      }
+
+      // 给异步失败一点时间显形——EACCES/ENOENT 几乎立刻到达。
+      // 等一小会儿就能把"看起来启动了、其实没有"变成明确报错。
+      await new Promise((r) => setTimeout(r, 120))
+
+      // 判据要两条：拿到了 error 事件，**或者根本没拿到 pid**。
+      //
+      // 只判 spawnError 是不够的：实测拿目录伪装成 .exe 时，
+      // error 事件在 120ms 内没到达，pid 却是 0 —— 而代码照旧报
+      // "已启动，进程 pid：0"，等于**把一次失败说成了成功**。
+      // pid 为 0 本身就说明进程没起来，不必等事件。
+      if (spawnError || !pid) {
+        const code = spawnError?.code ?? (pid ? '' : 'NO_PID')
+        const detail = spawnError?.message ?? (pid ? '' : '启动后未取得进程 id，进程没有真正起来')
+        return {
+          isError: true,
+          text:
+            `启动「${app.name}」失败：${code} ${detail}\n` +
+            `  目标：${app.exe}\n` +
+            (code === 'EACCES'
+              ? `  EACCES 表示该程序拒绝以普通权限启动（常见于需要管理员权限的游戏/加速器，` +
+                `或被杀软拦下）。请手动启动它，或换一个目标。\n`
+              : '') +
+            `  可用 desktop_list_apps 确认名字，或改用 .exe 完整路径。`,
         }
       }
 
