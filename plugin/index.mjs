@@ -215,6 +215,10 @@ function applyInner(ctx, config = {}) {
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
     requestApproval,
+    // 闸门路径必须同时交给 toolset：它每次 spawn dsc.exe 都要带上
+    // DSC_HALT_GATE，否则 dsc.exe 会自己从 exe 位置推一个不同的路径，
+    // 于是"ESC 写了 A、dsc.exe 查 B"——界面消失了但操作没停。
+    gatePath,
   })
 
   const allowNote = set.allowlist.length

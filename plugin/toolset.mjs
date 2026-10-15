@@ -117,6 +117,19 @@ export function createDesktopToolset(options = {}) {
         if (base) env = { ...process.env, DSC_ALLOWED_APPS: base }
       }
 
+      // ★ 闸门路径必须**每一次调用都显式传给 dsc.exe**。
+      //
+      // 不同步的后果是"ESC 看起来生效了、其实没停"：
+      //   · dsc-esc 被告知闸门在 A → ESC 时写 A
+      //   · dsc.exe 自己从 exe 位置推出闸门在 B → 查 B，永远查不到
+      // 于是界面消失了（用户以为停了），而变更性操作照常执行。
+      //
+      // 这不是假设，是实测踩到的：插件传了 DSC_HALT_GATE 给 dsc-esc，
+      // 却漏了 dsc.exe，两个路径分别落在 profile 与仓库目录下。
+      if (options.gatePath) {
+        env = { ...env, DSC_HALT_GATE: options.gatePath }
+      }
+
       let child
       try {
         child = spawn(helperPath, args, { windowsHide: true, env })

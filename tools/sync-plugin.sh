@@ -81,6 +81,16 @@ else
   fail=1
 fi
 
+# 闸门路径必须由插件统一传给 dsc.exe。
+# 不传的话 dsc.exe 会自己推一个不同的路径，ESC 写了 A 而它查 B——
+# 界面消失了但操作照常执行，属于"看起来生效了其实没停"。
+if grep -q "DSC_HALT_GATE" "$DEST/toolset.mjs" 2>/dev/null; then
+  echo "  ✓ 部署的 toolset.mjs 会把 DSC_HALT_GATE 传给 dsc.exe"
+else
+  echo "  ✗ 部署的 toolset.mjs **不传** DSC_HALT_GATE —— ESC 会停不掉操作"
+  fail=1
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
   echo "同步完成。重启 DSH 让插件重新加载。"
