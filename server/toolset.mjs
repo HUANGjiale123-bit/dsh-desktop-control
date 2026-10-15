@@ -371,9 +371,16 @@ export function createDesktopToolset(options = {}) {
       const rows = apps.map(
         (a) => `  ${a.name}${a.version ? `  v${a.version}` : ''}\n      ${a.exe}`,
       )
+      // 被截断时要说出来，否则"已安装应用 N 个"会被读成"总共就这些"。
+      const total = typeof r.total === 'number' ? r.total : apps.length
+      const head = r.truncated
+        ? `已安装应用共 ${total} 个，这里列出前 ${apps.length} 个` +
+          `${query ? `（匹配「${query}」）` : ''}——要更多请加大 limit：`
+        : `已安装应用 ${apps.length} 个${query ? `（匹配「${query}」）` : ''}：`
       return {
         text:
-          `已安装应用 ${apps.length} 个${query ? `（匹配「${query}」）` : ''}：\n` +
+          head +
+          '\n' +
           rows.join('\n') +
           '\n\n要启动其中一个，用 desktop_launch_app 传它的名字。',
       }

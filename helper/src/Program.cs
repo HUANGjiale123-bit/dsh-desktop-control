@@ -911,16 +911,36 @@ namespace Dsc
                 if (args[i].Length > 0 && args[i][0] != '-') query = args[i];
             }
 
+            // 一律取【全部匹配项】，再统一在下面按 limit 截断。
+            //
+            // 早先这里是 `Search(query, limit)` 配一个默认 200：于是 limit 传 500
+            // 时 Search 只给到默认上限，而截断判断用的是 500 —— 结果 truncated=false
+            // 却少了条目，是个自相矛盾的输出。两处用同一个数才不会有这种缝。
             List<Launcher.AppEntry> all =
-                string.IsNullOrEmpty(query) ? Launcher.List() : Launcher.Search(query, limit);
+                string.IsNullOrEmpty(query) ? Launcher.List() : Launcher.Search(query, int.MaxValue);
 
-            Jw j = new Jw();
-            j.Obj().Key("ok").Bool(true).Key("total").Num(all.Count);
-            j.Key("apps").Arr();
-            int n = 0;
+            // 按 limit 截断，并**同时报出截断前后的数量**。
+            //
+            // 原先只报 total（= 全部数量），而 apps 数组是按 limit 截断过的。
+            // 于是 `--limit 3` 返回 total:80 配 3 个条目：调用方若用 apps.length
+            // 显示"已安装应用 3 个"，看不出被截断；若用 total 显示，又和列表对不上。
+            // 两个数都给，调用方才能说实话。
+            int available = all.Count;
+            List<Launcher.AppEntry> shown = new List<Launcher.AppEntry>();
             foreach (Launcher.AppEntry a in all)
             {
-                if (n++ >= limit) break;
+                if (shown.Count >= limit) break;
+                shown.Add(a);
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("total").Num(available)
+                .Key("returned").Num(shown.Count)
+                .Key("truncated").Bool(shown.Count < available);
+            j.Key("apps").Arr();
+            foreach (Launcher.AppEntry a in shown)
+            {
                 j.Obj().Key("name").Val(a.Name).Key("exe").Val(a.Exe).Key("version").Val(a.Version).End();
             }
             j.EndArr().End();

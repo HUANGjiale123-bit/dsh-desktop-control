@@ -284,6 +284,70 @@ for (const [idx, literal] of outputSchemas.entries()) {
 if (normBad === 0) ok(`全部 ${normOk} 处输出 schema 规范化通过（无属性节点残留 required）`)
 
 console.log()
+console.log('── 9. 规范化后的 schema 是否符合【宿主声明的约束】──')
+
+// 这一节独立于上一节：上一节验"规范化对不对"，这一节验
+// "交给宿主的东西它会不会收"。两者都必要——规范化对了但形状不合规，
+// 宿主仍会在注册时抛异常，表现同样是"所有工具消失"。
+//
+// 约束来自宿主 register() 的实现（从 asar 里读到的原文）：
+//   · output.schema 必须通过它的 schema 子集校验
+//   · 结构化输出是对象根（schema.type 必须是 'object'）
+//   · required 里的名字必须在 properties 里
+//   · 属性节点上不能有 required（author-facing 残留会被拒）
+{
+  const ALLOWED_KEYS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'enum'])
+  let checked = 0
+  let violated = 0
+  for (const [idx, literal] of outputSchemas.entries()) {
+    let schema
+    try {
+      schema = new Function(`return (${literal})`)()
+    } catch {
+      violated++
+      bad(`第 ${idx + 1} 处字面量无法解析`)
+      continue
+    }
+    let tool
+    try {
+      tool = defineTool({
+        name: `h${idx}`,
+        description: 'd',
+        parameters: {},
+        output: { schema, render: () => [] },
+        async execute() { return {} },
+      })
+    } catch (e) {
+      violated++
+      bad(`第 ${idx + 1} 处 defineTool 失败: ${e.message}`)
+      continue
+    }
+    const s = tool.output.schema
+    const errs = []
+    if (s.type !== 'object') errs.push('schema.type 不是 object')
+    for (const k of Object.keys(s)) if (!ALLOWED_KEYS.has(k)) errs.push(`顶层未知键 ${k}`)
+    for (const r of s.required ?? []) {
+      if (!Object.hasOwn(s.properties ?? {}, r)) errs.push(`required 含未知属性 ${r}`)
+    }
+    const scan = (n, path) => {
+      for (const [name, sub] of Object.entries(n.properties ?? {})) {
+        if (Object.hasOwn(sub, 'required')) errs.push(`${path}.${name} 残留 required`)
+        scan(sub, `${path}.${name}`)
+      }
+      if (n.items) scan(n.items, `${path}.items`)
+    }
+    scan(s, `h${idx}`)
+    if (errs.length) {
+      violated++
+      bad(`第 ${idx + 1} 处不符合宿主约束: ${errs.join('; ')}`)
+    } else {
+      checked++
+    }
+  }
+  if (violated === 0) ok(`全部 ${checked} 处输出 schema 符合宿主约束`)
+}
+
+console.log()
 console.log('══════════════════════════════')
 console.log(fail === 0 ? `  全部通过（${pass} 项）` : `  ${pass} 项通过，${fail} 项失败  ← 先修`)
 console.log('══════════════════════════════')
