@@ -402,6 +402,7 @@ namespace DscEdge
         private readonly Color _core;      // 主色（亮）
         private readonly Color _deep;      // 深色（用于外晕与徽标底）
         private readonly System.Windows.Forms.Timer _timer;
+        private readonly System.Windows.Forms.Timer _gateWatch;
         private readonly System.Windows.Forms.Timer _pulse;
         private double _phase;
         private double _flow;              // 流光位置 0..1
@@ -432,6 +433,36 @@ namespace DscEdge
 
             _timer = new System.Windows.Forms.Timer { Interval = 50 };
             _timer.Tick += (s, e) => Tick();
+
+            /* 盯着闸门文件：一旦出现就自己退出。
+             *
+             * 为什么需要这个：钩子已经拆给 dsc-esc 独占（原先两个程序各装一套，
+             * 重复且说不清谁负责）。拆开之后两个进程之间就没有任何联系了——
+             * ESC 由 dsc-esc 抓到、它写完闸门自己退出，而**光带不知道**，
+             * 于是界面上留着一条不会再响应 ESC 的光带。
+             *
+             * 用户看到的现象是"按了 ESC 没反应"：其实操作已经停了
+             * （闸门生效），只是视觉指示还挂着。这比不停更糟——它让人
+             * 以为停止功能坏了。
+             *
+             * 用轮询而不是进程间通知：闸门文件本来就存在、两边都能读，
+             * 加一个 500ms 的检查比引入一条 IPC 通道简单得多，也不会
+             * 因为通道断开而失效。判据只有"文件在不在"，没有额外状态。
+             */
+            _gateWatch = new System.Windows.Forms.Timer { Interval = 500 };
+            _gateWatch.Tick += delegate
+            {
+                try
+                {
+                    if (File.Exists(EscapeGate.GatePath()))
+                    {
+                        _gateWatch.Stop();
+                        Close();          // 关闭窗口 → 消息循环结束 → 进程退出
+                    }
+                }
+                catch { }
+            };
+            _gateWatch.Start();
 
             _pulse = new System.Windows.Forms.Timer { Interval = 60 };
             _pulse.Tick += (s, e) =>
