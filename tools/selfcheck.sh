@@ -89,6 +89,27 @@ H2="$(DSC_HALT_GATE="$G" ./helper/bin/dsc.exe ping 2>/dev/null | grep -o '"halte
 [ "$H1" = '"halted":true' ]  && ok "拉下闸门后 halted=true"  || bad "拉下闸门无效（$H1）"
 [ "$H2" = '"halted":false' ] && ok "解除闸门后 halted=false" || bad "解除闸门无效（$H2）"
 
+# 观察类工具的授权策略。
+#
+# 这一条防的是"洞被改回来"。读界面内容和截图原先不需要授权，
+# 于是助手可以在不问用户的情况下读到观影记录、聊天窗口 —— 这不会报错，
+# 只会静默泄露，所以必须用断言守住。
+head_ "7. 观察类工具的授权策略"
+# 检查**部署的那份**，不是源码——实际跑起来的才算数。
+#
+# 用独立脚本而不是内联 heredoc：早先内联的版本把参数传丢、
+# 又把错误吞了，于是故意破坏代码它照样报 OK，等于没有检查。
+DEST="${DEST:-$HOME/.dsh/profiles/desktop/node_modules/dsh-desktop-control}"
+if [ -n "$NODE" ] && [ -f "$DEST/toolset.mjs" ]; then
+  if "$NODE" tools/check-authpolicy.mjs "$DEST/toolset.mjs"; then
+    ok "授权策略符合（读树/截图需授权）"
+  else
+    bad "授权策略不符 —— 见上面明细"
+  fi
+else
+  echo "  （跳过：找不到 node 或部署的 toolset.mjs）"
+fi
+
 echo
 echo "══════════════════════════════"
 if [ "$FAIL" -eq 0 ]; then

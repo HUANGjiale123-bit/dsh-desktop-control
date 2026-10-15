@@ -450,6 +450,18 @@ export function createDesktopToolset(options = {}) {
       }
     },
 
+    /**
+     * 列窗口。
+     *
+     * ★ **刻意不返回窗口标题。**
+     *
+     * 原先这里是带标题的，而它是个信息泄露口子：标题里经常有敏感内容——
+     * 文档名、聊天对象名、正在看的剧集名。实测读腾讯视频时，标题区就直接
+     * 暴露了用户的观看记录。而"列出有哪些窗口"本身不需要读内容，
+     * 所以标题不该跟着一起出去。
+     *
+     * 需要标题时用 desktop_read_window（那条路会先过授权）。
+     */
     async listWindows() {
       const r = await runHelper(['list_windows'])
       if (!r.ok) return { isError: true, text: failMessage(r) }
@@ -461,33 +473,42 @@ export function createDesktopToolset(options = {}) {
           `exe=${w.exe ? w.exe.split(/[\\/]/).pop() : '?'}`,
           `rect=(${w.x},${w.y} ${w.width}x${w.height})`,
           w.foreground ? 'FOREGROUND' : '',
-          `title=${JSON.stringify(w.title ?? '')}`,
         ].filter(Boolean).join('  '))
 
-      // 文案必须反映**真实**的准入规则，否则用户会按错的模型操作。
-      //
-      // 早期版本这里写"白名单为空——只能观察"，那在只有静态白名单时是对的。
-      // 加了会话级授权之后就不对了：静态名单为空**不等于**不能操作，
-      // 变更性操作会弹询问。说成"只能观察"会让人以为功能坏了。
       const eff = effectiveAllowlist()
       const grantRows = [...grants.keys()]
 
+      // 文案必须反映**真实**的准入规则，否则用户会按错的模型操作。
+      // 早期版本写"白名单为空——只能观察"，那在只有静态白名单时是对的；
+      // 加了会话级授权之后就不对了，会让人以为功能坏了。
       return {
         text:
           `本机可见窗口 ${rows.length} 个（坐标为物理像素）：\n` +
           rows.join('\n') +
+          '\n\n（未列出窗口标题——标题常含敏感内容，例如文档名、聊天对象。' +
+          '需要时用 desktop_read_window 读取，那一步会先请求授权。）' +
           (eff.length
-            ? `\n\n当前可操作的应用：${eff.join(', ')}` +
+            ? `\n\n已授权的应用：${eff.join(', ')}` +
               (grantRows.length
                 ? `（其中 ${grantRows.join(', ')} 是本次会话授权的，会话结束即失效）`
                 : '（来自配置里的静态白名单，属持久放行）')
-            : '\n\n当前没有已放行的应用。变更性操作会先询问你——' +
-              '同意后仅对当前会话的该应用有效，不会写入配置；观察类工具不受限制。'),
+            : '\n\n当前没有已放行的应用。**读取界面内容（读树、截图）和变更性操作都会先询问你**——' +
+              '同意后仅对当前会话的该应用有效，不会写入配置。'),
       }
     },
 
+    /**
+     * 读窗口无障碍树。
+     *
+     * ★ 需要授权：这一步会读到界面上的**全部文字内容**——文档正文、
+     * 聊天记录、搜索结果、表单里已填的值。**观察本身就是访问**，
+     * 所以它和点击一样要过授权。
+     */
     async readWindow({ hwnd, maxNodes }) {
-      const r = await runHelper(['tree', String(hwnd), String(maxNodes ?? 300)])
+      const auth = await authorize(hwnd, 'readWindow')
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const r = await runHelper(['tree', String(hwnd), String(maxNodes ?? 300)], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
       return {
         text:
@@ -497,10 +518,18 @@ export function createDesktopToolset(options = {}) {
       }
     },
 
+    /**
+     * 截图。
+     *
+     * ★ 需要授权，理由与读树相同：截图里就是界面内容本身。
+     */
     async screenshot({ hwnd }) {
+      const auth = await authorize(hwnd, 'screenshot')
+      if (!auth.ok) return { isError: true, text: auth.message }
+
       await mkdir(shotDir, { recursive: true })
       const path = join(shotDir, `win-${hwnd}-${Date.now()}.png`)
-      const r = await runHelper(['screenshot', String(hwnd), path])
+      const r = await runHelper(['screenshot', String(hwnd), path], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
       return {
         text:
