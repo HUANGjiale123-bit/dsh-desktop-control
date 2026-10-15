@@ -9,7 +9,7 @@
       inject: ["tools", "approval", "agents", "workspaceRegistry"]
       config:
         # 这里**刻意不写 helperPath / edgePath**：
-        # 辅助程序随插件包一起安装（bin/dsc.exe、bin/dsc-edge.exe），
+        # 辅助程序随插件包一起安装（bin/dsc.exe、bin/dsc-esc.exe），
         # 插件按自身位置自动解析，用户装完即可用，不需要填任何路径。
         #
         # 解析顺序：config.helperPath → 环境变量 DSC_HELPER → 插件 bin/ → 仓库布局。

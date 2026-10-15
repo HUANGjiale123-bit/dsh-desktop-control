@@ -55,13 +55,40 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.5.4'
+const PLUGIN_VERSION = '2.5.5'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
 const BUTTON = { type: 'string', enum: ['left', 'right'], description: '鼠标键，默认 left。' }
 
 export function apply(ctx, config = {}) {
+  /* ── 防重复应用 ──
+   *
+   * 宿主的 tools.register() 对重名是**硬错误**：
+   *   tool "desktop_list_apps" is already registered
+   * 而本插件注册十几个工具，所以"apply 被调用两次"的后果不是幂等，
+   * 而是**第二次在第一个工具上就抛错**，然后跳到 catch ——
+   * 那里又会去注册 desktop_diagnose，而它已经被第一次调用注册过了，
+   * 于是再抛一次（被吞掉）。最终状态是"一部分工具在、一部分不在"，
+   * 而且看起来像插件坏了。
+   *
+   * 什么情况会调用两次：热重载、配置里同一插件出现两次、
+   * 或宿主重试。这些都不是本插件能控制的，所以自己挡住。
+   *
+   * 记录在 ctx 上（而不是模块级变量）：同一个模块实例可能服务多个
+   * profile/上下文，用模块级变量会把"另一个上下文的第二次"误判成重复。
+   */
+  const APPLIED = Symbol.for('dsh-desktop-control.applied')
+  if (ctx[APPLIED]) {
+    ctx.logger?.warn?.(
+      `[desktop-control] 本上下文已经应用过 v${PLUGIN_VERSION}，跳过重复应用。` +
+        `（宿主对工具重名是硬错误，重复注册会让插件看起来坏掉。）` +
+        `若配置里同一插件写了两条，请删掉多余的那条。`,
+    )
+    return
+  }
+  ctx[APPLIED] = true
+
   // 加载期的任何异常都要带堆栈打出来。
   // 宿主只报一句 "entry did not activate"，看不出是哪一行坏掉的——
   // 这一层在本次开发中反复救命，别删。
@@ -107,7 +134,17 @@ export function apply(ctx, config = {}) {
         },
         presentCall: () => ({ card: 'generic', title: '激活失败（应急诊断）', kind: 'read' }),
       }))
-    } catch { }
+    } catch (e2) {
+      // 注册失败**不能**静默：那种情况下桌面控制工具是"部分注册"的
+      // —— 一部分在、一部分不在，而用户只会觉得"这个插件有点怪"。
+      // 说清原因，以及为什么会出现这种半吊子状态。
+      ctx.logger?.error?.(
+        `[desktop-control] 应急诊断工具也注册失败：${e2?.message ?? e2}\n` +
+          `  这通常意味着插件主体已经注册过同名工具（注册到一半才失败），` +
+          `于是当前 desktop_* 工具是**部分可用**的，而不是全无。` +
+          `原始错误见上一条日志。`,
+      )
+    }
 
     throw e
   }
