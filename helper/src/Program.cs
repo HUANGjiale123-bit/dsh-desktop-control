@@ -670,6 +670,7 @@ namespace Dsc
                     case "stop": return CmdStop(args);
                     case "ping": return CmdPing();
                     case "allowcheck": return CmdAllowCheck(args);
+                    case "gate_probe": return CmdGateProbe();
                     case "list_apps": return CmdListApps(args);
                     case "resolve_app": return CmdResolveApp(args);
                     case "launch": return CmdLaunch(args);
@@ -767,6 +768,82 @@ namespace Dsc
              .End();
             Console.WriteLine(j.ToString());
             return 0;
+        }
+
+        /// <summary>
+        /// 实际探测闸门文件能不能写、能不能删。用法：dsc.exe gate_probe
+        ///
+        /// **为什么需要它**：插件原先判断"闸门位置对不对"用的是路径名启发式
+        /// （看路径里有没有含某个固定字样），那是**写死某台机器的目录名**。
+        /// 换一个工作区就永远匹配不上，于是正常情况被报成
+        /// "★ 闸门位置不正确 —— ESC 会只关界面而不拦住操作"。
+        ///
+        /// 这个误报的代价不小：它让使用者以为急停不可靠，而实际是好的。
+        /// 而真正要回答的问题从来不是"路径长什么样"，而是
+        /// **"这道闸门拦得住操作吗"** —— 那就实际做一次：
+        ///   写闸门 → 查它是否被认定为已拉下 → 删掉 → 查是否恢复
+        /// 三步都对才算通过。这是功能性判断，和目录名无关。
+        /// </summary>
+        private static int CmdGateProbe()
+        {
+            string p = GatePath();
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true).Key("gatePath").Val(p);
+
+            // ① 写
+            try
+            {
+                EnsureHalt("gate_probe");
+            }
+            catch (Exception e)
+            {
+                j.Key("writable").Bool(false)
+                 .Key("stage").Val("write")
+                 .Key("error").Val(e.GetType().Name + ": " + e.Message)
+                 .End();
+                Console.WriteLine(j.ToString());
+                return 3;
+            }
+
+            // ② 写完之后，闸门是否真的被认定为"已拉下"。
+            //    只写成功还不够——路径不一致时文件写了但查的是另一处。
+            bool halted = IsHalted();
+            if (!halted)
+            {
+                j.Key("writable").Bool(true)
+                 .Key("halted").Bool(false)
+                 .Key("stage").Val("verify")
+                 .Key("error").Val("闸门文件写成了，但 IsHalted() 不认为已拉下——写入与读取不是同一个路径")
+                 .End();
+                Console.WriteLine(j.ToString());
+                return 4;
+            }
+
+            // ③ 删掉，确认能恢复
+            try
+            {
+                File.Delete(p);
+            }
+            catch (Exception e)
+            {
+                j.Key("writable").Bool(true).Key("halted").Bool(true)
+                 .Key("stage").Val("clear")
+                 .Key("error").Val(e.GetType().Name + ": " + e.Message)
+                 .End();
+                Console.WriteLine(j.ToString());
+                return 5;
+            }
+
+            bool cleared = !IsHalted();
+            j.Key("writable").Bool(true)
+             .Key("halted").Bool(true)
+             .Key("clearable").Bool(cleared)
+             .Key("healthy").Bool(cleared);
+            if (!cleared)
+                j.Key("error").Val("闸门删掉了，但 IsHalted() 仍认为已拉下");
+            j.End();
+            Console.WriteLine(j.ToString());
+            return cleared ? 0 : 6;
         }
 
         /// <summary>

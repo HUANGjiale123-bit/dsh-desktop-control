@@ -52,6 +52,37 @@ function bodyOf(src, name) {
 const problems = []
 const summary = []
 
+// ── 顺带检查：不能有硬编码的本机工作区目录名 ──
+//
+// 出过一次真事故：判断"闸门位置对不对"用的是正则匹配路径里有没有某个
+// 固定字样，而那等于写死了一台机器的目录名。作者本机永远匹配得上，
+// 别人的工作区永远匹配不上 —— 于是正常情况被报成
+// "★ 闸门位置不正确 —— ESC 会只关界面而不拦住操作"，
+// 让人以为急停坏了，而实际是好的。
+//
+// 这类问题在自己的机器上**永远不会暴露**，所以必须靠断言拦住。
+const hardcodedLines = []
+// index.mjs 也要查：判定"闸门位置对不对"的逻辑在那里，而正是那一处出过事故。
+// 只查 toolset.mjs 会漏掉——第一版就是这么漏的（注入到 index.mjs 却没被报出来）。
+const siblings = [file, file.replace(/toolset\.mjs$/, 'index.mjs')]
+for (const f of siblings) {
+  let text
+  try {
+    text = readFileSync(f, 'utf8')
+  } catch {
+    continue
+  }
+  const short = f.split(/[\\/]/).pop()
+  for (const m of text.matchAll(/^.*\bdsh workspace\b.*$/gm)) {
+    // 注释里提到它没关系（那是说明历史），代码里用就不行
+    const line = m[0].trim()
+    if (!/^(\/\/|\*|\/\*)/.test(line)) {
+      hardcodedLines.push(`${short}: ${line.slice(0, 90)}`)
+    }
+  }
+}
+const hasHardcodedWorkspace = hardcodedLines.length > 0
+
 for (const [name, needAuth] of Object.entries(WANT)) {
   const body = bodyOf(src, name)
   if (body === null) {
@@ -67,13 +98,24 @@ for (const [name, needAuth] of Object.entries(WANT)) {
   }
 }
 
-if (problems.length === 0) {
+if (problems.length === 0 && !hasHardcodedWorkspace) {
   console.log('  ✓ 授权策略符合预期：')
   for (const s of summary) console.log(s)
+  console.log('  ✓ 无硬编码的本机工作区路径')
   process.exit(0)
 }
 
-console.log('  ✗ 授权策略不符：')
-for (const p of problems) console.log(`      ${p}`)
-console.log('      读树与截图**必须**走授权——它们会读到界面全部内容。')
+if (hasHardcodedWorkspace) {
+  console.log('  ✗ 发现硬编码的本机工作区目录名：')
+  for (const line of hardcodedLines) console.log(`      ${line}`)
+  console.log('      插件的判定不能依赖某台机器的目录名——换一个工作区就会误报。')
+  console.log('      需要判断位置时用 workspaceRegistry 反查，或改为功能性探测。')
+}
+
+if (problems.length > 0) {
+  console.log('  ✗ 授权策略不符：')
+  for (const p of problems) console.log(`      ${p}`)
+  console.log('      读树与截图**必须**走授权——它们会读到界面全部内容。')
+}
+
 process.exit(1)

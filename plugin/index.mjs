@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.5.0'
+const PLUGIN_VERSION = '2.5.1'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -261,6 +261,44 @@ function applyInner(ctx, config = {}) {
   let _gatePath = null
 
   /**
+   * 实际探测闸门是否真的能用：写 → 查 → 删 → 再查。
+   *
+   * ── 为什么不再用路径名判断 ──
+   *
+   * 这里原先判断"闸门位置对不对"用的是正则匹配路径里有没有某个固定字样，
+   * 而那等于**写死了一台机器的目录名**。换一个工作区就永远匹配不上，
+   * 于是正常情况被报成"★ 闸门位置不正确 —— ESC 会只关界面而不拦住操作"。
+   *
+   * 这个误报代价不小：使用者会以为急停不可靠，而实际是好的。
+   * 所以改成功能性判断——**真正要回答的问题不是"路径长什么样"，
+   * 而是"这道闸门拦得住操作吗"**，那就实际做一次。
+   *
+   * 探测由 dsc.exe 自己完成（gate_probe），所以测的正是
+   * **那个受沙箱约束的进程**能不能用这道闸门——这才是关键路径。
+   */
+  async function probeGate(gateFile) {
+    return new Promise((resolve) => {
+      let out = ''
+      let done = false
+      const finish = (r) => { if (!done) { done = true; resolve(r) } }
+      try {
+        const child = spawn(helperPath, ['gate_probe'], {
+          env: { ...process.env, DSC_HALT_GATE: gateFile },
+          windowsHide: true,
+        })
+        child.stdout?.on('data', (b) => { out += String(b) })
+        child.on('error', (e) => finish({ ok: false, error: e.message }))
+        child.on('close', () => {
+          try { finish(JSON.parse(out)) } catch { finish({ ok: false, error: '探测输出无法解析' }) }
+        })
+        setTimeout(() => finish({ ok: false, error: '探测超时' }), 8000)
+      } catch (e) {
+        finish({ ok: false, error: e?.message ?? String(e) })
+      }
+    })
+  }
+
+  /**
    * 解析闸门路径（**首次用到时才算**，不在插件加载时算）。
    *
    * 为什么不放在加载时：workspaceRegistry 的反查依赖
@@ -312,7 +350,7 @@ function applyInner(ctx, config = {}) {
    *   ④ 反查到了但 path 不对     → 位置错
    * 光看最终路径分不清是哪一个，只能一层层打出来。
    */
-  function debugGatePath() {
+  async function debugGatePath() {
     const out = { steps: [], gatePath: null, ok: false }
     const push = (k, v) => out.steps.push(`${k}: ${v}`)
 
@@ -356,36 +394,98 @@ function applyInner(ctx, config = {}) {
     const g = resolveGatePath()
     out.gatePath = g
     push('最终解析结果', g)
-    push('在工作区内', /dsh workspace/i.test(g) ? '是' : '否 ← 问题在这里')
-    out.ok = /dsh workspace/i.test(g)
+
+    // 实际探测，而不是看路径名像不像。
+    //
+    // 原先这里用正则匹配路径里有没有某个固定字样——那是写死了一台机器的
+    // 目录名，换个工作区必然误报"闸门位置不正确"，让使用者以为急停坏了。
+    // 真正要回答的是"这道闸门拦得住操作吗"，那就让 dsc.exe 自己走一遍：
+    // 写 → 查 → 删 → 再查。测的是那个**受沙箱约束的进程**，也就是关键路径。
+    const probe = await probeGate(g)
+    push(
+      '闸门实测（写→查→删→再查）',
+      probe.healthy === true
+        ? '通过'
+        : `★ 未通过  stage=${probe.stage ?? '?'}  ${probe.error ?? '(无说明)'}`,
+    )
+    push('  闸门文件', probe.gatePath ?? g)
+    if (probe.writable !== undefined) push('  可写', probe.writable ? '是' : '否')
+    if (probe.halted !== undefined) push('  写后即生效', probe.halted ? '是' : '否')
+    if (probe.clearable !== undefined) push('  可解除', probe.clearable ? '是' : '否')
+    out.ok = probe.healthy === true
     return out
   }
 
-  // 闸门落在工作区外就明确告警——那种情况下 ESC 能拉闸但解除不了，
+  // 闸门不可用就明确告警——那种情况下 ESC 能拉闸但解除不了，
   // 而且 dsc.exe 根本看不见它，症状是"按了 ESC 好像没停"。
-  // 放在 gate() 里而不是加载时：解析本身就是惰性的。
+  //
+  // 判断改成**实测**（走 probeGate），不再看路径名。
+  // 原先是正则匹配固定字样，等于写死一台机器的目录名，换工作区必然误报，
+  // 让使用者以为急停坏了。告警只在探测**失败**时发。
   let _gateWarned = false
+  let _gateProbe = null
   function gateChecked() {
     const g = gate()
-    if (!_gateWarned && !config.gatePath && !/dsh workspace/i.test(g)) {
-      _gateWarned = true
-      ctx.logger?.warn?.(
-        `[desktop-control] 闸门路径 ${g} 可能不在会话工作区内。` +
-          `dsc.exe 是沙箱子进程、只能写工作区，若它读不到这道闸门，` +
-          `按 ESC 会只关掉界面而拦不住操作。可用 config.gatePath 显式指定。`,
-      )
+    // 顺手做一次 helper 位置检查（需要会话上下文，所以放在这里而不是加载时）。
+    helperLocationChecked()
+    if (!_gateWarned && !config.gatePath && _gateProbe === null) {
+      // 只探一次，且不阻塞调用方——探测是异步的，而 gateChecked 必须同步返回路径。
+      // 探测结果只用于告警，不影响返回的路径。
+      _gateProbe = probeGate(g).then((r) => {
+        if (r.healthy !== true) {
+          _gateWarned = true
+          ctx.logger?.warn?.(
+            `[desktop-control] 闸门实测未通过：${g}\n` +
+              `  stage=${r.stage ?? '?'} error=${r.error ?? '(无说明)'}\n` +
+              `  dsc.exe 是沙箱子进程，若它写不了或读不到这道闸门，` +
+              `按 ESC 会只关掉界面而拦不住操作。可用 config.gatePath 显式指定。`,
+          )
+        }
+        return r
+      })
     }
     return g
   }
 
-  // 如果 helper 落在工作区目录里，明确警告。这不是风格问题：
+  // helper 落在会话工作区目录里就告警。这不是风格问题：
   // 那种情况下鼠标/键盘注入会静默失效，而且没有任何报错。
-  if (/[\\/]dsh workspace[\\/]/i.test(helperPath)) {
-    ctx.logger?.warn?.(
-      `[desktop-control] helper 位于工作区目录内（${helperPath}）。` +
-        `实测该位置下鼠标/键盘注入会静默失效（调用返回成功但光标不动）。` +
-        `请把 helper 放到工作区之外，或用 config.helperPath / DSC_HELPER 指定别处。`,
-    )
+  //
+  // 判断用**实际的工作区路径**比对，而不是正则匹配某个固定目录名——
+  // 后者只在我这台机器上成立。工作区路径来自 workspaceRegistry 反查，
+  // 和闸门路径同一来源；拿不到就不判断（宁可漏报，也不要基于猜测误报）。
+  function helperInsideWorkspace() {
+    try {
+      const reg = ctx.get('workspaceRegistry')
+      const ag = ctx.get('agents')
+      const sid = ag?.currentInitiator?.()?.id
+      if (!reg?.list || !sid) return null
+      const ws = reg.list().find((w) => Array.isArray(w?.sessionIds) && w.sessionIds.includes(sid))
+      if (!ws?.path) return null
+      const root = String(ws.path).replace(/[\\/]+$/, '').toLowerCase()
+      const h = String(helperPath).replace(/[\\/]+/g, '\\').toLowerCase()
+      return h.startsWith(root.toLowerCase() + '\\') ? ws.path : false
+    } catch {
+      return null
+    }
+  }
+
+  // helper 在会话工作区里 → 告警。判定基于实际工作区路径，
+  // 拿不到路径时返回 null（不判断），避免基于猜测误报。
+  //
+  // 这里是惰性触发的：工作区路径要等有了会话上下文才拿得到，
+  // 所以放在第一次 gateChecked() 里做，而不是加载时。
+  let _helperChecked = false
+  function helperLocationChecked() {
+    if (_helperChecked) return
+    _helperChecked = true
+    const inside = helperInsideWorkspace()
+    if (typeof inside === 'string') {
+      ctx.logger?.warn?.(
+        `[desktop-control] helper 位于会话工作区目录内（${helperPath}，工作区 ${inside}）。` +
+          `实测该位置下鼠标/键盘注入会静默失效（调用返回成功但光标不动）。` +
+          `请把 helper 放到工作区之外，或用 config.helperPath / DSC_HELPER 指定别处。`,
+      )
+    }
   }
 
   const set = createDesktopToolset({
@@ -1010,7 +1110,7 @@ function applyInner(ctx, config = {}) {
       render: (_args, value) => [{ type: 'text', text: value.result }],
     },
     async execute() {
-      const g = debugGatePath()
+      const g = await debugGatePath()
       const lines = []
       lines.push('== 版本 ==')
       lines.push('  插件 ' + PLUGIN_VERSION)
@@ -1030,7 +1130,9 @@ function applyInner(ctx, config = {}) {
       lines.push('  会话已授权: ' + ([...set.grants.keys()].join(', ') || '（无）'))
       lines.push('  生效名单  : ' + (set.effectiveAllowlist().join(', ') || '（空）'))
       lines.push('')
-      lines.push(g.ok ? '闸门位置正确。' : '★ 闸门位置不正确 —— ESC 会只关界面而不拦住操作。')
+      lines.push(g.ok
+        ? '闸门可用（已实测：写→查→删→再查全部通过）。'
+        : '★ 闸门实测未通过 —— ESC 可能只关界面而不拦住操作。看上面「闸门实测」那一行的 stage 与 error。')
       return { result: lines.join(String.fromCharCode(10)) }
     },
     presentCall: () => ({ card: 'generic', title: '诊断桌面控制状态', kind: 'read' }),

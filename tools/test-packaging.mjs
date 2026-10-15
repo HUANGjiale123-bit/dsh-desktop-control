@@ -79,17 +79,25 @@ check('解析结果确实存在', existsSync(resolved), resolved)
 // 分发场景（npm 装到 profile 的 node_modules）下解析结果自然在工作区之外；
 // 只有"把仓库自己当 profile 装"这种开发布局才会踩到。
 const inWorkspace = /[\\/]dsh workspace[\\/]/i.test(resolved)
+// 这条断言原先要求 index.mjs 里出现固定的工作区目录名（正则匹配 "dsh workspace"）。
+// 那个实现已经被换掉了——正因为它是**写死一台机器的目录名**，换工作区就误报
+// "闸门位置不正确"，让使用者以为急停坏了。现在的实现是用 workspaceRegistry
+// 反查真实工作区路径，再和 helperPath 比对。
+//
+// 所以断言改成检查**新的机制存在**：能反查工作区、能比对 helper 位置。
+// 注意不能反过来要求"含有某个固定目录名"——那正是被修掉的错误做法，
+// 而 tools/check-authpolicy.mjs 现在专门断言不能出现它。
+const indexSrc = (await import('node:fs')).readFileSync(join(pluginDir, 'index.mjs'), 'utf8')
+const hasWorkspaceCheck =
+  /workspaceRegistry/.test(indexSrc) &&
+  /helperInsideWorkspace/.test(indexSrc) &&
+  /sessionIds/.test(indexSrc)
+
 console.log(`  · 解析结果${inWorkspace ? '在' : '不在'}工作区目录内（开发仓库布局下为"在"）`)
 check(
-  inWorkspace
-    ? '解析到工作区内时，插件会告警（不静默失效）'
-    : '解析结果不在工作区目录内',
-  inWorkspace
-    ? /dsh workspace/i.test(
-        (await import('node:fs')).readFileSync(join(pluginDir, 'index.mjs'), 'utf8'),
-      )
-    : true,
-  'index.mjs 应当含有工作区路径检测',
+  inWorkspace ? '解析到工作区内时有检测机制（不静默失效）' : '解析结果不在工作区目录内',
+  inWorkspace ? hasWorkspaceCheck : true,
+  'index.mjs 应当通过 workspaceRegistry 反查工作区并比对 helper 位置',
 )
 
 console.log('\n=== ⑤ shotDir 默认值不指向仓库 ===')
