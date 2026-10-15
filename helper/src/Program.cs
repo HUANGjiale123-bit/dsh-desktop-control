@@ -476,12 +476,48 @@ namespace Dsc
         }
 
         /// <summary>
+        /// 从参数里解析窗口句柄，并给出**可读的**错误。
+        ///
+        /// 原先各处直接写 `long.Parse(args[1])`，参数缺失或为空时抛的是
+        /// `FormatException: 输入字符串的格式不正确。` —— 调用方（或手敲命令的人）
+        /// 从这句话里看不出是"没给 hwnd"还是"hwnd 写得不对"，更不知道该填什么。
+        ///
+        /// 句柄来自列表命令（list_windows / read_window 输出里的 hwnd=NNNN）。
+        /// </summary>
+        private static IntPtr ParseHwnd(string[] args, string action)
+        {
+            if (args.Length < 2 || string.IsNullOrWhiteSpace(args[1]))
+                throw new ArgumentException(
+                    action + " 需要一个窗口句柄。用法：" + action + " <hwnd> [其它参数]。" +
+                    "句柄取自 list_windows 输出里的 hwnd=NNNN。");
+
+            long v;
+            if (!long.TryParse(args[1].Trim(), out v) || v == 0)
+                throw new ArgumentException(
+                    action + " 的窗口句柄无法解析：" + args[1].Trim() +
+                    "。它应当是一个十进制整数，取自 list_windows 输出里的 hwnd=NNNN。");
+
+            return new IntPtr(v);
+        }
+
+        /// <summary>
         /// 校验某个窗口所属的应用是否在白名单内。不在就抛异常。
         ///
         /// 三道判断，任何一道不过都拒绝：
         ///   1. 白名单为空        → 什么都别做
         ///   2. 取不到可执行文件  → 无法校验，拒绝（宁可拒绝也不放行未知目标）
         ///   3. 不在名单内        → 拒绝并列出当前名单
+        ///
+        /// ★ 观察类命令（tree / screenshot）**同样适用**。
+        ///
+        /// 这里原先写着"观察类命令不受限制"，那是早期的设计：读界面被当作无害。
+        /// 后来改了——**读无障碍树会拿到界面上全部文字**（文档正文、聊天记录、
+        /// 表单里已填的值），截图就是界面本身，所以插件层把观察也纳入了授权。
+        /// 但这句话和 tree/screenshot 里缺失的调用没跟着改，于是两头不一致：
+        /// 插件层要授权，而绕过插件直接调 helper 时**没有任何校验**。
+        ///
+        /// 现在两边一致：读界面内容同样要过白名单。纵深防御——插件层的授权
+        /// 是主闸门，这里是第二道；任一被绕过都不至于全开。
         /// </summary>
         private static void RequireAllowedWindow(IntPtr hwnd, string action)
         {
@@ -489,7 +525,8 @@ namespace Dsc
             if (allow.Length == 0)
                 throw new InvalidOperationException(
                     "白名单为空，拒绝执行 " + action + "。设置 DSC_ALLOWED_APPS（逗号分隔的可执行文件名，" +
-                    "例如 notepad.exe）或用 --allow notepad.exe 指定后再试。观察类命令不受限制。");
+                    "例如 notepad.exe）或用 --allow notepad.exe 指定后再试。" +
+                    "读取界面内容同样需要授权——观察也是访问。");
 
             uint pid;
             Native.GetWindowThreadProcessId(hwnd, out pid);
@@ -1114,8 +1151,9 @@ namespace Dsc
         /// </summary>
         private static int CmdScreenshot(string[] args)
         {
-            if (args.Length < 2) throw new ArgumentException("screenshot 需要 hwnd 参数");
-            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            IntPtr hwnd = ParseHwnd(args, "screenshot");
+            // 截图就是界面内容本身，同样要过白名单。
+            RequireAllowedWindow(hwnd, "screenshot");
 
             Native.RECT r;
             if (!Native.GetWindowRect(hwnd, out r))
@@ -1131,11 +1169,68 @@ namespace Dsc
             if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
                 System.IO.Directory.CreateDirectory(dir);
 
-            using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+            // ── 保存前先确认目录可写 ──
+            //
+            // 实测踩到的：dsc.exe 是沙箱子进程，**只能写会话工作区**。
+            // 默认保存路径用 %TEMP%，那在工作区外，于是写不进去。
+            // 而 Bitmap.Save 对"路径不可写"报的是
+            // **"GDI+ 中发生一般性错误"** —— 完全指错方向，
+            // 从这条消息看不出真正原因是权限。
+            //
+            // 所以先实际写一个探测文件。不可写就明确说是权限问题、
+            // 以及该怎么办（显式给一个工作区内的路径）。
+            if (!CanWriteNear(outPath))
             {
-                using (Graphics g = Graphics.FromImage(bmp))
-                    g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
-                bmp.Save(outPath, ImageFormat.Png);
+                Jw bad = new Jw();
+                bad.Obj().Key("ok").Bool(false)
+                    .Key("error").Val("OutputNotWritable")
+                    .Key("path").Val(outPath)
+                    .Key("message").Val(
+                        "保存位置不可写：" + outPath + "\n" +
+                        "dsc.exe 是沙箱子进程，只能写会话工作区；默认保存位置用的是系统临时目录，" +
+                        "那通常在工作区之外。\n" +
+                        "请显式给出一个工作区内的路径，例如：dsc.exe screenshot " +
+                        hwnd.ToInt64() + " \"<工作区>\\shot.png\"")
+                 .End();
+                Console.WriteLine(bad.ToString());
+                return 7;
+            }
+
+            try
+            {
+                using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(bmp))
+                        g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
+                    bmp.Save(outPath, ImageFormat.Png);
+                }
+            }
+            catch (Exception e)
+            {
+                // 兜底：把真实原因说出来，不要让调用方只看到"GDI+ 一般性错误"。
+                Jw bad = new Jw();
+                bad.Obj().Key("ok").Bool(false)
+                    .Key("error").Val("CaptureFailed")
+                    .Key("path").Val(outPath)
+                    .Key("stage").Val("save")
+                    .Key("exception").Val(e.GetType().Name)
+                    .Key("message").Val(e.GetType().Name + ": " + e.Message)
+                 .End();
+                Console.WriteLine(bad.ToString());
+                return 8;
+            }
+
+            // 再回读确认文件真的落盘了——"Save 没抛异常"不等于"文件存在"。
+            if (!File.Exists(outPath) || new FileInfo(outPath).Length == 0)
+            {
+                Jw bad = new Jw();
+                bad.Obj().Key("ok").Bool(false)
+                    .Key("error").Val("OutputMissing")
+                    .Key("path").Val(outPath)
+                    .Key("message").Val("保存调用没有抛异常，但文件不存在或是空的。")
+                 .End();
+                Console.WriteLine(bad.ToString());
+                return 9;
             }
 
             Jw j = new Jw();
@@ -1954,8 +2049,9 @@ namespace Dsc
         /// <summary>读取窗口的无障碍树，元素以稳定 id 标注，供后续动作寻址。</summary>
         private static int CmdTree(string[] args)
         {
-            if (args.Length < 2) throw new ArgumentException("tree 需要 hwnd 参数");
-            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            IntPtr hwnd = ParseHwnd(args, "tree");
+            // 白名单校验放最前：读界面内容同样要授权（树里有界面上全部文字）。
+            RequireAllowedWindow(hwnd, "tree");
 
             // 位置参数 hwnd [maxNodes]，另有可选开关 --depth / --children。
             // 三个上限都是为了不在怪应用上挂死，也为了避免一次取回上千个活 RCW。

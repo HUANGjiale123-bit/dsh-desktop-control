@@ -116,6 +116,37 @@ for (const f of siblings) {
   }
 }
 
+// ── helper 侧：观察类命令必须过白名单 ──
+//
+// 插件层给 readWindow/screenshot 加了授权，但 helper 侧原先写着
+// "观察类命令不受限制"，而且 tree/screenshot 里根本没有校验调用 ——
+// 两头不一致：插件要授权，而绕过插件直接调 helper 时没有任何校验。
+//
+// 实测确认过：空白名单、白名单里是别的应用，tree 都照读不误。
+// 这是纵深防御的第二道，缺了不影响插件正常用法，但被绕过时就全开了。
+const helperSrcPath = file.replace(/[\\/]toolset\.mjs$/, '')
+const helperProblems = []
+try {
+  // helper 源码不在部署目录里，所以这里检查仓库里的那份
+  const csPath = new URL('../helper/src/Program.cs', import.meta.url)
+  const cs = readFileSync(csPath, 'utf8')
+  for (const cmd of ['CmdTree', 'CmdScreenshot']) {
+    const m = new RegExp(`private static int ${cmd}\\(string\\[\\] args\\)`).exec(cs)
+    if (!m) {
+      helperProblems.push(`${cmd}: 找不到方法`)
+      continue
+    }
+    const rest = cs.slice(m.index + m[0].length)
+    const nxt = /\n        private static int Cmd/.exec(rest)
+    const body = nxt ? rest.slice(0, nxt.index) : rest.slice(0, 3000)
+    if (!body.includes('RequireAllowedWindow(')) {
+      helperProblems.push(`${cmd}: 没有调用 RequireAllowedWindow —— 读界面内容不受白名单约束`)
+    }
+  }
+} catch (e) {
+  helperProblems.push(`读不到 helper 源码: ${e.message}`)
+}
+
 for (const [name, needAuth] of Object.entries(WANT)) {
   const body = bodyOf(src, name)
   if (body === null) {
@@ -131,12 +162,25 @@ for (const [name, needAuth] of Object.entries(WANT)) {
   }
 }
 
-if (problems.length === 0 && !hasHardcodedWorkspace && staleFound.length === 0) {
+if (
+  problems.length === 0 &&
+  !hasHardcodedWorkspace &&
+  staleFound.length === 0 &&
+  helperProblems.length === 0
+) {
   console.log('  ✓ 授权策略符合预期：')
   for (const s of summary) console.log(s)
   console.log('  ✓ 无硬编码的本机工作区路径')
   console.log('  ✓ 工具描述无过时说法')
+  console.log('  ✓ helper 侧观察类命令也过白名单（纵深防御）')
   process.exit(0)
+}
+
+if (helperProblems.length > 0) {
+  console.log('  ✗ helper 侧观察类命令缺少白名单校验：')
+  for (const p of helperProblems) console.log(`      ${p}`)
+  console.log('      读无障碍树会拿到界面上全部文字、截图就是界面本身，')
+  console.log('      所以它们和操作类命令一样要过白名单。')
 }
 
 if (hasHardcodedWorkspace) {
