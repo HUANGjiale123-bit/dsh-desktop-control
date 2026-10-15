@@ -24,9 +24,13 @@ const check = (name, cond, detail = '') => {
 
 console.log('=== ① 插件包自带辅助程序 ===')
 const bundled = join(pluginDir, 'bin', 'dsc.exe')
-const bundledEdge = join(pluginDir, 'bin', 'dsc-edge.exe')
+const bundledEsc = join(pluginDir, 'bin', 'dsc-esc.exe')
+const removedEdge = join(pluginDir, 'bin', 'dsc-edge.exe')
 check('bin/dsc.exe 存在', existsSync(bundled), bundled)
-check('bin/dsc-edge.exe 存在', existsSync(bundledEdge), bundledEdge)
+check('bin/dsc-esc.exe 存在', existsSync(bundledEsc), bundledEsc)
+// 光带已合进 dsc-esc，dsc-edge 应当**不存在**。
+// 这条断言是反的：它防的是"删过一次又被谁加回来"。
+check('bin/dsc-edge.exe 已移除', !existsSync(removedEdge), removedEdge)
 if (existsSync(bundled)) {
   const kb = Math.round(statSync(bundled).size / 1024)
   check('dsc.exe 体积合理（未被打包工具破坏）', statSync(bundled).size > 20000, `${kb} KB`)
@@ -37,7 +41,7 @@ const pkg = JSON.parse(
   (await import('node:fs')).readFileSync(join(pluginDir, 'package.json'), 'utf8'),
 )
 const files = pkg.files ?? []
-for (const f of ['index.mjs', 'toolset.mjs', 'cordis.patch.yml', 'bin/dsc.exe', 'bin/dsc-edge.exe']) {
+for (const f of ['index.mjs', 'toolset.mjs', 'cordis.patch.yml', 'bin/dsc.exe', 'bin/dsc-esc.exe']) {
   check(`files 含 ${f}`, files.includes(f), files.join(','))
 }
 check('main 指向 index.mjs', pkg.main === 'index.mjs', String(pkg.main))
