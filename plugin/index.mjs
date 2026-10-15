@@ -38,7 +38,7 @@ export const name = 'dsh-desktop-control'
  * 这个导出保留是为了元数据完整（其他 DSH 插件也这么写），但改注入清单时
  * 必须改 YAML，否则不会生效。
  */
-export const inject = ['tools', 'approval', 'agents']
+export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
 
 /**
  * 插件版本，只用于日志与工具输出。
@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.6.0'
+const PLUGIN_VERSION = '0.7.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -191,25 +191,58 @@ function applyInner(ctx, config = {}) {
   /**
    * 急停闸门路径。
    *
-   * **必须放在 dsc.exe 写得进去的地方**，这不是习惯问题而是权限问题：
-   *   · dsc-esc.exe 由宿主直接 spawn，没被沙箱套住，哪都能写
-   *   · dsc.exe 是沙箱子进程，**只能写工作区**——实测往 profile 目录写
-   *     直接 UnauthorizedAccessException
-   * 所以闸门位置要迁就权限更小的那一方。放错地方的后果很隐蔽：
-   * "ESC 能拉闸，但 stop --clear 解除不了，报访问被拒绝"，
-   * 用户会以为插件坏了。
+   * **必须放在 dsc.exe 写得进去的地方**——这是权限约束，不是偏好：
    *
-   * 解析顺序：
-   *   1. config.gatePath      —— 部署方显式指定
-   *   2. 插件上级目录的 .state —— 本地安装时插件就在仓库里，那里一定可写
-   *   3. cwd/.state           —— 兜底
+   *   dsc-esc.exe  宿主直接 spawn，没被沙箱套住，写到哪都行
+   *   dsc.exe      沙箱子进程，**只能写会话工作区**。实测往 profile 目录
+   *                写会直接 UnauthorizedAccessException
    *
-   * 刻意**不用 process.cwd()**：DSH 宿主的工作目录是 profile 目录（只读），
-   * 昨天就是这里选错，导致闸门能拉不能解。
+   * 所以位置要迁就权限更小的那一方。放错的后果很隐蔽：ESC 拉下闸门、
+   * 界面一起消失（用户以为停了），而 dsc.exe 既看不见那道闸门、也无法
+   * 用 stop --clear 解除它——后续操作要么照跑、要么永久被锁。
+   *
+   * 三个都走过、都不行的选项，写下来免得以后又选：
+   *   · process.cwd()        DSH 宿主的工作目录是 profile 目录，只读
+   *   · 环境变量              没有 DSH_SESSION_WORKSPACE 这种东西
+   *   · 插件自己的目录        npm 装到 profile/node_modules，也不在工作区
+   *
+   * 正确做法是**问 DSH**：workspaceRegistry 里每个 workspace 带 path 和
+   * sessionIds，用当前会话 id 反查就能拿到工作区路径。
    */
-  const gatePath =
-    config.gatePath ??
-    join(existsSync(join(pluginDir, '..', 'helper')) ? join(pluginDir, '..', '.state') : process.cwd(), 'halt')
+  function resolveGatePath() {
+    if (config.gatePath) return config.gatePath
+
+    // ① 问 workspaceRegistry：当前会话属于哪个工作区
+    try {
+      const reg = ctx.get('workspaceRegistry')
+      const agent = ctx.get('agents')?.currentInitiator?.()
+      const sid = agent?.id
+      if (reg?.list && sid) {
+        for (const ws of reg.list()) {
+          if (ws?.path && Array.isArray(ws.sessionIds) && ws.sessionIds.includes(sid)) {
+            return join(ws.path, '.desktop-control', 'halt')
+          }
+        }
+      }
+    } catch {
+      // 查不到就往下走兜底，不因为这一步失败而让插件起不来
+    }
+
+    // ② 兜底：cwd（可能是工作区，也可能不是）。下面会检查并告警。
+    return join(process.cwd(), '.desktop-control', 'halt')
+  }
+
+  const gatePath = resolveGatePath()
+
+  // 闸门落在工作区外就明确告警——那种情况下 ESC 能拉闸但解除不了，
+  // 而且 dsc.exe 根本看不见它，症状是"按了 ESC 好像没停"。
+  if (!config.gatePath && !/dsh workspace/i.test(gatePath)) {
+    ctx.logger?.warn?.(
+      `[desktop-control] 闸门路径 ${gatePath} 可能不在会话工作区内。` +
+        `dsc.exe 是沙箱子进程、只能写工作区，若它读不到这道闸门，` +
+        `按 ESC 会只关掉界面而拦不住操作。可用 config.gatePath 显式指定。`,
+    )
+  }
 
   // 如果 helper 落在工作区目录里，明确警告。这不是风格问题：
   // 那种情况下鼠标/键盘注入会静默失效，而且没有任何报错。
