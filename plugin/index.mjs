@@ -913,7 +913,6 @@ function applyInner(ctx, config = {}) {
       lines.push('== 程序位置 ==')
       lines.push('  helper : ' + set.helperPath)
       lines.push('  esc    : ' + escPath)
-      lines.push('  esc    : ' + escPath)
       lines.push('  plugin : ' + pluginDir)
       lines.push('  cwd    : ' + process.cwd())
       lines.push('')
