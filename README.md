@@ -119,6 +119,7 @@ node tools/test-packaging.mjs          # 自包含性检查（22 项）
 |---|---|
 | `docs/当前状态.md` | **入口**：能做什么、不能做什么、改动前必看 |
 | `docs/ESC强制退出-完整链路.md` | **ESC 停止的完整链路 + 六类踩过的坑** |
+| `docs/实机验证-ESC打断操作.md` | **实机演示：人按 ESC 打断正在进行的操作** |
 | `docs/定案-注入取决于启动上下文.md` | 注入失效问题的完整排查记录 |
 | `docs/ESC急停-实测记录.md` | ESC 方案的排查与结论 |
 | `docs/与Codex的差异清单.md` | 与 OpenAI Codex computer use 的逐条对照 |
