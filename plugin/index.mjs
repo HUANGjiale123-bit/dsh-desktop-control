@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.9.0'
+const PLUGIN_VERSION = '1.0.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -874,6 +874,10 @@ function applyInner(ctx, config = {}) {
     async execute() {
       const g = debugGatePath()
       const lines = []
+      lines.push('== 版本 ==')
+      lines.push('  插件 ' + PLUGIN_VERSION)
+      lines.push('  用 gateChecked 的构建: ' + (typeof gateChecked === 'function' ? '是' : '否 ← 跑的是旧模块'))
+      lines.push('')
       lines.push('== 程序位置 ==')
       lines.push('  helper : ' + set.helperPath)
       lines.push('  edge   : ' + edgePath)
