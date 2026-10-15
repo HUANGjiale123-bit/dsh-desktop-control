@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '1.0.0'
+const PLUGIN_VERSION = '1.0.1'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -594,7 +594,7 @@ function applyInner(ctx, config = {}) {
     // DSC_HALT_GATE 交给子进程：闸门路径必须由插件统一决定，
     // 不能让它自己从 exe 位置去推（dsc-esc 和 dsc-edge 位置不同，
     // 推出来的可能不是同一个文件，那就成了"ESC 写了 A、dsc.exe 查 B"）。
-    const env = { ...process.env, DSC_HALT_GATE: gatePath }
+    const env = { ...process.env, DSC_HALT_GATE: gateChecked() }
 
     const child = spawn(exe, args, {
       windowsHide: false, detached: false, stdio: 'ignore', env,
