@@ -572,14 +572,14 @@ function applyInner(ctx, config = {}) {
    *
    * 由宿主进程持有子进程，所以它不会随我的会话或沙箱消失而消失。
    *
-   * edgePath 已在上面按"配置 → 插件自带 → 仓库布局"的顺序解析好，
-   * 这里不再重复解析（重复声明会直接是语法错误）。
+   * 辅助程序路径已在上面解析好，这里不再重复解析
+   * （重复声明会直接是语法错误，而漏掉引用会让整个插件激活失败）。
    */
 
   const liveOverlays = new Map()   // key -> ChildProcess
 
   function startIndicator(key, args, prog) {
-    const exe = prog ?? edgePath
+    const exe = prog ?? escPath
     if (!existsSync(exe)) return { ok: false, reason: `找不到程序：${exe}` }
 
     const prev = liveOverlays.get(String(key))
@@ -799,7 +799,7 @@ function applyInner(ctx, config = {}) {
           `已关闭 ${killed} 个由本插件拉起的指示浮层与逃生条。${gateNote}。` +
           `注意：如果是**按 ESC 停止**的，闸门会保留，后续操作会被拒绝——` +
           `确认安全后用 \`dsc.exe stop --clear\` 解除。` +
-          `若屏幕上仍有残留边框，可在终端执行：taskkill /IM dsc-edge.exe /F`,
+          `若屏幕上仍有残留光带，可在终端执行：taskkill /IM dsc-esc.exe /F`,
       }
     },
     presentCall: () => ({ card: 'generic', title: '关闭 computer use', kind: 'other' }),
@@ -873,7 +873,7 @@ function applyInner(ctx, config = {}) {
       lines.push('')
       lines.push('== 程序位置 ==')
       lines.push('  helper : ' + set.helperPath)
-      lines.push('  edge   : ' + edgePath)
+      lines.push('  esc    : ' + escPath)
       lines.push('  esc    : ' + escPath)
       lines.push('  plugin : ' + pluginDir)
       lines.push('  cwd    : ' + process.cwd())
@@ -895,7 +895,7 @@ function applyInner(ctx, config = {}) {
   ctx.logger?.info?.(
     `[desktop-control] v${PLUGIN_VERSION} 已注册 ${registered.length} 个工具` +
     `（${registered.join(', ')}）；helper=${set.helperPath}；` +
-    `指示层=${edgePath}；` +
+    `指示层=${escPath}；` +
     `静态白名单=${set.allowlist.length ? set.allowlist.join(', ') : '（空）'}；` +
     `会话授权=${ctx.get('approval')?.request ? '可用' : '不可用（将 fail closed）'}`,
   )
