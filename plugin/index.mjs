@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '1.0.1'
+const PLUGIN_VERSION = '2.0.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -179,10 +179,6 @@ function applyInner(ctx, config = {}) {
     config.helperPath ??
     process.env.DSC_HELPER ??
     (existsSync(bundledHelper) ? bundledHelper : repoHelper)
-
-  const bundledEdge = join(pluginDir, 'bin', 'dsc-edge.exe')
-  const repoEdge = join(pluginDir, '..', 'helper', 'bin', 'dsc-edge.exe')
-  const edgePath = config.edgePath ?? (existsSync(bundledEdge) ? bundledEdge : repoEdge)
 
   const bundledEsc = join(pluginDir, 'bin', 'dsc-esc.exe')
   const repoEsc = join(pluginDir, '..', 'helper', 'bin', 'dsc-esc.exe')
@@ -714,12 +710,12 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const label = args.label ?? '已激活'
 
-      // ① 边缘光带：屏幕四边的粒子光带，指示层。
-      const edgeArgs = ['--label', label]
-      if (args.timeoutMs > 0) edgeArgs.push('--timeout', String(args.timeoutMs))
-      const r1 = startIndicator('indicator', edgeArgs, edgePath)
-
-      // ② 逃生条 + ESC 捕获。
+      // 光带、逃生条、ESC 钩子全在 dsc-esc 一个进程里。
+      //
+      // 原先拆成两个程序（dsc-edge 画光带、dsc-esc 管停止），结果是两者
+      // 互不知情：ESC 触发后 dsc-esc 退出而光带还挂着，用户看到"按了没反应"；
+      // 而且两边各装一套键盘钩子，说不清谁负责停止。合并后这类问题不存在
+      // —— 一个进程，一套状态，一起生一起死。
       //
       // 这两件事天然是同一件事：低层键盘钩子要求宿主进程有一个**可见且
       // 被激活过**的窗口（实测：无窗口 0 次、隐藏窗口 0 次、可见但从未激活
@@ -731,12 +727,9 @@ function applyInner(ctx, config = {}) {
       // 所以"点按钮停"是方便，**"按 ESC 停"才是保险**。
       const r2 = startIndicator('escape', [gateChecked()], escPath)
 
-      if (!r1.ok && !r2.ok) throw new Error(r1.reason)
+      if (!r2.ok) throw new Error(r2.reason)
 
-      const parts = []
-      if (r1.ok) parts.push('屏幕边缘的状态光带')
-      if (r2.ok) parts.push('屏幕上方的逃生条（按 ESC 或点它都能立刻停止）')
-      else parts.push(`逃生条启动失败（${r2.reason}）——此时只剩鼠标这条停止路径`)
+      const parts = ['屏幕边缘的状态光带', '屏幕上方的逃生条（按 ESC 或点它都能立刻停止）']
 
       return {
         result:
