@@ -48,7 +48,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '0.8.0'
+const PLUGIN_VERSION = '0.9.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -250,6 +250,66 @@ function applyInner(ctx, config = {}) {
   function gate() {
     if (_gatePath === null) _gatePath = resolveGatePath()
     return _gatePath
+  }
+
+  /**
+   * 诊断：把闸门路径的解析过程摊开。
+   *
+   * 为什么需要它：这条链上有四个可能出错的环节，而症状完全一样
+   * （闸门落在工作区外 → ESC 只关界面、拦不住操作）：
+   *   ① agents 服务取不到        → 没有会话 id
+   *   ② workspaceRegistry 取不到 → 无法反查
+   *   ③ list() 里没有本会话      → 反查不到
+   *   ④ 反查到了但 path 不对     → 位置错
+   * 光看最终路径分不清是哪一个，只能一层层打出来。
+   */
+  function debugGatePath() {
+    const out = { steps: [], gatePath: null, ok: false }
+    const push = (k, v) => out.steps.push(`${k}: ${v}`)
+
+    push('config.gatePath', config.gatePath ?? '（未设置）')
+
+    let reg = null
+    try {
+      reg = ctx.get('workspaceRegistry')
+      push('ctx.get(workspaceRegistry)', reg ? '拿到' : 'undefined')
+    } catch (e) {
+      push('ctx.get(workspaceRegistry)', '抛错 ' + (e?.message ?? e))
+    }
+
+    let sid = null
+    try {
+      const ag = ctx.get('agents')
+      push('ctx.get(agents)', ag ? '拿到' : 'undefined')
+      sid = ag?.currentInitiator?.()?.id ?? null
+      push('currentInitiator().id', sid ?? 'undefined（没有会话上下文）')
+    } catch (e) {
+      push('currentInitiator', '抛错 ' + (e?.message ?? e))
+    }
+
+    if (reg?.list) {
+      try {
+        const list = reg.list()
+        push('registry.list() 条数', list.length)
+        list.forEach((ws, i) => {
+          const ids = Array.isArray(ws?.sessionIds) ? ws.sessionIds : []
+          push(
+            `  [${i}] path`,
+            `${ws?.path ?? '?'}  sessionIds=${ids.length} 含本会话=${sid ? ids.includes(sid) : '未知'}`,
+          )
+        })
+      } catch (e) {
+        push('registry.list()', '抛错 ' + (e?.message ?? e))
+      }
+    }
+
+    _gatePath = null          // 强制重新解析，避免拿到缓存
+    const g = resolveGatePath()
+    out.gatePath = g
+    push('最终解析结果', g)
+    push('在工作区内', /dsh workspace/i.test(g) ? '是' : '否 ← 问题在这里')
+    out.ok = /dsh workspace/i.test(g)
+    return out
   }
 
   // 闸门落在工作区外就明确告警——那种情况下 ESC 能拉闸但解除不了，
@@ -794,6 +854,45 @@ function applyInner(ctx, config = {}) {
       }
     },
     presentCall: () => ({ card: 'generic', title: '收回会话授权', kind: 'other' }),
+  })
+
+  register({
+    name: 'desktop_diagnose',
+    description:
+      '诊断桌面控制的内部状态：helper 路径、闸门路径是怎么解析出来的、' +
+      '当前白名单与会话授权、各子程序位置。**只读**，不碰任何窗口、不启动任何程序。' +
+      '闸门路径不对时（ESC 只关界面却拦不住操作）用它定位卡在哪一层。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute() {
+      const g = debugGatePath()
+      const lines = []
+      lines.push('== 程序位置 ==')
+      lines.push('  helper : ' + set.helperPath)
+      lines.push('  edge   : ' + edgePath)
+      lines.push('  esc    : ' + escPath)
+      lines.push('  plugin : ' + pluginDir)
+      lines.push('  cwd    : ' + process.cwd())
+      lines.push('')
+      lines.push('== 闸门路径解析 ==')
+      for (const s of g.steps) lines.push('  ' + s)
+      lines.push('')
+      lines.push('== 准入 ==')
+      lines.push('  静态白名单: ' + (set.allowlist.length ? set.allowlist.join(', ') : '（空）'))
+      lines.push('  会话已授权: ' + ([...set.grants.keys()].join(', ') || '（无）'))
+      lines.push('  生效名单  : ' + (set.effectiveAllowlist().join(', ') || '（空）'))
+      lines.push('')
+      lines.push(g.ok ? '闸门位置正确。' : '★ 闸门位置不正确 —— ESC 会只关界面而不拦住操作。')
+      return { result: lines.join(String.fromCharCode(10)) }
+    },
+    presentCall: () => ({ card: 'generic', title: '诊断桌面控制状态', kind: 'read' }),
   })
 
   ctx.logger?.info?.(

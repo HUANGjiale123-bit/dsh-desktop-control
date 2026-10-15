@@ -847,13 +847,17 @@ namespace DscEdge
 
             // 急停随指示层一起装。装不上就整体退出——没急停的 computer use 不该跑起来。
             //
-            // ESC 是**主停止路径**：低层键盘钩子实测可用（此前判定"不触发"是误判，
-            // 真因是日志写在只读位置，异常冒泡把整个回调吞掉，ESC 分支执行不到）。
-            // 逃生条上的按钮与关窗口是后备，两条路都汇到 onStop。
-            bool hookDeferred = EscapeGate.DeferHook;
-            if (!noEsc && !hookDeferred && !EscapeGate.Install())
-                return 3;
-
+            // ★ 指示层**不再自己装键盘钩子**。
+            //
+            // 原先 dsc-edge 和 dsc-esc 各装一套低层键盘钩子，实测两套都能工作，
+            // 但 ESC 只会被其中一套抓到——重复且无益，还会让"到底谁在负责停止"
+            // 变得含糊。现在职责拆干净：
+            //
+            //   dsc-edge  只画屏幕边缘的光带，不碰键盘
+            //   dsc-esc   装唯一的钩子 + 显示逃生条
+            //
+            // EscapeGate 整个类保留在文件里（OnTripped/GatePath 等仍被引用），
+            // 只是不再从这条路径安装。--no-esc 与 --hook-* 参数保留兼容。
             Application.EnableVisualStyles();
 
             // 停止动作：关掉界面 + 结束进程。
@@ -915,32 +919,20 @@ namespace DscEdge
             {
                 // 推迟安装模式：构造窗口后先挂 Shown，等窗体真正显示、
                 // 消息循环已经在跑，再装钩子——与已验证可用的探针同一时机。
-                Action<Form> armDeferred = delegate (Form f)
-                {
-                    if (!hookDeferred || noEsc) return;
-                    f.Shown += delegate { EscapeGate.InstallDeferred(); };
-                };
-
                 if (escapeOnly)
                 {
-                    EscapeForm ef = new EscapeForm(label, onStop);
-                    armDeferred(ef);
-                    Application.Run(ef);
+                    Application.Run(new EscapeForm(label, onStop));
                     return 0;
                 }
 
                 if (withEscape)
                 {
                     // 两个窗口共用同一个消息循环：指示层是背景，逃生条在上面。
-                    EscapeHost host = new EscapeHost(label, timeout, accent, noExclude, isStatic, onStop);
-                    if (hookDeferred && !noEsc) host.MainForm.Shown += delegate { EscapeGate.InstallDeferred(); };
-                    Application.Run(host);
+                    Application.Run(new EscapeHost(label, timeout, accent, noExclude, isStatic, onStop));
                     return 0;
                 }
 
-                EdgeForm plain = new EdgeForm(label, timeout, accent, noExclude, isStatic);
-                armDeferred(plain);
-                Application.Run(plain);
+                Application.Run(new EdgeForm(label, timeout, accent, noExclude, isStatic));
             }
             finally
             {
