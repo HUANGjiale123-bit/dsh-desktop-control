@@ -185,6 +185,13 @@ function applyInner(ctx, config = {}) {
 
     if (outcome === 'allowed-once') {
       sessionGrants.set(app, true)
+      // 记下"问到了什么结果"。不加这行就无法区分两种情况：
+      //   · 真的弹了询问、用户点了同意
+      //   · 某种路径直接返回 allowed-once，压根没问
+      // 前者是设计意图，后者是安全模型的缺口，而现象完全一样。
+      ctx.logger?.info?.(
+        `[desktop-control] 会话授权通过: app=${app} outcome=${outcome} tool=${toolName}`,
+      )
       return true
     }
 
