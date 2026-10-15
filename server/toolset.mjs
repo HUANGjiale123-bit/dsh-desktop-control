@@ -423,15 +423,21 @@ export function createDesktopToolset(options = {}) {
       const resolved = await runHelper(['resolve_app', wanted])
 
       if (!resolved.ok) {
+        // helper 已经把两种失败分开了（NoMatch = 一个都没匹配，
+        // Ambiguous = 匹配到多个），各自文案不同。直接用它的，
+        // 不要在插件层重新拼一句更含糊的——那会把区分抹掉。
+        //
+        // 早先这里自己拼的是"没有唯一解析到可执行文件，可能是这几个"，
+        // 候选为空时读起来像系统出错。实测触发：问"记事本"（清单里叫 Notepad）。
         const cands = (resolved.candidates ?? [])
           .map((c) => `  ${c.name}\n      ${c.exe}`)
           .join('\n')
+        const head =
+          resolved.message ??
+          (cands ? '没有唯一解析到可执行文件，可能是这几个：' : '没有匹配到任何已安装应用。')
         return {
           isError: true,
-          text:
-            `失败：没有唯一解析到可执行文件${cands ? '，可能是这几个：' : '。'}` +
-            (cands ? `\n${cands}` : '') +
-            '\n请用 desktop_list_apps 确认准确的名字。',
+          text: `失败：${head}` + (cands ? `\n${cands}` : ''),
         }
       }
 
@@ -444,7 +450,18 @@ export function createDesktopToolset(options = {}) {
       // ③ 授权通过，才真的启动
       const launched = await runHelper(['launch', resolved.exe])
       if (!launched.ok) {
-        return { isError: true, text: `已授权，但启动失败：${failMessage(launched)}` }
+        // "已授权"不是这次失败的重点，重点是谁拒绝了。
+        // 实测触发：闸门拉下时启动，得到的是"已授权，但启动失败：…已被急停"——
+        // 读起来像授权出了问题，而实际是急停在起作用，且这正是期望行为。
+        const denied = /已被急停/.test(String(launched.message ?? ''))
+        return {
+          isError: true,
+          text: denied
+            ? `未启动「${resolved.name}」：**急停闸门生效中**，所有操作被拒绝。\n` +
+              `这是预期行为——有人按了 ESC 或点了逃生条。` +
+              `确认安全后用 \`dsc.exe stop --clear\` 解除。`
+            : `启动「${resolved.name}」失败：${failMessage(launched)}`,
+        }
       }
 
       return {

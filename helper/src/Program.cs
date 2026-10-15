@@ -996,10 +996,28 @@ namespace Dsc
             Jw j = new Jw();
             if (string.IsNullOrEmpty(exe))
             {
-                j.Obj().Key("ok").Bool(false).Key("error").Val("NotFound")
-                    .Key("message").Val("没有唯一解析到可执行文件。");
+                // 两种失败要说清是哪一种。
+                //
+                // 原先两种情况共用一句"没有唯一解析到可执行文件"：
+                //   · 一个都没匹配上（用户打了清单里没有的名字）
+                //   · 匹配到多个，无法确定是哪一个
+                // 前者该说"没这个名字，去看清单"，后者该说"可能是这几个"。
+                // 都报成后者，用户会去猜"到底哪几个重名了"——白花时间。
+                //
+                // 实测触发：问"记事本"（清单里叫 Notepad），得到的是
+                // "没有唯一解析到"配一个空候选列表，读起来像系统出错。
+                List<Launcher.AppEntry> cands = Launcher.Search(target, 8);
+                bool noneMatched = cands.Count == 0;
+
+                j.Obj().Key("ok").Bool(false)
+                    .Key("error").Val(noneMatched ? "NoMatch" : "Ambiguous");
+                j.Key("message").Val(noneMatched
+                    ? "清单里没有任何应用匹配\"" + target + "\"。请用 desktop_list_apps 查看准确的名字" +
+                      "（清单里的名字多为英文或安装时登记的显示名，未必和中文俗称一致）。"
+                    : "匹配到多个应用，无法确定要启动哪一个，拒绝启动（宁可不动，也不要启错程序）。" +
+                      "请用更准确的名字，或直接用 .exe 完整路径。");
                 j.Key("candidates").Arr();
-                foreach (Launcher.AppEntry a in Launcher.Search(target, 8))
+                foreach (Launcher.AppEntry a in cands)
                     j.Obj().Key("name").Val(a.Name).Key("exe").Val(a.Exe).End();
                 j.EndArr().End();
                 Console.WriteLine(j.ToString());
@@ -1056,10 +1074,13 @@ namespace Dsc
                 // 没解析到就给候选，而不是只说"没找到"——
                 // 使用者需要知道的是"这个名字对应哪些真实存在的应用"。
                 List<Launcher.AppEntry> cands = Launcher.Search(target, 8);
+                bool noneMatched = cands.Count == 0;
                 Jw j = new Jw();
                 j.Obj().Key("ok").Bool(false)
-                    .Key("error").Val("NotFound")
-                    .Key("message").Val("没有唯一解析到可执行文件，拒绝启动——宁可不动，也不要启错程序。");
+                    .Key("error").Val(noneMatched ? "NoMatch" : "Ambiguous")
+                    .Key("message").Val(noneMatched
+                        ? "清单里没有任何应用匹配“" + target + "”。请用 desktop_list_apps 查看准确的名字。"
+                        : "匹配到多个应用，无法确定要启动哪一个，拒绝启动——宁可不动，也不要启错程序。");
                 j.Key("candidates").Arr();
                 foreach (Launcher.AppEntry a in cands)
                     j.Obj().Key("name").Val(a.Name).Key("exe").Val(a.Exe).End();
