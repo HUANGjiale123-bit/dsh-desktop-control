@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop-control",
   "version": "2.4.0",
-  "description": "Desktop observation and control for DeepSeek Harness on Windows: read a window's accessibility tree, capture it, click and type. Application allowlist, empty by default.",
+  "description": "让 DSH 看见屏幕、操作鼠标键盘，带会话级授权与随时可停的急停机制",
   "type": "module",
   "main": "index.mjs",
   "license": "SEE LICENSE IN LICENSE",
@@ -10,6 +10,7 @@
     "node": ">=18"
   },
   "files": [
+    "README.md",
     "index.mjs",
     "toolset.mjs",
     "cordis.patch.yml",

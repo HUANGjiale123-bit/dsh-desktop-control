@@ -270,7 +270,51 @@ namespace Dsc
                 Directory.Exists(Path.Combine(root, "plugin")))
                 return Path.Combine(root, ".state", "halt");
 
-            return Path.Combine(binDir, ".state", "halt");
+            // 插件安装后的情形：exe 在 <插件目录>\bin\ 下。
+            //
+            // 这里要判断"能不能写"，而不是直接用。别人从市场装插件时，
+            // 插件目录可能落在 Program Files 之类的只读位置，那时写闸门会抛
+            // UnauthorizedAccessException——**而闸门是急停机制，写不成就等于
+            // 停不下来**。
+            //
+            // 正常情况下插件会显式传 DSC_HALT_GATE（走到本函数第一行就返回了），
+            // 所以这条路径只在手敲 dsc.exe 时生效。但"只在手敲时生效的坏路径"
+            // 同样是坏的，而且正好是使用者试用时会走的那条。
+            string own = Path.Combine(binDir, ".state", "halt");
+            if (CanWriteNear(own)) return own;
+
+            // 退回每用户可写位置。%LOCALAPPDATA% 是放这类状态的正规去处。
+            try
+            {
+                string la = Environment.GetFolderPath(
+                    Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrEmpty(la))
+                    return Path.Combine(la, "dsh-desktop-control", "halt");
+            }
+            catch { }
+
+            return own;   // 都不行就用原路径，让后续写入如实报错
+        }
+
+        /// <summary>
+        /// 探测某个闸门文件所在目录能否创建文件。
+        ///
+        /// 真去建一个探测文件再删掉，而不是查 ACL——ACL 判断复杂且容易判错，
+        /// 而"实际写一次"是唯一可靠的答案。用随机名避免和并发调用撞上。
+        /// </summary>
+        private static bool CanWriteNear(string gateFile)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(gateFile);
+                if (string.IsNullOrEmpty(dir)) return false;
+                Directory.CreateDirectory(dir);
+                string probe = Path.Combine(dir, ".probe-" + Guid.NewGuid().ToString("N"));
+                File.WriteAllText(probe, "x");
+                File.Delete(probe);
+                return true;
+            }
+            catch { return false; }
         }
 
         private static bool IsHalted()
@@ -646,13 +690,28 @@ namespace Dsc
 
         private static int CmdHelp()
         {
-            Console.WriteLine(@"dsh-desktop-control helper
+            Console.WriteLine(@"dsh-desktop-control helper（一般由插件调用，不直接手敲）
 
-  dsc.exe ping
-  dsc.exe list_windows
-  dsc.exe tree <hwnd> [maxNodes]
-  dsc.exe screenshot <hwnd> [outPath]
-");
+── 应用清单与启动 ──
+  dsc.exe list_apps [关键词] [--limit N]   列出已安装应用
+  dsc.exe resolve_app <名字>               只解析名字到 exe，不启动
+  dsc.exe launch <名字或 exe 路径>         启动（只接受清单里的名字或明确路径）
+
+── 观察（读界面内容需先经插件授权）──
+  dsc.exe list_windows                     列窗口（不含标题）
+  dsc.exe tree <hwnd> [maxNodes]           读无障碍树 + 质量度量
+  dsc.exe screenshot <hwnd> [outPath]      截图
+
+── 急停闸门 ──
+  dsc.exe halt [原因]                      拉下闸门（此后所有操作被拒）
+  dsc.exe stop --clear                     解除闸门
+  dsc.exe stop                             查看当前闸门状态
+
+── 诊断 ──
+  dsc.exe ping                             存活 + DPI + 闸门路径
+  dsc.exe allowcheck <hwnd>                该窗口是否通过白名单
+
+环境变量 DSC_HALT_GATE 可指定闸门文件位置。未指定时按 exe 位置推导。");
             return 0;
         }
 
