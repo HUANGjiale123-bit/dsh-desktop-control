@@ -1043,6 +1043,13 @@ namespace Dsc
                 return 2;
             }
 
+            // 启动程序也是变更性操作，受闸门约束。
+            //
+            // 漏掉它的后果实测过：闸门拉下后 launch 照样把记事本启动起来
+            // （ok:true、进程数从 0 变成 3）。插件层虽然会拦，但急停
+            // 的含义是别再动我的电脑，不该只在某一层成立。
+            RequireNotHalted("launch");
+
             string exe = Launcher.Resolve(target);
             if (string.IsNullOrEmpty(exe))
             {
@@ -1172,7 +1179,9 @@ namespace Dsc
         private static int CmdScreenshot(string[] args)
         {
             IntPtr hwnd = ParseHwnd(args, "screenshot");
-            // 截图就是界面内容本身，同样要过白名单。
+            // 急停检查第一：截图就是界面内容本身，同样受闸门约束。
+            RequireNotHalted("screenshot");
+            // 白名单校验。
             RequireAllowedWindow(hwnd, "screenshot");
 
             Native.RECT r;
@@ -2070,7 +2079,13 @@ namespace Dsc
         private static int CmdTree(string[] args)
         {
             IntPtr hwnd = ParseHwnd(args, "tree");
-            // 白名单校验放最前：读界面内容同样要授权（树里有界面上全部文字）。
+            // 急停检查必须是第一件事——**读界面内容也要受它约束**。
+            //
+            // 这里原先漏了：闸门拉下后 tree 照样返回整个界面文字，
+            // 而用户按 ESC 的意图正是别再碰我的电脑。界面消失了、
+            // 操作被拒了，读却还在跑——那是最不该留的一条缝。
+            RequireNotHalted("tree");
+            // 白名单校验：读界面内容同样要授权（树里有界面上全部文字）。
             RequireAllowedWindow(hwnd, "tree");
 
             // 位置参数 hwnd [maxNodes]，另有可选开关 --depth / --children。

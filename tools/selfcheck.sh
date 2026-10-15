@@ -124,6 +124,21 @@ else
   echo "  （跳过：找不到 node 或部署目录）"
 fi
 
+head_ "9. helper 命令的守卫（急停 + 白名单）"
+# 这两道检查是逐命令手写的，漏掉不会有任何报错——命令只是照常工作。
+# 实测踩到两次：tree/screenshot 漏白名单（空白名单下照样读完整界面文字）、
+# tree/screenshot/launch 漏急停（闸门拉下后照样读、照样启动程序）。
+# 第二条尤其要紧：用户按 ESC 的意图是"别再碰我的电脑"。
+if [ -n "$NODE" ] && [ -f helper/src/Program.cs ]; then
+  if "$NODE" tools/check-helper-guards.mjs helper/src/Program.cs; then
+    ok "所有命令的守卫齐全"
+  else
+    bad "有命令缺守卫 —— 见上面明细"
+  fi
+else
+  echo "  （跳过：找不到 node 或 helper 源码）"
+fi
+
 echo
 echo "══════════════════════════════"
 if [ "$FAIL" -eq 0 ]; then
