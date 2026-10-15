@@ -226,7 +226,13 @@ namespace DscEsc
             if (a < 6) a = 6;
             // 用淡蓝白而不是纯主色：主色在深色背景上偏暗、糊成一片，
             // 只有往白里提才读得出"发光"。这是观感上的关键一步。
-            Color inner = Lighten(_accent, 0.62f);
+            // 光晕用**固定的亮蓝**，而不是从主色提亮。
+            //
+            // 原因：主色是深海军蓝（#304090，取自表情包图库的配色），
+            // 照比例提亮后仍偏暗，叠在深色桌面上会**变暗而不是发光**
+            // ——这个坑今天踩过一次。发光需要"高亮度 + 中等饱和"，
+            // 所以直接取一个亮蓝，但色相与主色一致，整体仍是同一套配色。
+            Color inner = Color.FromArgb(0x6E, 0x9E, 0xFF);
             Color c0 = Color.FromArgb(a, inner);
             Color c1 = Color.FromArgb(0, inner);
 

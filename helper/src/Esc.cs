@@ -291,7 +291,9 @@ namespace DscEsc
             BandForm band = null;
             try
             {
-                band = new BandForm(System.Drawing.Color.FromArgb(0x2E, 0x6F, 0xD6));
+                // 取自表情包图库（dafeiyu-001）的主色调：#304090 一族的深海军蓝。
+                // 与环境配色统一，比自己调更自然。
+                band = new BandForm(System.Drawing.Color.FromArgb(0x30, 0x40, 0x90));
                 band.Show();
                 L("光带已显示 hwnd=" + band.Handle);
             }
