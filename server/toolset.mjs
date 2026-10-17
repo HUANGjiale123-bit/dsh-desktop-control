@@ -968,11 +968,34 @@ export function createDesktopToolset(options = {}) {
 
       const r = await runHelper(['click_element', String(hwnd), descriptor, button ?? 'left'], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
-      return {
-        text:
-          `已按描述符 "${r.matched}" 定位到元素（矩形 ${r.rect}），` +
-          `并在其中心 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键点击。`,
+
+      // ── 两条路径的返回字段完全不同，必须分开格式化 ──
+      //
+      // InvokePattern 那条不取矩形、不移动鼠标，所以没有 rect / clickedX /
+      // button；坐标那条才有。原先这里只按坐标路径拼字符串，走 InvokePattern 时
+      // 会输出："（矩形 undefined），并在其中心 (undefined,undefined) 执行 undefined 键点击"
+      // —— 一次明明成功的操作，报告里全是 undefined。
+      //
+      // 这是加 InvokePattern 时漏掉的：改了 helper 的返回，没跟上这一侧。
+      // 也就是我一直在批的那种"静默把成功说成别的样子"。
+      if (r.method === 'InvokePattern') {
+        return {
+          text:
+            `已按描述符 "${r.matched}" 定位到元素，并通过它的 **InvokePattern** 触发。\n` +
+            `  没有移动鼠标（这类控件不需要坐标，也就不受遮挡和缩放影响）\n` +
+            `  未核实：Invoke 是异步投递，返回成功不代表界面已经改变。\n` +
+            `  要确认效果请用 desktop_read_window 或 desktop_screenshot 再看一次。`,
+        }
       }
+
+      const lines = [
+        `已按描述符 "${r.matched}" 定位到元素（矩形 ${r.rect}），` +
+          `并在其中心 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键点击。`,
+      ]
+      if (r.cursorAfter) lines.push(`  光标回读：${r.cursorAfter}`)
+      if (r.method) lines.push(`  方式：${r.method}（该控件不支持 InvokePattern，改用坐标点击）`)
+      lines.push(`  未核实：点击已发出，但应用是否响应要重新观察。`)
+      return { text: lines.join('\n') }
     },
 
     async type({ hwnd, text }) {

@@ -1277,6 +1277,16 @@ namespace Dsc
             int w = r.Right - r.Left, h = r.Bottom - r.Top;
             if (w <= 0 || h <= 0) return blocked;
 
+            // 目标窗口所属进程。**同一进程的弹出窗口不算遮挡**——
+            // 下拉菜单、工具提示、右键菜单都是独立顶层窗口，但它们是这个应用
+            // 自己的一部分，挡住的正是它想显示的内容。
+            //
+            // 实测踩到：点开记事本的"标题"下拉后截图，五个采样点里的"中心"
+            // 落在下拉菜单上，于是报告"被 notepad.exe 遮挡"——被自己遮挡，
+            // 这种警告只会让人以后忽略警告。
+            uint selfPid = 0;
+            Native.GetWindowThreadProcessId(hwnd, out selfPid);
+
             // 内缩：窗口边缘常有阴影、圆角或 1px 边框，
             // 贴着边界采样容易把阴影判成遮挡。
             int inset = Math.Max(8, Math.Min(w, h) / 33);
@@ -1299,6 +1309,9 @@ namespace Dsc
 
                 uint pid;
                 Native.GetWindowThreadProcessId(root, out pid);
+                // 同一个进程的其它顶层窗口（下拉菜单、提示、右键菜单）不算遮挡。
+                if (pid == selfPid) continue;
+
                 string exe = BaseName(ProcessPath(pid));
                 blocked.Add(labels[i] + "=" + (exe.Length > 0 ? exe : "hwnd:" + root.ToInt64()));
             }
