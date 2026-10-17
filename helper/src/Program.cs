@@ -1763,6 +1763,23 @@ namespace Dsc
         /// 于是"拖拽"被当成一次普通点击 —— 文件不会被拖走，滚动条不会动。
         /// 真实拖动要靠一连串中间位置，让应用看到按下状态下的位移。
         ///
+        /// ── 实测记录（换实现之前请先读这段）──
+        ///
+        /// 1. 用 SetCursorPos 做中间移动**不行**。它只改光标位置，不产生
+        ///    鼠标移动消息，应用收不到 WM_MOUSEMOVE。实测：拖记事本标题栏，
+        ///    20 步走完、光标停在终点、按键也正确释放，**窗口位置一点没变**。
+        ///    把步进从 12ms 放到 30ms 也没用 —— 不是时序问题。
+        ///    必须用 mouse_event(MOUSEEVENTF_MOVE) 才会生成移动事件。
+        ///
+        /// 2. 同样的实现，在**文档里拖选文字**是生效的：状态栏从
+        ///    "6,755 个字符" 变成 "70 个字符，共"，选中内容也高亮了。
+        ///    所以拖动本身是通的。
+        ///
+        /// 3. 但**拖记事本（UWP）的标题栏仍然不动**。光标到位、按键释放，
+        ///    窗口就是不动。推测它的标题栏拖动走的是更底层的指针事件，
+        ///    不吃 mouse_event 合成的消息。这条尚未在别的窗口上复现或排除，
+        ///    所以在"能拖动窗口"这件事上不要给用户打包票。
+        ///
         /// ── 为什么每一步都要检查急停 ──
         ///
         /// 拖动是有副作用的动作（移动文件、调整窗口大小），而且耗时最长。
@@ -1828,10 +1845,16 @@ namespace Dsc
             try
             {
                 MoveCursorAbsolute(x1, y1);
-                System.Threading.Thread.Sleep(60);
+                System.Threading.Thread.Sleep(80);
                 Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
                 pressed = true;
-                System.Threading.Thread.Sleep(60);
+                // 按下之后要**等一会儿再动**。
+                //
+                // 系统判定"这是拖动"而不是"这是点击"需要看到按下状态下
+                // 的位移，而且判定本身要时间。实测 60ms 太短 —— 20 步 ×12ms
+                // 的拖动在记事本窗口上完全没有生效（窗口位置一点没变），
+                // 表现是"拖了但什么也没发生"。
+                System.Threading.Thread.Sleep(150);
 
                 for (int i = 1; i <= steps; i++)
                 {
@@ -1839,13 +1862,40 @@ namespace Dsc
                         throw new InvalidOperationException(
                             "拖动被急停中断（已移动 " + (i - 1) + " / " + steps + " 步）。按键已释放，不会卡在按下状态。");
 
-                    int cx = x1 + (x2 - x1) * i / steps;
-                    int cy = y1 + (y2 - y1) * i / steps;
-                    Native.SetCursorPos(cx, cy);
-                    System.Threading.Thread.Sleep(12);
+                    int tx = x1 + (x2 - x1) * i / steps;
+                    int ty = y1 + (y2 - y1) * i / steps;
+
+                    // ★ 必须用 mouse_event(MOVE)，**不能用 SetCursorPos**。
+                    //
+                    // SetCursorPos 只改光标位置，**不产生鼠标移动消息**。
+                    // 应用收不到 WM_MOUSEMOVE，于是完全不认为在拖动 ——
+                    // 实测：拖记事本标题栏，20 步走完、光标停在终点、
+                    // 按键也正确释放，而窗口位置一点没变。
+                    // 这不是时序问题（把步进从 12ms 放到 30ms 也没用）。
+                    //
+                    // mouse_event(MOUSEEVENTF_MOVE) 才会让系统生成移动事件，
+                    // 窗口的拖动逻辑才看得到"按下状态下的位移"。
+                    Native.POINT cur;
+                    if (!Native.GetCursorPos(out cur)) { cur.X = tx; cur.Y = ty; }
+                    int mdx = tx - cur.X;
+                    int mdy = ty - cur.Y;
+                    if (mdx == 0 && mdy == 0)
+                    {
+                        System.Threading.Thread.Sleep(20);
+                        continue;
+                    }
+
+                    // 传**相对**位移。鼠标加速会改变实际落点，所以每一轮都用
+                    // "目标 - 当前实际位置"重算 —— 这样即使被加速放大或缩小，
+                    // 循环会自己收敛到终点，而不是累积偏差。
+                    // 签名里 dx/dy 是 int（有符号）—— 相对移动传负数表示向左/上，
+                    // 不需要位转换。第一版写成 unchecked((uint)...) 编译不过，
+                    // 反而提醒了这一点。
+                    Native.mouse_event(Native.MOUSEEVENTF_MOVE, mdx, mdy, 0, UIntPtr.Zero);
+                    System.Threading.Thread.Sleep(30);
                 }
 
-                System.Threading.Thread.Sleep(80);
+                System.Threading.Thread.Sleep(120);
                 Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
                 pressed = false;
             }
