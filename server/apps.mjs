@@ -29,7 +29,14 @@ import { join, basename, extname } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
 /**
- * 读一个注册表根键下的全部子键与值，输出 UTF-8 JSON。
+ * 读【多个】注册表根键下的全部子键与值，一次调用读完，按根键分组返回。
+ *
+ * ── 为什么必须一次读完 ──
+ *
+ * 原先每个根键调一次 PowerShell。实测单次 PowerShell 启动约 450ms，
+ * 而这里有 6 个根键（3 个卸载项 + 3 个 App Paths）——
+ * **首次 listInstalledApps 要 2.8 秒**。那直接表现为"启动一个应用卡两三秒"，
+ * 因为 launchApp 内部要先解析名字。合并成一次调用后实测约 350ms。
  *
  * ── 为什么不用 reg.exe ──
  *
@@ -38,17 +45,22 @@ import { execFileSync } from 'node:child_process'
  * 于是所有非 ASCII 的显示名被破坏 —— 名字坏了，按名字搜索自然也就找不到
  * （实测"腾讯"直接搜不到）。这不是显示问题，是**数据丢失**。
  *
- * 所以改成让 PowerShell 读注册表并显式输出 UTF-8：编码在源头就定死，
- * 不依赖系统代码页。慢一点（每次起一个 PowerShell），但清单本身是缓存的，
- * 只在第一次调用时付这个代价。
+ * 所以让 PowerShell 读注册表并显式输出 UTF-8：编码在源头就定死。
+ *
+ * @returns {Map<string, Array<{key: string, values: Record<string,string>}>>}
  */
-function readRegistryRoot(root) {
+function readRegistryRoots(roots) {
+  const byRoot = new Map()
+  for (const r of roots) byRoot.set(r, [])
+  if (!roots || roots.length === 0) return byRoot
+
+  const literals = roots.map((r) => `'${String(r).replace(/'/g, "''")}'`).join(',')
   const script = `
 $ErrorActionPreference = 'SilentlyContinue'
 $out = [System.Collections.Generic.List[object]]::new()
-$root = '${root.replace(/'/g, "''")}'
-$base = Get-Item -LiteralPath ("Registry::" + $root)
-if ($base -ne $null) {
+foreach ($root in @(${literals})) {
+  $base = Get-Item -LiteralPath ("Registry::" + $root)
+  if ($base -eq $null) { continue }
   foreach ($sub in $base.GetSubKeyNames()) {
     $k = $base.OpenSubKey($sub)
     if ($k -eq $null) { continue }
@@ -58,7 +70,7 @@ if ($base -ne $null) {
       if ($v -is [array]) { $v = ($v -join ' ') }
       $vals[$n] = [string]$v
     }
-    $out.Add([pscustomobject]@{ key = $sub; values = $vals })
+    $out.Add([pscustomobject]@{ root = $root; key = $sub; values = $vals })
     $k.Close()
   }
 }
@@ -72,14 +84,18 @@ ConvertTo-Json -InputObject @($out) -Depth 4 -Compress
       { windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
     )
     const text = new TextDecoder('utf-8', { fatal: false }).decode(buf).trim()
-    if (!text) return []
+    if (!text) return byRoot
     const parsed = JSON.parse(text)
     const arr = Array.isArray(parsed) ? parsed : [parsed]
-    return arr
-      .filter((x) => x && typeof x.key === 'string')
-      .map((x) => ({ key: x.key, values: x.values ?? {} }))
+    for (const x of arr) {
+      if (!x || typeof x.key !== 'string') continue
+      const bucket = byRoot.get(x.root)
+      if (bucket) bucket.push({ key: x.key, values: x.values ?? {} })
+    }
+    return byRoot
   } catch {
-    return []
+    // 读失败就返回空的（已预填），调用方拿到的是一份空清单而不是异常。
+    return byRoot
   }
 }
 
@@ -189,8 +205,12 @@ export function listInstalledApps() {
   const list = []
   const seen = new Set()
 
+  // 6 个根键一次读完（约 350ms）。分开读要 6 次 PowerShell 启动，
+  // 实测 2.8 秒——那会表现成"启动应用卡两三秒"。
+  const byRoot = readRegistryRoots([...UNINSTALL_ROOTS, ...APPPATH_ROOTS])
+
   for (const root of UNINSTALL_ROOTS) {
-    for (const { key, values } of readRegistryRoot(root)) {
+    for (const { key, values } of byRoot.get(root) ?? []) {
       const name = (values['DisplayName'] ?? '').trim()
       if (!name) continue
       // 系统组件与更新补丁不算"应用"
@@ -207,7 +227,7 @@ export function listInstalledApps() {
   }
 
   for (const root of APPPATH_ROOTS) {
-    for (const { key, values } of readRegistryRoot(root)) {
+    for (const { key, values } of byRoot.get(root) ?? []) {
       const exe = (values[''] ?? '').trim().replace(/^"|"$/g, '')
       if (!exe || !existsSync(exe)) continue
       if (looksLikeHelper(exe)) continue

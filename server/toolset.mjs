@@ -653,9 +653,13 @@ export function createDesktopToolset(options = {}) {
       // 这种情况也能正确判定。
       //
       // 最多等约 3.5 秒。启动快的（记事本）第一次就能看到，不会等满。
+      //
+      // 3 次 × 500ms = 1.5 秒上限。原来等 5 × 700ms（3.5 秒），
+      // 每次启动都白等两秒——而绝大多数应用 1 秒内就出窗口。
+      // 等不到也不报失败（有些启动器要好几秒），只是如实说没看到。
       let appeared = []
-      for (let i = 0; i < 5; i++) {
-        await new Promise((r) => setTimeout(r, 700))
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 500))
         const now = await windowsOf(appBase)
         if (now === null) break            // 查不到就别硬等
         const fresh = now.filter((h) => !(before ?? []).includes(h))
@@ -667,7 +671,7 @@ export function createDesktopToolset(options = {}) {
         : before && before.length
           ? `  ⚠ 没看到**新**窗口。该应用启动前就有窗口（hwnd=${before.join(', ')}），` +
             `本次可能只是激活了已有实例，而不是新启动。`
-          : `  ⚠ 3 秒内没看到它的窗口。这不代表失败 —— 有些程序启动慢、` +
+          : `  ⚠ 1.5 秒内没看到它的窗口。这不代表失败 —— 有些程序启动慢、` +
             `或被升级器/启动器接手（QQ音乐就会这样）。` +
             `请用 desktop_list_windows 确认，别假定已经启动。`
 
