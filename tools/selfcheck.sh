@@ -216,7 +216,21 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "16. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "16. 受控测试靶（可核对落点与输入）"
+# 会弹出一个测试窗口，几秒后自己关掉。这条不放进常规自检是为了不打断你，
+# 但它是唯一能证明"点到的真是那个按钮"的测试 —— 重要改动手动跑：
+#   node tools/test-target.mjs
+if [ "${DSC_SELFCHECK_TARGET:-0}" = "1" ] && [ -n "$NODE" ] && [ -f tools/target/bin/dsc-target.exe ]; then
+  if "$NODE" tools/test-target.mjs >/dev/null 2>&1; then
+    ok "落点命中预期按钮 / set_value 内容一致 / 同名按钮被拒"
+  else
+    bad "靶子测试失败 —— 单独跑 node tools/test-target.mjs"
+  fi
+else
+  echo "  （跳过：会弹出测试窗口，需要时用 DSC_SELFCHECK_TARGET=1 开启）"
+fi
+
+head_ "17. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

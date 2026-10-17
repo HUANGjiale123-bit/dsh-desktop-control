@@ -2491,18 +2491,27 @@ namespace Dsc
         {
             // 用 SetCursorPos，不用 SendInput 的绝对模式。
             //
-            // 实测依据（这是本文件里最重要的一个坑）：
-            //   · 本进程 SetProcessDPIAware() 成功，awareness=SYSTEM_AWARE，
-            //     screen LOGPIXELSX=144（150% 缩放），SM_CXSCREEN=2240（物理像素）。
-            //   · SetCursorPos(1500,900) → 实际落点 1500,900，比值 1.000，精确。
-            //   · SendInput + MOUSEEVENTF_ABSOLUTE + VIRTUALDESK，按 65535 归一化
-            //     之后，同样的目标点会落在 2/3 处（150% 缩放的倒数 96/144=0.667）：
-            //     目标(500,300)→落点(333,200)，目标(100,100)→落点(67,67)，
-            //     目标(1900,1000)→落点(1267,667)，比值恒为 0.667。
+            // ── 下面这些是**一台机器上的一次观察**，不是跨机定律 ──
             //
-            // 结论：SendInput 的绝对坐标即便在 DPI-aware 进程里也会被再缩放一次，
-            // 而 SetCursorPos 直接把参数当物理像素。既然本进程已经 DPI-aware、
-            // 全程用物理像素，「SetCursorPos + 物理像素」是唯一自洽的组合。
+            // 那台机器：SYSTEM_AWARE、LOGPIXELSX=144（150% 缩放）、SM_CXSCREEN=2240。
+            //   · SetCursorPos(1500,900) → 落点 1500,900，比值 1.000。
+            //   · SendInput + MOUSEEVENTF_ABSOLUTE + VIRTUALDESK（按 65535 归一化）
+            //     在同样的点上落在 2/3 处，比值恒为 0.667。
+            //
+            // 我当初从这里推出"SendInput 的绝对坐标必定被二次缩放，SetCursorPos
+            // 是唯一正确组合"。**那是过度归纳**——第三方审查指出得对：一次单机
+            // 实验支持不了"必定"这个词，而且换一台机器、换一个 DPI awareness
+            // 级别，这个比值完全可能不同（比如 1.0、0.5、或随显示器而变）。
+            //
+            // 所以这里的取舍是**工程上的**，不是物理上的：
+            //   · 本进程现在由 manifest 声明 PerMonitorV2，坐标按物理像素走；
+            //   · SetCursorPos 接受的就是屏幕物理坐标，不需要任何归一化换算；
+            //   · 参数越少越不容易错——SendInput 那条路要同时管
+            //     0..65535 归一化、主屏还是 VIRTUALDESK、虚拟桌面原点。
+            //
+            // **如果换机器发现落点系统性偏移**：先量（连续几个点的实际落点），
+            // 判断是比例偏移还是固定偏移，再决定往哪查。不要照搬这里的 0.667，
+            // 也不要直接乘一个系数去"补偿"——那会在别的机器上造成新的偏移。
             if (!Native.SetCursorPos(x, y))
             {
                 int err = Marshal.GetLastWin32Error();
@@ -2521,7 +2530,9 @@ namespace Dsc
                 if (Math.Abs(p.X - x) > 2 || Math.Abs(p.Y - y) > 2)
                     throw new InvalidOperationException(
                         "光标未落到目标位置：请求 (" + x + "," + y + ") 实际 (" + p.X + "," + p.Y + ")。" +
-                        "若差值恒为 0.667 倍或 1.5 倍，说明进程 DPI awareness 与坐标基准不一致。");
+                        "先在几个不同位置复测：若偏差与位置成比例（比值恒定），" +
+                        "多半是 DPI awareness 与坐标基准不一致；若近似固定偏移，" +
+                        "查窗口边框/截图原点。不要直接乘系数补偿——那会在别的机器上造成新的偏移。");
             }
         }
 

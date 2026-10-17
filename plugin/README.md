@@ -89,6 +89,24 @@ node -e "const p=require('./package.json');const inDeps=!!p.dependencies?.['dsh-
 要"做完立刻收"，最准的信号是助手在收尾时主动调 `desktop_off`；
 超时只是保底。
 
+### 测试靶（开发者用，不随插件发布）
+
+仓库里有一个受控测试靶 `tools/target/` —— 每个控件有稳定名字，**每次真实
+交互都由靶子自己写进 JSONL 日志**。测试读那份日志核对，而不是看插件返回的文字。
+
+```bash
+./tools/target/build.sh        # 编译
+node tools/test-target.mjs     # 跑（会弹出一个窗口，几秒后自己关）
+```
+
+为什么需要它：之前的测试拿屏幕上某个够大的窗口当靶子，既**不可核对**
+（只能相信返回值），又**不稳定**（窗口会动、会被关）。而且第一版靶子自己
+没有 DPI 清单，坐标比 helper 小 1.54 倍 —— 那正是跨机器点偏机制的
+活体复现，所以靶子必须和 helper 用同一套 DPI 声明。
+
+它默认不进 `selfcheck.sh`（会弹窗打断你）。需要时：
+`DSC_SELFCHECK_TARGET=1 ./tools/selfcheck.sh`
+
 ### 卸载
 
 `pnpm remove dsh-desktop-control` **只会清依赖，不会清 `bundles`**，
