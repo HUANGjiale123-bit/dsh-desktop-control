@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.10.0'
+const PLUGIN_VERSION = '2.10.1'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -949,6 +949,8 @@ function applyInner(ctx, config = {}) {
     parameters: {
       hwnd: { ...HWND, description: '目标窗口句柄，用于白名单与存活校验。' },
       text: { type: 'string', description: '要输入的文本。' },
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
     },
     output: {
       schema: {
@@ -967,7 +969,8 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.type(args)
       if (r.isError) throw new Error(r.text)
-      return { result: r.text }
+      // 输入也是动作 —— 输完该能看到结果（比如搜索建议、表单校验）
+      return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: args => ({ card: 'generic', title: `输入文本`, kind: 'other', rawInput: args }),
   })
@@ -1083,10 +1086,27 @@ function applyInner(ctx, config = {}) {
           result: text + `\n\n（动作已执行，但自动截图失败：${shot.text.split('\n')[0]}）`,
         }
       }
+
+      // shotId 要**在这里**生成并登记。
+      //
+      // 上一版用的是 shot.shotId，但 toolset 根本不返回这个字段
+      // （shotId 是桌面工具层截图时加的，toolset 是共享业务层）。
+      // 于是动作后的画面永远写着"截图 ID：?"，而这个契约的意义正是
+      // "让模型能把坐标绑到某张图上"——真实跑一次才看出来。
+      const shotId = `shot-${hwnd}-${Date.now()}`
+      const g = {
+        x: Number(shot.originX), y: Number(shot.originY),
+        w: Number(shot.width), h: Number(shot.height),
+      }
+      const geomOk =
+        Number.isFinite(g.x) && Number.isFinite(g.y) &&
+        Number.isFinite(g.w) && Number.isFinite(g.h) && g.w > 0 && g.h > 0
+      rememberShot(shotId, { hwnd, ...(geomOk ? g : {}), geomOk })
+
       const image = await imageBlockFor(shot.filepath)
       const tail =
         `\n\n── 动作后的画面 ──\n` +
-        `截图 ID：${shot.shotId ?? '?'}` +
+        `截图 ID：${shotId}` +
         `（传给 desktop_click 的 shotId 可核对坐标是否过期）\n` +
         shot.text
       return image ? { result: text + tail, image } : { result: text + tail }
