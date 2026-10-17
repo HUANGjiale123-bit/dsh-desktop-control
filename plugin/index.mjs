@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.7.2'
+const PLUGIN_VERSION = '2.7.3'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -861,25 +861,72 @@ function applyInner(ctx, config = {}) {
   const liveOverlays = new Map()   // key -> ChildProcess
 
   /**
-   * 自动拉起的指示层多久后自己收起来。
+   * 空闲多久之后自动收起**自动拉起**的指示层。
    *
-   * 为什么**自动拉起时要超时、手动调用时不超时**：
+   * ── 为什么判据是"空闲"而不是"存活时长" ──
    *
-   *   · 自动拉起是"检测到有操作"，操作一结束就没有理由继续挂着。
-   *     而助手是逐条指令驱动的，两条指令之间屏幕上没有任何操作——
-   *     常驻一条"您的电脑正在被控制"会让人以为操作还在继续、不敢碰键鼠。
-   *   · 更要紧的是它会让人**对逃生条麻木**。真正需要逃生条的时刻是
-   *     操作进行中；长时间挂着一条其实没在操作的逃生条，会削弱它作为
-   *     急停入口的价值。
-   *   · 手动调 desktop_indicate 是用户的明确意图（"我要开启这个状态"），
-   *     所以那边仍然默认常驻。
+   * 最初写的是"拉起后 2 分钟自动收"。那样两种最常见的情形都不对：
+   *   · 连续操作超过 2 分钟 → 指示层在中途自己消失（最该显示的时候没了）
+   *   · 操作 5 秒就结束     → 还要挂满 2 分钟（人已经走了它还说"正在被控制"）
    *
-   * 超时只是"收起界面"，**不写闸门** —— 那两件事的语义完全不同。
+   * 用户的反馈原话是"完成命令后不会自动退出，体验很不好"。所以判据该是
+   * **距上一次操作过了多久**，而不是这个指示层开了多久。
    *
-   * 取值 2 分钟：足够覆盖一次连续操作，又不至于在"人已经走了"之后还挂着。
-   * 如果操作超过这个间隔，下一次操作会重新拉起。
+   * 20 秒：够覆盖两步操作之间的思考间隙，又不至于让一条命令做完之后
+   * 屏幕上还顶着一条已经没有意义的"正在被控制"。
+   *
+   * 另外两条边界都是刻意的：
+   *   · 手动调 desktop_indicate 是用户明确要求常驻，**不受**这个空闲检查管。
+   *   · 收起只是杀进程、**不写闸门** —— "不再显示"和"停止"是两件事。
    */
-  const AUTO_INDICATOR_TIMEOUT_MS = 120000
+  const IDLE_HIDE_MS = 20000
+
+  /**
+   * 兜底上限，交给 dsc-esc 自己的 --timeout。
+   *
+   * 正常路径由下面的滑动窗口收，这个只在插件侧定时器失效时起作用
+   * （宿主卡死、定时器被丢弃）。所以给得比 20 秒宽得多——
+   * 它不是主要机制，只是"至少不会永远挂着"的保证。
+   */
+  const AUTO_INDICATOR_TIMEOUT_MS = 300000
+
+  /** 上次变更性操作放行的时刻 —— 滑动窗口的锚点。 */
+  let _lastOpAt = 0
+  /** 空闲检查定时器（null = 没在跑）。 */
+  let _idleTimer = null
+
+  /**
+   * 记一次"有操作发生"，并确保空闲检查在跑。
+   *
+   * 每次自动拉起路径都会调它。指示层已经在跑时这里只把锚点推后，
+   * **不重建进程**，所以连续操作期间屏幕上不会闪。
+   */
+  function touchActivity() {
+    _lastOpAt = Date.now()
+    if (_idleTimer) return
+    _idleTimer = setInterval(() => {
+      const cur = liveOverlays.get('escape')
+      // 指示层已经不在（被 ESC / desktop_off / 兜底超时收掉）→ 检查也停，
+      // 免得留下一个永远在跑的定时器。
+      if (!cur || cur.exitCode !== null) {
+        clearInterval(_idleTimer)
+        _idleTimer = null
+        return
+      }
+      const idle = Date.now() - _lastOpAt
+      if (idle < IDLE_HIDE_MS) return
+      // 直接杀进程 = 正常收起。强杀不走 dsc-esc 的 FormClosing，
+      // 所以不会把"收界面"误当成"停止"去写闸门。
+      try { cur.kill() } catch { }
+      clearInterval(_idleTimer)
+      _idleTimer = null
+      ctx.logger?.info?.(
+        `[desktop-control] 空闲 ${Math.round(idle / 1000)} 秒，自动收起指示层（不写闸门）`,
+      )
+    }, 3000)
+    // 不要因为这个定时器把宿主进程吊住。
+    _idleTimer.unref?.()
+  }
 
   /**
    * 确保指示层在跑。已经在跑就什么都不做。
@@ -893,6 +940,10 @@ function applyInner(ctx, config = {}) {
    * 不就是 computer use 吗"——对的，那就是 computer use，就该有提示。
    */
   function ensureIndicator() {
+    // 先把锚点推后，再决定要不要拉起 —— 已经在跑时这里只做前者，
+    // 所以连续操作期间不会重建进程、屏幕上不会闪。
+    touchActivity()
+
     const cur = liveOverlays.get('escape')
     if (cur && cur.exitCode === null) return { ok: true, already: true }
     const r = startIndicator(
