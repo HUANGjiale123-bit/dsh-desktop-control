@@ -130,7 +130,49 @@ if (beforeClick < 0 || afterClick < 0) {
 }
 
 console.log()
-console.log('── 4. 测试自身的完整性 ──')
+console.log('── 4. 急停生效时，diagnose 不许自相矛盾 ──')
+
+// 实测踩到：闸门拉着时 gate_probe 走 probe-only（不写删，以免覆盖用户写的
+// 原因），而 diagnose 把"没做写删测试"当成"未通过"，于是同一个输出里既有
+// "急停正在生效"又有"闸门实测未通过 —— ESC 可能只关界面而拦不住操作"。
+// 用户按 ESC 之后看到这句会被吓到。
+const diagnose = byName.get('desktop_diagnose')
+if (!diagnose) {
+  skip('没有 desktop_diagnose')
+} else {
+  const r = await diagnose.execute({}).catch((e) => ({ err: e.message }))
+  // ★ 错误消息不是"输出"。上一版直接拿 r.err 当 txt 去匹配，
+  //   于是 diagnose 抛错时"没有未通过"这类断言会**假通过**。
+  if (r.err) {
+    bad(`diagnose 抛错了：${r.err.split(String.fromCharCode(10))[0].slice(0, 90)}`)
+  }
+  const txt = r.result ?? ''
+  if (process.env.DEBUG_HALT) {
+    console.log(`      | 输出行数：${txt.split(String.fromCharCode(10)).length}`)
+    for (const l of txt.split(String.fromCharCode(10)).slice(0, 6)) {
+      console.log(`      | ${l.trim().slice(0, 80)}`)
+    }
+  }
+  // 调试：把含"急停/闸门"的行打出来，跳过时能看出是认错了还是没认
+  if (process.env.DEBUG_HALT) {
+    for (const l of txt.split('\n')) {
+      if (/急停|闸门|解除/.test(l)) console.log(`      | ${l.trim().slice(0, 90)}`)
+    }
+    console.log(`      | 写测试闸门的路径：${gate}`)
+    console.log(`      | 闸门文件存在：${existsSync(gate)}`)
+  }
+  if (/急停\*\*正在生效\*\*/.test(txt)) ok('diagnose 报告了急停生效')
+  else skip('diagnose 里没写急停生效（可能版本不同）')
+
+  if (/闸门实测未通过/.test(txt)) {
+    bad('闸门拉着时 diagnose 仍报"实测未通过" —— 和"急停正在生效"自相矛盾')
+  } else {
+    ok('没有报"实测未通过"（probe-only 不再被当成失败）')
+  }
+}
+
+console.log()
+console.log('── 5. 测试自身的完整性 ──')
 
 {
   const src = readFileSync('plugin/index.mjs', 'utf8')

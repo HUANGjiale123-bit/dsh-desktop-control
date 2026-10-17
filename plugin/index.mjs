@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.13.2'
+const PLUGIN_VERSION = '2.13.3'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -459,13 +459,24 @@ function applyInner(ctx, config = {}) {
       '闸门实测（写→查→删→再查）',
       probe.healthy === true
         ? '通过'
-        : `★ 未通过  stage=${probe.stage ?? '?'}  ${probe.error ?? '(无说明)'}`,
+        : // probe-only 且没有 error：闸门正拉着，探测刻意不做写删
+          // （那样会覆盖用户写下的原因），所以这不是失败。
+          // 上一版把它渲染成"★ 未通过"，用户按 ESC 后打开 diagnose
+          // 会以为急停坏了。
+          probe.stage === 'probe-only' && !probe.error
+          ? '闸门正在生效（只读探测：拉着时不做写删，以免覆盖用户写的原因）'
+          : `★ 未通过  stage=${probe.stage ?? '?'}  ${probe.error ?? '(无说明)'}`,
     )
     push('  闸门文件', probe.gatePath ?? g)
     if (probe.writable !== undefined) push('  可写', probe.writable ? '是' : '否')
     if (probe.halted !== undefined) push('  写后即生效', probe.halted ? '是' : '否')
     if (probe.clearable !== undefined) push('  可解除', probe.clearable ? '是' : '否')
     out.ok = probe.healthy === true
+    // probe-only（闸门正拉着）不是失败：探测刻意不做写删，
+    // 否则会覆盖用户写下的急停原因。把这两种情况分开，
+    // 否则 diagnose 会在"急停正在生效"旁边写"闸门实测未通过"。
+    out.probeOnly = probe.stage === 'probe-only' && !probe.error
+    out.probe = probe
     return out
   }
 
@@ -1356,9 +1367,14 @@ function applyInner(ctx, config = {}) {
    */
   function isHalted() {
     try {
-      const p = gateChecked()
-      if (!existsSync(p)) return false
-      const txt = readFileSync(p, 'utf8')
+      // ★ 用 gate() 而不是 gateChecked()：后者会顺带调
+      // helperLocationChecked()，那个函数可能抛错，而这里的 catch
+      // 会把它吞成"没拉闸"—— 急停状态下 isHalted() 返回 false，
+      // ensureIndicator 照样拉起指示层，用户又看到"它活了"。
+      // 实测抓到的：测试里闸门文件明明存在，diagnose 却认不出急停。
+      const gp = gate()
+      if (!existsSync(gp)) return false
+      const txt = readFileSync(gp, 'utf8')
       return !/^\s*(clear|0|false)/i.test(txt)
     } catch {
       return false
@@ -2014,9 +2030,25 @@ function applyInner(ctx, config = {}) {
       lines.push('  会话已授权: ' + ([...set.grants.keys()].join(', ') || '（无）'))
       lines.push('  生效名单  : ' + (set.effectiveAllowlist().join(', ') || '（空）'))
       lines.push('')
-      lines.push(g.ok
-        ? '闸门可用（已实测：写→查→删→再查全部通过）。'
-        : '★ 闸门实测未通过 —— ESC 可能只关界面而不拦住操作。看上面「闸门实测」那一行的 stage 与 error。')
+      // 判据要说清楚：`stage === 'probe-only'` 且没有 error 时，闸门是好的 ——
+      // 只是闸门正拉着，probe 刻意不做写删（那样会覆盖用户写的原因）。
+      //
+      // 上一版把这种情况也算成"未通过"，于是用户在按了 ESC 之后打开
+      // diagnose，会同时看到"急停正在生效"和"闸门实测未通过 —— ESC 可能
+      // 只关界面而拦不住操作"这两句**互相矛盾**的话。
+      // 实测报上来过：用户按 ESC 后跑 diagnose 被这句吓到。
+      if (g.ok) {
+        lines.push('闸门可用（已实测：写→查→删→再查全部通过）。')
+      } else if (g.probeOnly) {
+        lines.push(
+          '闸门**正在生效**（只做了只读探测：闸门已拉下时不写删，以免覆盖用户写的原因）。' +
+            ' 这不是故障。',
+        )
+      } else {
+        lines.push(
+          '★ 闸门实测未通过 —— ESC 可能只关界面而不拦住操作。看上面「闸门实测」那一行的 stage 与 error。',
+        )
+      }
 
       // ── 闸门拉着的时候，必须告诉用户**怎么解除** ──
       //
