@@ -14,22 +14,72 @@
 
 需要 DSH 版本支持 `ctx.approval`（会话授权）。装好后**重启 DSH**。
 
-**方式一：从 tarball 装**
+### ⚠️ 装完必须做两步，少一步插件不会激活（而且没有任何报错）
+
+**DSH 只加载 profile `package.json` 里 `dsh.profile.bundles` 数组中的包。**
+`pnpm add` 只把它装进 `node_modules` 并写 `dependencies`，**不会登记 bundle**。
+
+如果只做第 1 步，结果是：**所有 `desktop_*` 工具都报 `unknown tool`，没有任何其它提示** ——
+看起来就像插件是坏的。这是第三方实测里 100% 会踩的一步。
+
+**第 1 步：装包**
 
 ```bash
-# 把 dsh-desktop-control-2.6.0.tgz 放到某处，然后：
-cd <你的 DSH profile 目录>
+# 把 dsh-desktop-control-*.tgz 放到某处，然后：
+cd <你的 DSH profile 目录>          # 例如 ~/.dsh/profiles/desktop
 pnpm add file:<tarball 的绝对路径>
 ```
 
-**方式二：从目录装**
+（也可以从解压后的目录装：`pnpm add file:<目录绝对路径>`）
+
+**第 2 步：登记 bundle —— 这一步不能省**
+
+```bash
+# 先看现在有没有：
+cd <你的 DSH profile 目录>
+node -e "const p=require('./package.json');console.log(p.dsh?.profile?.bundles||[])"
+```
+
+输出里**必须**有 `"dsh-desktop-control"`。没有就手动加进 `package.json` 的
+`dsh.profile.bundles` 数组（和 `@deepseek-ai/dsh-base` 那些并列）：
+
+```json
+{
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-desktop-control"]
+    }
+  }
+}
+```
+
+改完**重启 DSH**。
+
+**装完的自检**（一条命令看清两个位置的状态）：
 
 ```bash
 cd <你的 DSH profile 目录>
-pnpm add file:<解压后的目录绝对路径>
+node -e "const p=require('./package.json');const inDeps=!!p.dependencies?.['dsh-desktop-control'];const inBundles=(p.dsh?.profile?.bundles||[]).includes('dsh-desktop-control');console.log('dependencies:',inDeps?'✓':'✗');console.log('bundles:',inBundles?'✓':'✗');if(inDeps&&!inBundles)console.log('\n★ 包装上了但没登记 bundle —— 插件不会激活。按上面第 2 步补。');if(!inDeps)console.log('\n★ 还没装包，先做第 1 步。');"
 ```
 
-然后在 profile 的 `cordis.patch.yml` 里加一条：
+**为什么插件自己不能提示这件事**：插件没被登记就根本不会被加载，
+它的任何代码都不会执行 —— 所以这个提醒只能放在文档里，或者由外部命令给出。
+
+### 卸载
+
+`pnpm remove dsh-desktop-control` **只会清依赖，不会清 `bundles`**，
+留下一条指向不存在包的悬空引用（DSH 启动时会为此报错）。所以卸载要两步：
+
+```bash
+# ① 先从 bundles 里删掉 "dsh-desktop-control"
+# ② 再卸包
+pnpm remove dsh-desktop-control
+```
+
+**可选：自定义补丁条目**
+
+插件自带 `cordis.patch.yml`，登记 bundle 后会自动生效，通常不需要手写条目。
+如果要覆盖默认配置，才需要在 profile 的 `cordis.patch.yml` 里加：
 
 ```yaml
 - id: desktop-control

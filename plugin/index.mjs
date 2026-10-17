@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.6.2'
+const PLUGIN_VERSION = '2.6.3'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -838,23 +838,49 @@ function applyInner(ctx, config = {}) {
   const liveOverlays = new Map()   // key -> ChildProcess
 
   /**
+   * 自动拉起的指示层多久后自己收起来。
+   *
+   * 为什么**自动拉起时要超时、手动调用时不超时**：
+   *
+   *   · 自动拉起是"检测到有操作"，操作一结束就没有理由继续挂着。
+   *     而助手是逐条指令驱动的，两条指令之间屏幕上没有任何操作——
+   *     常驻一条"您的电脑正在被控制"会让人以为操作还在继续、不敢碰键鼠。
+   *   · 更要紧的是它会让人**对逃生条麻木**。真正需要逃生条的时刻是
+   *     操作进行中；长时间挂着一条其实没在操作的逃生条，会削弱它作为
+   *     急停入口的价值。
+   *   · 手动调 desktop_indicate 是用户的明确意图（"我要开启这个状态"），
+   *     所以那边仍然默认常驻。
+   *
+   * 超时只是"收起界面"，**不写闸门** —— 那两件事的语义完全不同。
+   *
+   * 取值 2 分钟：足够覆盖一次连续操作，又不至于在"人已经走了"之后还挂着。
+   * 如果操作超过这个间隔，下一次操作会重新拉起。
+   */
+  const AUTO_INDICATOR_TIMEOUT_MS = 120000
+
+  /**
    * 确保指示层在跑。已经在跑就什么都不做。
    *
    * 由每一个变更性操作在放行之后自动调用——**不依赖助手记得调
    * desktop_indicate**。理由很直接：指示层的作用是让用户知道自己的电脑
    * 正被操控，而依赖"操控方记得开提示"的提示等于没有提示。
    *
-   * 刚才操作腾讯视频时就是这个缺口：我全程没调 desktop_indicate，
+   * 早先操作腾讯视频时就是这个缺口：我全程没调 desktop_indicate，
    * 于是你在没有任何提示的情况下被操控了好几轮。用户指出"你操作腾讯视频
    * 不就是 computer use 吗"——对的，那就是 computer use，就该有提示。
    */
   function ensureIndicator() {
     const cur = liveOverlays.get('escape')
     if (cur && cur.exitCode === null) return { ok: true, already: true }
-    const r = startIndicator('escape', [gateChecked()], escPath)
+    const r = startIndicator(
+      'escape',
+      [gateChecked(), '--timeout', String(AUTO_INDICATOR_TIMEOUT_MS)],
+      escPath,
+    )
     if (r.ok) {
       ctx.logger?.info?.(
-        '[desktop-control] 检测到变更性操作，已自动拉起指示层（光带 + 逃生条）',
+        `[desktop-control] 检测到变更性操作，已自动拉起指示层（光带 + 逃生条，` +
+          `${Math.round(AUTO_INDICATOR_TIMEOUT_MS / 1000)} 秒无操作后自动收起）`,
       )
     }
     return r
@@ -1007,7 +1033,18 @@ function applyInner(ctx, config = {}) {
       // 为什么必须有 ESC：鼠标可以被恶意程序抢（抢焦点、全屏覆盖、伪造点击），
       // 键盘不行——低层钩子在系统把按键投递给任何窗口之前就能看到它。
       // 所以"点按钮停"是方便，**"按 ESC 停"才是保险**。
-      const r2 = startIndicator('escape', [gateChecked()], escPath)
+      // ★ 把用户给的 timeoutMs 真的传给 dsc-esc。
+      //
+      // 这里原来只是把参数写进返回文案（"N 毫秒后自动消失"），而 dsc-esc
+      // **根本不支持超时**，参数也没往下传。也就是说它承诺了一件没做的事，
+      // 而且返回文案还主动确认了那个不存在的承诺。
+      //
+      // 第三方实测发现的正是这一条：指示层常驻、没有自动结束路径。
+      const tmo = Number(args.timeoutMs)
+      const escArgs = [gateChecked()]
+      if (Number.isFinite(tmo) && tmo > 0) escArgs.push('--timeout', String(Math.round(tmo)))
+
+      const r2 = startIndicator('escape', escArgs, escPath)
 
       if (!r2.ok) throw new Error(r2.reason)
 

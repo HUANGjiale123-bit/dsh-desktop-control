@@ -789,7 +789,31 @@ export function createDesktopToolset(options = {}) {
 
       const r = await runHelper(['press_key', String(hwnd), String(chord)], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
-      return { text: `已向窗口 ${hwnd} 发送按键 ${r.chord}。` }
+
+      // 报告"发了什么、发给了谁、能不能核实"，而不是只说 ok。
+      //
+      // 这里原来写的是 `发送按键 ${r.chord}`，而 helper 那侧把 **窗口句柄**
+      // 当成 chord 回显了——于是屏幕上出现「已向窗口 328194 发送按键 328194」。
+      // 插件层自己明明有 chord 变量，却去转述 helper 的值，把一个 bug 放大了。
+      // 现在两处都修：helper 回显对了，插件也优先用自己的变量。
+      //
+      // 关于 verified：keybd_event 没有返回值，**无法**确认应用是否接受。
+      // 与其再报一个看不出真假的 ok，不如明确说"这次没核实"，
+      // 并告诉调用方该怎么核实。
+      const shown = r.chord ?? String(chord)
+      const lines = [`已向窗口 ${hwnd} 发送按键 ${shown}。`, `  虚拟键码：${r.vk ?? '?'}`]
+      if (r.mods) lines.push(`  修饰键：${r.mods}`)
+      if (r.sentToTarget === false) {
+        lines.push(
+          `  ⚠ 发键时的前台窗口是 ${r.foreground}，**不是目标窗口 ${hwnd}** —— ` +
+            `按键可能发给了别的窗口。`,
+        )
+      }
+      lines.push(
+        `  未核实：keybd_event 不返回成功/失败，无法确认目标应用是否接受。` +
+          `要确认请观察界面变化（desktop_read_window 或 desktop_screenshot）。`,
+      )
+      return { text: lines.join('\n') }
     },
 
     /**

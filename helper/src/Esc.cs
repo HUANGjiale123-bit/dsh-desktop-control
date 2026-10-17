@@ -65,6 +65,15 @@ namespace DscEsc
         private static string _log = "";
         private static int _entries, _realKeys;
         private static bool _tripped;
+
+        /// <summary>
+        /// 本次退出是【超时自动收】而不是【用户停止】。
+        ///
+        /// 存在的唯一目的：让 FormClosing 知道不要写闸门。见那里的注释——
+        /// 把超时当成停止，会在用户没按任何停止键的情况下留下一道闸门，
+        /// 下次操作被拒，且症状与超时毫无关联。
+        /// </summary>
+        private static bool _timedOut;
         private static DateTime _t0 = DateTime.Now;
 
         private static void L(string s)
@@ -178,15 +187,39 @@ namespace DscEsc
             // 现象是"按了 ESC 界面消失、操作照旧"，与"ESC 没抓到"完全无法区分。
             //
             // 诊断信息必须由程序自己产生，不能指望调用方记得传。
+            // ★ 第二个参数只有在**不是开关**时才是日志路径。
+            //
+            // 加 --timeout 时踩过这个：原先的判据只有"args[1] 非空"，
+            // 于是 `dsc-esc <闸门> --timeout 3000` 把日志路径设成了
+            // 字面量 "--timeout" —— 日志写进了一个叫 `--timeout` 的文件，
+            // 而预期的 esc.log 一片空白。表现是"日志没了"，
+            // 很容易被误诊成"程序没启动"。
             _log = args.Length > 1 && !string.IsNullOrEmpty(args[1])
+                   && !args[1].StartsWith("--")
                 ? args[1]
                 : (string.IsNullOrEmpty(_gate)
                     ? Path.Combine(Path.GetTempPath(), "dsc-esc.log")
                     : Path.Combine(Path.GetDirectoryName(_gate) ?? ".", "esc.log"));
 
+            // --timeout <毫秒>：到点自动收界面，**不写闸门**。
+            //
+            // 为什么需要它：指示层是"正在被控制"的陈述句，而助手是逐条指令
+            // 驱动的——两条指令之间屏幕上没有任何操作。常驻一条"正在被控制"
+            // 会让人以为操作还在继续、不敢碰键鼠；更要紧的是会让人对逃生条
+            // 麻木，削弱它作为急停入口的价值。
+            //
+            // 而"收指示层"和"停止"是两件事：前者只是不再显示，后者要留下闸门。
+            // 所以超时走的是正常关闭路径（见 _timedOut 与 FormClosing）。
+            int timeoutMs = 0;
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "--timeout") int.TryParse(args[i + 1], out timeoutMs);
+            }
+
             L("=== dsc-esc 启动 ===");
             L("闸门=" + _gate);
             L("日志=" + _log);
+            L("超时=" + (timeoutMs > 0 ? timeoutMs + " ms" : "不超时（常驻）"));
 
             _keep = HookProc;
             _hook = SetWindowsHookExW(WH_KEYBOARD_LL, _keep, IntPtr.Zero, 0);
@@ -277,7 +310,18 @@ namespace DscEsc
 
             bar.FormClosing += delegate
             {
-                // 用户直接关掉条 = 也算停止
+                // 用户直接关掉条 = 也算停止（写闸门）。
+                //
+                // ★ 但**超时自动收不算停止**，不能写闸门。
+                //
+                // 两者语义完全不同：
+                //   用户关掉 / 按 ESC → "别再动我的电脑" → 写闸门，拦住后续操作
+                //   超时自动收       → "这会儿没有操作在进行" → 只收界面，不留闸门
+                //
+                // 如果把超时也当成停止，"操作做完几分钟后指示层自动消失"就会
+                // 顺手拉下一道闸门，用户下一次操作被拒绝，而他根本没按过任何
+                // 停止键——症状是"插件忽然不能用了"，且没有任何线索指向超时。
+                if (_timedOut) return;
                 if (!_tripped) { _tripped = true; Trip(); }
             };
 
@@ -309,9 +353,25 @@ namespace DscEsc
                 try { if (band != null) band.Close(); } catch { }
             };
 
+            // 超时自动收：到点关闭窗体（走正常关闭路径，不写闸门）。
+            // 放在 Application.Run 之前启动，让它随消息循环计时。
+            if (timeoutMs > 0)
+            {
+                System.Windows.Forms.Timer life = new System.Windows.Forms.Timer();
+                life.Interval = timeoutMs;
+                life.Tick += delegate
+                {
+                    life.Stop();
+                    _timedOut = true;
+                    L("超时 " + timeoutMs + " ms，自动收起指示层（不写闸门）");
+                    try { bar.Close(); } catch { }
+                };
+                life.Start();
+                L("已设超时 " + timeoutMs + " ms");
+            }
+
             L("进入 Application.Run（逃生条窗体）");
             Application.Run(bar);
-
             try { if (band != null) band.Close(); } catch { }
 
             L("消息循环结束（_tripped=" + _tripped + "），退出");

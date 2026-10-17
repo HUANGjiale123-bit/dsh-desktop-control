@@ -741,9 +741,10 @@ namespace Dsc
   dsc.exe screenshot <hwnd> [outPath]      截图
 
 ── 急停闸门 ──
-  dsc.exe halt [原因]                      拉下闸门（此后所有操作被拒）
+  dsc.exe halt [原因]                      拉下闸门（急停；此后所有操作被拒）
+  dsc.exe stop                             查看闸门状态（**只读，不改任何文件**）
   dsc.exe stop --clear                     解除闸门
-  dsc.exe stop                             查看当前闸门状态
+  dsc.exe stop --open                      同 --clear
 
 ── 诊断 ──
   dsc.exe ping                             存活 + DPI + 闸门路径
@@ -1113,12 +1114,22 @@ namespace Dsc
         }
 
         /// <summary>
-        /// 急停闸门：拉下或解除。用法：dsc.exe stop [--clear] [--open]
+        /// 急停闸门的状态查询与解除。用法：dsc.exe stop [--clear] [--open]
         ///
-        /// 三个动作的区别容易混，写下来：
-        ///   · 无参数   → 拉下闸门（拒绝后续所有变更性操作）
+        ///   · 无参数   → **只查看状态，绝不写文件**
         ///   · --clear  → 解除闸门（恢复操作）
         ///   · --open   → 与 --clear 同义，名字更贴合"开启 computer use"的语境
+        ///
+        /// **拉闸是 halt 命令的职责**，不是 stop 的。这两者原来混在一起：
+        /// 无参数时 stop 会写闸门文件，而帮助文本写的是"查看当前闸门状态"。
+        /// 后果在第三方实测里出现过——插件的拒绝提示教用户
+        /// "确认安全后用 dsc.exe stop --clear 解除"，而看到提示的人
+        /// 最自然的动作是先跑一次 dsc.exe stop 看看现在是不是真被挡着，
+        /// **于是又把闸门拉上了**。现场表现是"解除 → 立刻又被拉下"，
+        /// 一度被误诊成 ESC 硬件抖动导致的死循环。
+        ///
+        /// 查询类命令带写副作用是很坏的形状：它让"查看"变成"操作"，
+        /// 而且**不会有任何报错**，只会让人以为是别的东西在捣鬼。
         ///
         /// 为什么 --clear 必须**回读确认**：
         /// File.Delete 失败时**不抛异常**（只设 last-error），所以
@@ -1163,27 +1174,30 @@ namespace Dsc
             }
             else
             {
-                try
-                {
-                    string dir = Path.GetDirectoryName(gate);
-                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                    File.WriteAllText(gate,
-                        "由 dsc.exe stop 触发（" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "）" +
-                        Environment.NewLine);
-                    note = "闸门已拉下";
-                }
-                catch (Exception e)
-                {
-                    note = "拉下失败：" + e.GetType().Name + ": " + e.Message;
-                }
+                // ★ 只查看，不写任何文件。
+                //
+                // 这里原来会写闸门——见上面的类注释，那是个会让人误诊的副作用。
+                // 现在给的是"当前状态 + 接下来该敲哪条命令"，因为查状态的人
+                // 真正想知道的是"我被挡着吗、怎么解"。
+                bool halted = IsHalted();
+                note = halted
+                    ? "闸门处于拉下状态——后续所有变更性操作都会被拒绝。" +
+                      "确认安全后执行：dsc.exe stop --clear"
+                    : "闸门未触发，操作正常。要主动拉下（急停）用：dsc.exe halt";
             }
 
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("halted").Bool(IsHalted())
-                .Key("cleared").Bool(cleared)
-                .Key("note").Val(note)
-                .Key("gatePath").Val(gate)
+                .Key("mode").Val(wantClear ? "clear" : "query");
+            // cleared 只在解除模式下出现。
+            //
+            // 查询模式**不输出这个键**——第一版输出的是字符串 "null"，
+            // 那在 JSON 里是字符串而不是 null 值，调用方会把
+            // "这次没解除"误读成"解除失败"。少一个键，好过一个语义可疑的键。
+            if (wantClear) j.Key("cleared").Bool(cleared);
+            j.Key("note").Val(note)
+             .Key("gatePath").Val(gate)
              .End();
             Console.WriteLine(j.ToString());
             return 0;
@@ -1957,6 +1971,11 @@ namespace Dsc
             }
             if (main == 0) throw new ArgumentException("只给了修饰键，缺少主键：" + args[1]);
 
+            // 发之前记录前台窗口，作为"键会发给谁"的凭据。
+            // RequireActivated 已经把目标激活了，这里再取一次是为了**报告**，
+            // 不是校验——让调用方能核实"键发给了哪个窗口"。
+            IntPtr fgBefore = Native.GetForegroundWindow();
+
             foreach (byte m in mods)
             {
                 Native.keybd_event(m, 0, 0, UIntPtr.Zero);
@@ -1971,8 +1990,37 @@ namespace Dsc
                 Native.keybd_event(mods[i], 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
             }
 
+            // ── 返回可核实的信息，而不是只说 ok ──
+            //
+            // 这里原来有一处真 bug：`Key("chord").Val(args[1])` 回显的是
+            // **窗口句柄**（args[1]），而不是按键（args[2]）。
+            // 于是 `press_key 460068 Space` 会返回 `{"ok":true,"chord":"460068"}`，
+            // 看起来像"参数被错位取用"，把排查方向带骗了整整一轮。
+            // 插件层还忠实转发了这个错值，屏幕上显示
+            // 「已向窗口 328194 发送按键 328194」。
+            //
+            // 光修回显还不够。keybd_event **没有返回值**，所以这里无法判断
+            // 按键是否真的被应用接受——那就把能给的都给出，让调用方自己核实：
+            //   · chord     —— 原样的和弦字符串（这次是对的）
+            //   · vk        —— 主键的虚拟键码
+            //   · mods      —— 修饰键的虚拟键码
+            //   · fg        —— 发键时的前台窗口（键实际发给了它）
+            //   · verified  —— 固定为 false，并解释原因
+            // 诚实地说明"无法核实"比再报一个 ok 有用。
             Jw j = new Jw();
-            j.Obj().Key("ok").Bool(true).Key("chord").Val(args[1]).End();
+            j.Obj().Key("ok").Bool(true)
+                .Key("chord").Val(args[2])
+                .Key("vk").Val("0x" + main.ToString("X2"))
+                .Key("mods").Val(string.Join(",", new List<byte>(mods)
+                    .ConvertAll(x => "0x" + x.ToString("X2")).ToArray()))
+                .Key("foreground").Num(fgBefore.ToInt64())
+                .Key("sentToTarget").Bool(fgBefore == keyHwnd)
+                .Key("verified").Bool(false)
+                .Key("note").Val(
+                    "已调用 keybd_event 发送，但它不返回成功/失败，" +
+                    "因此无法确认目标应用是否接受。要核实请观察界面变化" +
+                    "（例如重读一次无障碍树或截图）。")
+             .End();
             Console.WriteLine(j.ToString());
             return 0;
         }
