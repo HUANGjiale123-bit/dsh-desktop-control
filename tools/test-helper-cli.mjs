@@ -107,32 +107,45 @@ else bad('stop --clear 没有解除（或 cleared 不为 true）')
 console.log()
 console.log('── 3. `press_key` 的 chord 回显必须是按键，不是句柄（缺陷 3 回归）──')
 
-// 要一个真实窗口句柄才能过白名单校验；拿不到就跳过这条
+// 要一个真实窗口句柄才能过白名单校验；拿不到就跳过这条。
+//
+// **优先选前台窗口**：press_key 要求目标在前台，否则 helper 会去激活它，
+// 而激活在受限环境里可能失败 —— 那种失败与 press_key 本身无关，
+// 却会以"chord 回显错误"的形式报出来，指向完全错误的地方。
+// 这个测试之前就是因此 flaky：挑中的窗口恰好不是前台时五条断言全红。
 let hwnd = 0
 const lw = run(DSC, ['list_windows'])
 if (Array.isArray(lw.json?.windows)) {
-  const pick = lw.json.windows.find(
-    (w) => w.width > 300 && w.height > 300 && w.exe && !isOurs(w),
-  )
+  const usable = (w) => w.width > 300 && w.height > 300 && w.exe && !isOurs(w)
+  const pick =
+    lw.json.windows.find((w) => w.foreground && usable(w)) ??
+    lw.json.windows.find(usable)
   if (pick) hwnd = pick.hwnd
 }
 if (hwnd) {
   const exe = (lw.json.windows.find((w) => w.hwnd === hwnd)?.exe ?? '').split(/[\\/]/).pop().toLowerCase()
   const pk = run(DSC, ['press_key', String(hwnd), 'Ctrl+A'], { DSC_ALLOWED_APPS: exe })
-  if (pk.json?.chord === 'Ctrl+A') ok('chord 回显 Ctrl+A（不是句柄）')
-  else bad(`chord 回显错误：${JSON.stringify(pk.json?.chord)}（期望 "Ctrl+A"）`)
 
-  if (pk.json?.vk === '0x41') ok('报告了主键虚拟键码 vk=0x41')
-  else bad(`vk 不对：${pk.json?.vk}`)
+  // 环境限制（无法激活）与真的坏了要分开：前者跳过，后者才算失败。
+  const envBlocked = /无法把窗口.*激活|拒绝访问/.test(pk.json?.message ?? '')
+  if (envBlocked) {
+    console.log(`  · 目标窗口无法被激活（环境限制），这几条跳过：${(pk.json?.message ?? '').slice(0, 50)}…`)
+  } else {
+    if (pk.json?.chord === 'Ctrl+A') ok('chord 回显 Ctrl+A（不是句柄）')
+    else bad(`chord 回显错误：${JSON.stringify(pk.json?.chord)}（期望 "Ctrl+A"）`)
 
-  if (pk.json?.mods === '0x11') ok('报告了修饰键 mods=0x11（Ctrl）')
-  else bad(`mods 不对：${pk.json?.mods}`)
+    if (pk.json?.vk === '0x41') ok('报告了主键虚拟键码 vk=0x41')
+    else bad(`vk 不对：${pk.json?.vk}`)
 
-  if (pk.json?.verified === false) ok('明确标注 verified=false（不谎报已核实）')
-  else bad('verified 字段缺失或不正确')
+    if (pk.json?.mods === '0x11') ok('报告了修饰键 mods=0x11（Ctrl）')
+    else bad(`mods 不对：${pk.json?.mods}`)
 
-  if (typeof pk.json?.sentToTarget === 'boolean') ok('报告了 sentToTarget（键发给了哪个窗口）')
-  else bad('缺少 sentToTarget')
+    if (pk.json?.verified === false) ok('明确标注 verified=false（不谎报已核实）')
+    else bad('verified 字段缺失或不正确')
+
+    if (typeof pk.json?.sentToTarget === 'boolean') ok('报告了 sentToTarget（键发给了哪个窗口）')
+    else bad('缺少 sentToTarget')
+  }
 } else {
   console.log('  （跳过：找不到可用窗口）')
 }
