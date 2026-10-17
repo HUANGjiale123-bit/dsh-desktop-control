@@ -431,7 +431,7 @@ namespace Dsc
                 DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine);
 
             if (!File.Exists(p))
-                throw new InvalidOperationException("急停闸门写入后仍不存在：" + p);
+                throw new DscError("Halted", "急停闸门写入后仍不存在：" + p);
         }
 
         /// <summary>变更性动作的统一入口：先过急停闸门。</summary>
@@ -483,7 +483,7 @@ namespace Dsc
         private static void RequireNotAppContainer(string action)
         {
             if (!IsAppContainer()) return;
-            throw new InvalidOperationException(
+            throw new DscError("Refused", 
                 "本进程运行在 AppContainer（沙箱）里，Windows 禁止由此向交互式桌面注入输入，拒绝执行 " +
                 action + "。症状是静默的：SendInput 会返回成功但光标不动、按键不进任何程序。" +
                 "常见原因：helper 是从 Codex/ChatGPT 会话的终端启动的，继承了它的沙箱。" +
@@ -617,7 +617,7 @@ namespace Dsc
         {
             string[] allow = Allowlist();
             if (allow.Length == 0)
-                throw new InvalidOperationException(
+                throw new DscError("Refused", 
                     "白名单为空，拒绝执行 " + action + "。设置 DSC_ALLOWED_APPS（逗号分隔的可执行文件名，" +
                     "例如 notepad.exe）或用 --allow notepad.exe 指定后再试。" +
                     "读取界面内容同样需要授权——观察也是访问。");
@@ -625,7 +625,7 @@ namespace Dsc
             uint pid;
             Native.GetWindowThreadProcessId(hwnd, out pid);
             if (pid == 0)
-                throw new DscError("Refused", "无法确定窗口 " + hwnd + " 所属进程，拒绝执行 " + action + "。");
+                throw new DscError("StaleTarget", "无法确定窗口 " + hwnd + " 所属进程，拒绝执行 " + action + "。");
 
             string exe = BaseName(ProcessPath(pid));
             if (exe.Length == 0)
@@ -720,7 +720,7 @@ namespace Dsc
             if (target < 0 || _selfIntegrityRid < 0) return;   // 读不到就不阻断
 
             if (target > _selfIntegrityRid)
-                throw new InvalidOperationException(
+                throw new DscError("Refused", 
                     "Accessibility is limited because the target window has higher Windows " +
                     "integrity than this helper. 目标完整性=" + IntegrityName(target) +
                     "，自身=" + IntegrityName(_selfIntegrityRid) +
@@ -752,7 +752,7 @@ namespace Dsc
 
             WindowActivator.Result r = WindowActivator.Activate(hwnd);
             if (r.Ok) return;
-            throw new InvalidOperationException("拒绝执行 " + action + "：" + r.Message);
+            throw new DscError("Refused", "拒绝执行 " + action + "：" + r.Message);
         }
 
         /// <summary>本进程内的元素引用表：短 id → 无障碍元素。</summary>
@@ -1536,9 +1536,9 @@ namespace Dsc
 
             Native.RECT r;
             if (!Native.GetWindowRect(hwnd, out r))
-                throw new InvalidOperationException("GetWindowRect 失败");
+                throw new DscError("UiaError", "GetWindowRect 失败");
             int w = r.Right - r.Left, h = r.Bottom - r.Top;
-            if (w <= 0 || h <= 0) throw new InvalidOperationException("窗口尺寸无效: " + w + "x" + h);
+            if (w <= 0 || h <= 0) throw new DscError("StaleTarget", "窗口尺寸无效: " + w + "x" + h);
 
             string outPath = args.Length > 2
                 ? args[2]
@@ -2001,7 +2001,7 @@ namespace Dsc
                 for (int i = 1; i <= steps; i++)
                 {
                     if (IsHalted())
-                        throw new InvalidOperationException(
+                        throw new DscError("Halted", 
                             "拖动被急停中断（已移动 " + (i - 1) + " / " + steps + " 步）。按键已释放，不会卡在按下状态。");
 
                     int tx = x1 + (x2 - x1) * i / steps;
@@ -2384,7 +2384,7 @@ namespace Dsc
                     for (int i = 1; i <= stepsPerLeg; i++)
                     {
                         if (IsHalted())
-                            throw new InvalidOperationException(
+                            throw new DscError("Halted", 
                                 "拖动被急停中断（第 " + leg + " 段，已移动 " + moved + " 步）。按键已释放。");
 
                         int tx = ax + (bx - ax) * i / stepsPerLeg;
@@ -2476,17 +2476,17 @@ namespace Dsc
             if (want.Count == 0) throw new ArgumentException("描述符为空，例如 role=Button/name=保存");
 
             AutomationElement root = AutomationElement.FromHandle(hwnd);
-            if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
+            if (root == null) throw new DscError("UiaError", "无法从该窗口句柄取得无障碍元素");
 
             MatchTally tally = new MatchTally();
             AutomationElement found = FindByDescriptor(root, want, 0, new SearchBudget { Remaining = 4000, DeadlineMs = 5000 }, tally);
             if (tally.Count > 1)
-                throw new InvalidOperationException(
+                throw new DscError("AmbiguousTarget", 
                     "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + desc + "\n" +
                     "拒绝执行——点错其中哪一个都不会报错，而且可能做错事。" +
                     "请加更具体的条件（例如补上 aid=，或写更完整的 name）。");
             if (found == null)
-                throw new InvalidOperationException("未找到匹配元素：" + desc);
+                throw new DscError("NotFound", "未找到匹配元素：" + desc);
 
             // ── 优先用 InvokePattern，而不是算矩形中心去点 ──
             //
@@ -2604,7 +2604,7 @@ namespace Dsc
                 }
                 else
                 {
-                    throw new InvalidOperationException(
+                    throw new DscError("UiaError", 
                         "元素矩形无效（" + r.Left + "," + r.Top + " " +
                         (r.Right - r.Left) + "x" + (r.Bottom - r.Top) + "）。" +
                         "已尝试重新激活并重新定位一次仍失败，通常是窗口仍处于最小化或不可见状态：" + desc);
@@ -2696,7 +2696,7 @@ namespace Dsc
                 // 把原因带出去，而不是静默返回 null。
                 // 静默 null 让我一开始以为"这些点上确实没有元素"，
                 // 而实际上可能是 FromPoint 整体不可用。
-                throw new InvalidOperationException(
+                throw new DscError("UiaError", 
                     "AutomationElement.FromPoint 失败：" + e.GetType().Name + ": " + e.Message);
             }
         }
@@ -3007,7 +3007,7 @@ namespace Dsc
             string label = "";
 
             AutomationElement root = AutomationElement.FromHandle(hwnd);
-            if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
+            if (root == null) throw new DscError("UiaError", "无法从该窗口句柄取得无障碍元素");
 
             // 在同一次调用内重新抓一份快照再写：一次性进程模型下跨调用持不住快照，
             // 所以"索引仍然有效"只能靠这次重新绑定保证。
@@ -3240,7 +3240,7 @@ namespace Dsc
                     "; expected Raise, Scroll Up, Scroll Down, Scroll Left, Scroll Right, Expand, or Collapse");
 
             AutomationElement root = AutomationElement.FromHandle(hwnd);
-            if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
+            if (root == null) throw new DscError("UiaError", "无法从该窗口句柄取得无障碍元素");
 
             AutomationElement el = null;
             Snapshot snap = null;
@@ -3442,7 +3442,7 @@ namespace Dsc
                 if (sent == 0)
                 {
                     int err = Marshal.GetLastWin32Error();
-                    throw new InvalidOperationException(
+                    throw new DscError("UnknownOutcome", 
                         "文本输入在第 " + (text.IndexOf(c) + 1) + " 个字符处失败 (Win32 错误 " + err + ": " +
                         new System.ComponentModel.Win32Exception(err).Message + ")。");
                 }
@@ -3603,7 +3603,7 @@ namespace Dsc
             if (!Native.SetCursorPos(x, y))
             {
                 int err = Marshal.GetLastWin32Error();
-                throw new InvalidOperationException(
+                throw new DscError("Refused", 
                     "SetCursorPos(" + x + "," + y + ") 失败 (Win32 错误 " + err + ": " +
                     new System.ComponentModel.Win32Exception(err).Message + ")。");
             }
@@ -3616,7 +3616,7 @@ namespace Dsc
             if (Native.GetCursorPos(out p))
             {
                 if (Math.Abs(p.X - x) > 2 || Math.Abs(p.Y - y) > 2)
-                    throw new InvalidOperationException(
+                    throw new DscError("UnknownOutcome", 
                         "光标未落到目标位置：请求 (" + x + "," + y + ") 实际 (" + p.X + "," + p.Y + ")。" +
                         "先在几个不同位置复测：若偏差与位置成比例（比值恒定），" +
                         "多半是 DPI awareness 与坐标基准不一致；若近似固定偏移，" +
@@ -3745,7 +3745,7 @@ namespace Dsc
             if (maxChildren < 1 || maxChildren > 2000) throw new ArgumentException("--children 允许 1..2000");
 
             AutomationElement root = AutomationElement.FromHandle(hwnd);
-            if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
+            if (root == null) throw new DscError("UiaError", "无法从该窗口句柄取得无障碍元素");
 
             // 树文本、索引表、次要动作表全部来自这一次遍历——它们必须同源，
             // 否则索引会和元素对不上号。

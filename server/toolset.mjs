@@ -322,6 +322,14 @@ export function createDesktopToolset(options = {}) {
     ReadOnly: { retry: 'giveUp', hint: '该元素是只读的。' },
     Timeout: { retry: 'wait', hint: '超时。应用可能正忙，等一会再试。' },
     Busy: { retry: 'wait', hint: '另一个操作正占着桌面。等一下再试。' },
+    NotFound: {
+      retry: 'reobserve',
+      hint: '没找到匹配的元素。可能还没渲染完、描述符写错了、或者它已经不在了 —— 先重新读树。',
+    },
+    UiaError: {
+      retry: 'reobserve',
+      hint: '读无障碍信息时出错。应用可能正忙或正在重绘，重新读一次或改用截图。',
+    },
     StaleTarget: {
       retry: 'reobserve',
       hint: '目标窗口没了（关了，或句柄被复用）。重新列窗口，别用旧句柄。',

@@ -114,7 +114,33 @@ console.log('── 4. 实际输出带 [retry=...] ──')
 }
 
 console.log()
-console.log('── 5. 错误码能被解析出来（供统计用）──')
+console.log('── 5. stderr 必须被消费（否则 helper 会卡在写管道上）──')
+
+{
+  // 注意：检查范围要给足。上一版只取了 2600 字符，
+  // 而 stderr 的监听在那个窗口之外，于是误报"没读"。
+  // 我甚至据此宣布"找到真 bug"，然后又发现它本来就在 —— 教训是
+  // 断言"缺少某物"之前，先把整个函数看完。
+  const ts = readFileSync('server/toolset.mjs', 'utf8')
+  const i = ts.indexOf('function runHelperInner')
+  const body = ts.slice(i, i + 6000)
+  if (body.includes('child.stderr')) ok('runHelper 读了 stderr')
+  else bad('runHelper 不读 stderr —— helper 写满 4KB 管道会永久阻塞')
+
+  if (body.includes("child.stderr.on('data'") || body.includes("child.stderr?.on('data'")) {
+    ok('stderr 有 data 监听（真正在消费）')
+  } else {
+    bad('stderr 没挂 data 监听 —— 只是拿到句柄不算消费')
+  }
+
+  // helper 确实在往 stderr 写
+  const cs = readFileSync('helper/src/Program.cs', 'utf8')
+  if (cs.includes('Console.Error.WriteLine')) ok('helper 确实会往 stderr 写（所以这条要求不是多余的）')
+  else skip('helper 现在没往 stderr 写')
+}
+
+console.log()
+console.log('── 6. 错误码能被解析出来（供统计用）──')
 
 {
   const plugin = readFileSync('plugin/index.mjs', 'utf8')

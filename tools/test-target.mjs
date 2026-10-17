@@ -142,9 +142,14 @@ const before = events().length
   })
   const code = r.json?.error ?? ''
   const msg = r.json?.message ?? ''
-  if (code === 'InvalidOperationException' && /多个元素/.test(msg)) {
-    ok('同名按钮报"匹配到多个元素"并拒绝')
-  } else if (code === 'InvalidOperationException' && /激活/.test(msg)) {
+  // 错误码从 InvalidOperationException 改成了 AmbiguousTarget
+  // （异常类名当错误码对调用方毫无意义，也查不到恢复建议）。
+  // 这里接受两种：新旧都算"被拒绝了"，但**新码要真的报对**。
+  if (code === 'AmbiguousTarget' && /多个元素/.test(msg)) {
+    ok('同名按钮报 AmbiguousTarget 并拒绝')
+  } else if (code === 'InvalidOperationException' && /多个元素/.test(msg)) {
+    skip('还报着旧码 InvalidOperationException —— 说明跑的是旧 helper')
+  } else if ((code === 'AmbiguousTarget' || code === 'InvalidOperationException') && /激活/.test(msg)) {
     skip('被激活限制拦下（沙箱无法把窗口提到前台），唯一性检查在此环境下测不到')
   } else {
     bad(`同名按钮的行为不对：error=${JSON.stringify(code)} msg=${msg.slice(0, 70)}`)
