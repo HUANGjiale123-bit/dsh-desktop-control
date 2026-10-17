@@ -819,18 +819,37 @@ export function createDesktopToolset(options = {}) {
       // exe=QQMusic.exe），拿到的图却是 DSH 自己的界面——因为那时 QQ音乐
       // 被 DSH 盖着。差一点据此得出"QQ音乐的界面内容是 DSH"的错误结论。
       //
-      // 所以警告放在正文**之前**。放在后面等于没说：调用方读到"截图已保存"
-      // 就已经开始看图了。
+      // 措辞要守住边界：采样的是**五个点**，不是整张图。
+      //
+      // 说"未遮挡"等于承诺一张没人验证过的整图；说"未在采样点发现遮挡"
+      // 才是实际做到的事。第三方审查对这点提得对：应当把它当有限诊断信号，
+      // 不要据此保证整张图都是目标窗口。
       const warn = r.occluded
-        ? `⚠ 这张图**不完全是目标窗口**：以下位置被别的窗口盖住，截到的是它们的画面\n` +
+        ? `⚠ 这张图**不完全是目标窗口**：以下采样位置被别的窗口盖住，截到的是它们的画面\n` +
           `   ${r.occludedPoints}\n` +
           `   要用这张图判断界面内容之前，先把目标窗口提到前台再截一次。\n\n`
-        : ''
+        : `（遮挡检查：中心与四角共 5 个采样点未发现其它窗口。` +
+          `这不等于整张图都没被遮挡——采样点之间仍可能有窄条被盖住。）\n\n`
 
       return {
         // filepath 单独给出来：上层要把它读成图像内容块交给模型。
         // 原先只有文本，上层只能用正则从句子中间把路径抠出来，太脆。
         filepath: r.filepath,
+        // ── 几何必须作为字段返回，不能只出现在文字里 ──
+        //
+        // 上一版只有 filepath 和 text，而 text 里虽然拼了
+        // "尺寸 1941x1242，桌面原点 (150,48)"，那些数字是**字符串的一部分**。
+        // 上层要把它们记进"这张截图的坐标出处"时读到的是 undefined，
+        // 于是每次带 shotId 的点击都会报"窗口尺寸从 undefinedxundefined 变了"。
+        //
+        // 这是"数据只存在于给人看的句子里"的典型后果：人读着完全正常，
+        // 代码读不到。第三方审查直接点出来了。
+        originX: r.originX,
+        originY: r.originY,
+        width: r.width,
+        height: r.height,
+        coords: r.coords,
+        occluded: r.occluded === true,
         text:
           warn +
           `窗口 ${hwnd} 截图已保存：${r.filepath}\n` +
@@ -839,7 +858,7 @@ export function createDesktopToolset(options = {}) {
       }
     },
 
-    async click({ hwnd, x, y, button, space }) {
+    async click({ hwnd, x, y, button, space, expectedGeom }) {
       /* 坐标空间：默认 desktop（桌面绝对），可选 window（图内坐标）。
        *
        * ── 为什么加这个参数 ──
@@ -877,6 +896,32 @@ export function createDesktopToolset(options = {}) {
           text:
             `失败：无法取得窗口 ${hwnd} 的矩形，因此无法把图内坐标换算成桌面坐标。\n` +
             `请先用 desktop_list_windows 确认窗口还在，或改用 space="desktop" 直接给桌面绝对坐标。`,
+        }
+      }
+
+      // ── 截图坐标出处核对：复用这份已经列好的窗口表 ──
+      //
+      // 这一步原来在上层（plugin/index.mjs）做，而那里要自己再起一个
+      // list_windows —— 于是"带 shotId 的点击"反而比不带多一次进程启动。
+      // 加一个更安全的校验却让它更慢，那是把校验变成负担，不是优化。
+      //
+      // 挪到这里之后零额外开销：窗口表本来就要列。
+      let geomWarn = ''
+      if (expectedGeom && w0) {
+        if (w0.width !== expectedGeom.w || w0.height !== expectedGeom.h) {
+          return {
+            isError: true,
+            text:
+              `失败：截图拍摄时窗口是 ${expectedGeom.w}x${expectedGeom.h}，` +
+              `现在是 ${w0.width}x${w0.height}。\n` +
+              `窗口尺寸变了，界面布局几乎肯定也变了，旧坐标不再可靠。请重新截图。`,
+          }
+        }
+        if (w0.x !== expectedGeom.x || w0.y !== expectedGeom.y) {
+          geomWarn =
+            `⚠ 窗口从 (${expectedGeom.x},${expectedGeom.y}) 移到了 (${w0.x},${w0.y})。` +
+            `用 space="window" 没问题（原点按当前矩形算）；` +
+            `用 space="desktop" 这个坐标已经错了。`
         }
       }
 
@@ -926,6 +971,7 @@ export function createDesktopToolset(options = {}) {
       const lines = [
         `已在桌面坐标 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键点击。`,
       ]
+      if (geomWarn) lines.unshift(geomWarn.trimEnd())
       if (useWindowSpace) {
         lines.push(
           `  坐标空间: window（图内 (${x},${y}) + 窗口原点 (${w0.x},${w0.y}) = 桌面 (${dx},${dy})）`,

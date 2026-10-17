@@ -92,6 +92,12 @@ namespace Dsc
         public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
         public const uint GA_ROOT = 2;
 
+        // 用于判断"这个窗口是不是目标的弹出窗口"（下拉菜单、提示、右键菜单）。
+        // 弹窗的 GW_OWNER 指向它的宿主窗口，这是比"同一个进程"精确得多的判据。
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+        public const uint GW_OWNER = 4;
+
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
 
@@ -1271,19 +1277,32 @@ namespace Dsc
         /// 五个点足以覆盖"盖住一大块"这种实际情况，而细缝遮挡对截图
         /// 的可用性影响很小。
         /// </summary>
+        /// <summary>
+        /// w 是不是 owner 的弹出窗口（下拉菜单、提示、右键菜单）。
+        ///
+        /// 沿 GW_OWNER 往上走几层，看能不能遇到 owner。限制层数是为了防止
+        /// 异常数据造成死循环——owner 链正常情况下很短。
+        /// </summary>
+        private static bool IsPopupOf(IntPtr w, IntPtr owner)
+        {
+            IntPtr h = w;
+            for (int i = 0; i < 8 && h != IntPtr.Zero; i++)
+            {
+                IntPtr o = Native.GetWindow(h, Native.GW_OWNER);
+                if (o == IntPtr.Zero) return false;
+                if (o == owner) return true;
+                h = o;
+            }
+            return false;
+        }
+
         private static List<string> DetectOcclusion(IntPtr hwnd, Native.RECT r)
         {
             List<string> blocked = new List<string>();
             int w = r.Right - r.Left, h = r.Bottom - r.Top;
             if (w <= 0 || h <= 0) return blocked;
 
-            // 目标窗口所属进程。**同一进程的弹出窗口不算遮挡**——
-            // 下拉菜单、工具提示、右键菜单都是独立顶层窗口，但它们是这个应用
-            // 自己的一部分，挡住的正是它想显示的内容。
-            //
-            // 实测踩到：点开记事本的"标题"下拉后截图，五个采样点里的"中心"
-            // 落在下拉菜单上，于是报告"被 notepad.exe 遮挡"——被自己遮挡，
-            // 这种警告只会让人以后忽略警告。
+            // 目标窗口所属进程（用于报告，**不再用它判断遮挡**）。
             uint selfPid = 0;
             Native.GetWindowThreadProcessId(hwnd, out selfPid);
 
@@ -1309,8 +1328,19 @@ namespace Dsc
 
                 uint pid;
                 Native.GetWindowThreadProcessId(root, out pid);
-                // 同一个进程的其它顶层窗口（下拉菜单、提示、右键菜单）不算遮挡。
-                if (pid == selfPid) continue;
+
+                // ── 用 owner 关系判断，而不是"同一个进程" ──
+                //
+                // 最初用的是"同 pid 就跳过"，为了修掉"下拉菜单被当成遮挡"。
+                // 但一个进程可以有**多个独立主窗口**：Word 开两个文档、
+                // 浏览器多个窗口。那种情况下，另一个主窗口盖住目标时，
+                // 按 pid 判断就会漏报真正的遮挡。
+                //
+                // owner 链才是准确判据：弹窗的 GW_OWNER 指向宿主窗口。
+                //   · root == hwnd                → 目标自己
+                //   · root 的 owner 链含 hwnd     → 目标的弹窗
+                //   · 否则                        → 真遮挡
+                if (IsPopupOf(root, hwnd)) continue;
 
                 string exe = BaseName(ProcessPath(pid));
                 blocked.Add(labels[i] + "=" + (exe.Length > 0 ? exe : "hwnd:" + root.ToInt64()));
@@ -1618,7 +1648,13 @@ namespace Dsc
             AutomationElement root = AutomationElement.FromHandle(hwnd);
             if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
 
-            AutomationElement found = FindByDescriptor(root, want, 0, 4000);
+            MatchTally tally = new MatchTally();
+            AutomationElement found = FindByDescriptor(root, want, 0, 4000, tally);
+            if (tally.Count > 1)
+                throw new InvalidOperationException(
+                    "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + desc + "\n" +
+                    "拒绝执行——点错其中哪一个都不会报错，而且可能做错事。" +
+                    "请加更具体的条件（例如补上 aid=，或写更完整的 name）。");
             if (found == null)
                 throw new InvalidOperationException("未找到匹配元素：" + desc);
 
@@ -1636,6 +1672,7 @@ namespace Dsc
             //
             // 强制走坐标：给 --coords（有些控件实现 Invoke 但行为与真实点击不同）。
             string method = "";
+            string invokeError = null;
             bool forceCoords = false;
             foreach (string a2 in args)
                 if (a2 == "--coords") forceCoords = true;
@@ -1656,10 +1693,38 @@ namespace Dsc
                     }
                     catch (Exception ex)
                     {
-                        // 控件声明支持却抛异常：记下来，退回坐标点击，不算失败。
-                        Console.Error.WriteLine("[click_element] InvokePattern 调用失败，退回坐标点击: " + ex.Message);
+                        // ★ 绝不能在 Invoke 抛异常之后再去点一次。
+                        //
+                        // 两种情况的语义完全不同：
+                        //   · 元素**不支持** Invoke   → 什么都还没发生，可以改走坐标
+                        //   · Invoke **抛异常**        → 应用可能已经开始执行了，
+                        //                                只是结果未知
+                        // 后者再补一次坐标点击，就是**可能重复触发** ——
+                        // 点两次"提交"、发两条消息、买两次单。
+                        //
+                        // 第三方审查指出这条时说得对：异常不能证明应用没开始执行。
+                        // 所以这里只记录，交给下面按"结果未知"处理，不重试。
+                        invokeError = ex.GetType().Name + ": " + ex.Message;
+                        Console.Error.WriteLine("[click_element] InvokePattern 抛异常，不再改道重试: " + invokeError);
                     }
                 }
+            }
+
+            if (invokeError != null)
+            {
+                // 结果未知：**不重试**，也不假装失败。让调用方去观察。
+                Jw ju = new Jw();
+                ju.Obj().Key("ok").Bool(false)
+                    .Key("error").Val("UnknownOutcome")
+                    .Key("matched").Val(desc)
+                    .Key("message").Val(
+                        "已调用 InvokePattern 但它抛了异常：" + invokeError + "\n" +
+                        "应用可能已经开始执行，也可能没有——异常证明不了是哪一种。" +
+                        "**不会再去点一次**，因为重复触发可能点两次提交/发两条消息。" +
+                        "请重新读树或截图确认界面状态，再决定下一步。")
+                 .End();
+                Console.WriteLine(ju.ToString());
+                return 6;
             }
 
             if (method == "InvokePattern")
@@ -1740,10 +1805,31 @@ namespace Dsc
         }
 
         /// <summary>按描述符深度优先查找第一个匹配元素。</summary>
+        // 计数器：确认描述符是否唯一。
+        //
+        // 原先遇到第一个匹配就直接返回，于是"同名按钮有两个"时，
+        // 点的是谁是遍历顺序决定的——调用方以为点的是它想点的那个。
+        // 这不报错，也不容易发现。
+        private sealed class MatchTally
+        {
+            public int Count;
+            public AutomationElement First;
+            public int Limit = 2;      // 只要确认"是不是唯一"，找到 2 个就够
+        }
+
+        /// <summary>
+        /// 按描述符查找元素，并统计匹配数量。
+        ///
+        /// 返回第一个匹配（供调用方使用），同时通过 tally 告知是否唯一。
+        /// 找到 tally.Limit 个就停止，不必遍历完整棵树 —— 我们只需要
+        /// "是否唯一"这个信息，不需要全部候选。
+        /// </summary>
         private static AutomationElement FindByDescriptor(
-            AutomationElement el, Dictionary<string, string> want, int depth, int budget)
+            AutomationElement el, Dictionary<string, string> want,
+            int depth, int budget, MatchTally tally)
         {
             if (depth > 64 || budget <= 0) return null;
+            if (tally != null && tally.Count >= tally.Limit) return tally.First;
 
             bool match = true;
             foreach (KeyValuePair<string, string> kv in want)
@@ -1773,17 +1859,34 @@ namespace Dsc
                     break;
                 }
             }
-            if (match) return el;
+            if (match)
+            {
+                if (tally != null)
+                {
+                    tally.Count++;
+                    if (tally.First == null) tally.First = el;
+                    return tally.First;
+                }
+                return el;
+            }
 
             AutomationElement child = null;
             try { child = TreeWalker.ControlViewWalker.GetFirstChild(el); } catch { }
             while (child != null)
             {
-                AutomationElement hit = FindByDescriptor(child, want, depth + 1, budget - 1);
-                if (hit != null) return hit;
+                AutomationElement hit = FindByDescriptor(child, want, depth + 1, budget - 1, tally);
+                if (tally != null && tally.Count >= tally.Limit) return tally.First;
+                if (tally == null && hit != null) return hit;
                 try { child = TreeWalker.ControlViewWalker.GetNextSibling(child); } catch { break; }
             }
-            return null;
+            return tally != null ? tally.First : null;
+        }
+
+        /// <summary>兼容旧调用：不带计数，返回第一个匹配。</summary>
+        private static AutomationElement FindByDescriptor(
+            AutomationElement el, Dictionary<string, string> want, int depth, int budget)
+        {
+            return FindByDescriptor(el, want, depth, budget, null);
         }
 
         /// <summary>
@@ -1851,7 +1954,12 @@ namespace Dsc
                 if (want.Count == 0)
                     throw new ArgumentException("描述符为空，例如 role=Edit/name=搜索");
                 label = "元素 [" + selector + "]";
-                el = FindByDescriptor(root, want, 0, 4000);
+                MatchTally tally = new MatchTally();
+                el = FindByDescriptor(root, want, 0, 4000, tally);
+                if (tally.Count > 1)
+                    return FailJson("AmbiguousTarget",
+                        "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + selector +
+                        "；写进哪一个都不会报错，所以拒绝。请加更具体的条件。");
                 if (el == null)
                     return FailJson("NotFound", "未找到匹配元素：" + selector + "；先重读一次树确认它还在");
             }
@@ -1860,10 +1968,40 @@ namespace Dsc
                 index = int.Parse(selector);
                 if (index < 0)
                     return FailJson("BadIndex", "element index must be >= 0, got " + index);
-                label = label;
+                label = "element " + index;
 
                 // 只为绑定这一个索引而抓快照：抓到 index+1 个即可，超出 index 的部分不需要。
-                Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
+                AutomationElement target = null;
+            if (byDescriptor)
+            {
+                Dictionary<string, string> want = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string part in selector.Split('/'))
+                {
+                    int eq = part.IndexOf('=');
+                    if (eq > 0) want[part.Substring(0, eq).Trim()] = part.Substring(eq + 1).Trim();
+                }
+                if (want.Count == 0)
+                    throw new ArgumentException("描述符为空，例如 role=Button/name=保存");
+                label = "元素 [" + selector + "]";
+                MatchTally tally = new MatchTally();
+                target = FindByDescriptor(root, want, 0, 4000, tally);
+                if (tally.Count > 1)
+                    return FailJson("AmbiguousTarget",
+                        "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + selector +
+                        "；在错的控件上做动作可能直接触发别的事情，所以拒绝。请加更具体的条件。");
+                if (target == null)
+                    return FailJson("NotFound", "未找到匹配元素：" + selector);
+            }
+            else
+            {
+                index = int.Parse(selector);
+                if (index < 0)
+                    return FailJson("BadIndex", "element index must be >= 0, got " + index);
+                label = "element " + index;
+            }
+
+            Snapshot snap = byDescriptor ? null
+                : SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
                 if (!snap.Map.TryGetValue(index, out el))
                     return FailJson("StaleSnapshot",
                         label + " is not present in window " + hwnd +
@@ -2008,10 +2146,19 @@ namespace Dsc
         private static int CmdDoAction(string[] args)
         {
             RequireNotHalted("do_action");
-            if (args.Length < 3) throw new ArgumentException("do_action 需要 hwnd index action");
+            if (args.Length < 3) throw new ArgumentException("do_action 需要 hwnd <index|描述符> action");
             IntPtr hwnd = new IntPtr(long.Parse(args[1]));
             RequireAllowedWindow(hwnd, "do_action");
-            int index = int.Parse(args[2]);
+
+            // 与 set_value 一致：选择器可以是序号，也可以是描述符。
+            //
+            // 序号是遍历顺序，树一变就指向别的控件。动作比写入更危险——
+            // 在错的控件上做 Raise/Expand 可能直接触发别的事情，
+            // 而且做完就收不回来。
+            string selector = args[2];
+            bool byDescriptor = selector.IndexOf('=') > 0;
+            int index = -1;
+            string label = "";
             string wanted = NormalizeAction(args[3]);
 
             if (wanted == null)
@@ -2022,20 +2169,49 @@ namespace Dsc
             AutomationElement root = AutomationElement.FromHandle(hwnd);
             if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
 
-            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
-            AutomationElement el;
-            if (!snap.Map.TryGetValue(index, out el))
-                return FailJson("StaleSnapshot",
-                    "element " + index + " is not present in window " + hwnd + "; re-read the tree");
+            AutomationElement el = null;
+            Snapshot snap = null;
+            List<string> available = null;
 
-            List<string> available;
-            if (!snap.Actions.TryGetValue(index, out available) || available.Count == 0)
-                return FailJson("NoActions",
-                    "element " + index + " has no cached secondary actions for window " + hwnd);
+            if (byDescriptor)
+            {
+                Dictionary<string, string> want = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string part in selector.Split('/'))
+                {
+                    int eq = part.IndexOf('=');
+                    if (eq > 0) want[part.Substring(0, eq).Trim()] = part.Substring(eq + 1).Trim();
+                }
+                if (want.Count == 0)
+                    throw new ArgumentException("描述符为空，例如 role=Button/name=保存");
+                label = "元素 [" + selector + "]";
+                MatchTally tally = new MatchTally();
+                el = FindByDescriptor(root, want, 0, 4000, tally);
+                if (tally.Count > 1)
+                    return FailJson("AmbiguousTarget",
+                        "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + selector +
+                        "；在错的控件上做动作可能直接触发别的事，所以拒绝。请加更具体的条件。");
+                if (el == null)
+                    return FailJson("NotFound", "未找到匹配元素：" + selector);
+                // 描述符模式没有快照，动作可用性按元素现读（见下面的兜底）
+            }
+            else
+            {
+                index = int.Parse(selector);
+                if (index < 0)
+                    return FailJson("BadIndex", "element index must be >= 0, got " + index);
+                label = "element " + index;
+                snap = SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
+                if (!snap.Map.TryGetValue(index, out el))
+                    return FailJson("StaleSnapshot",
+                        label + " is not present in window " + hwnd + "; re-read the tree");
+                snap.Actions.TryGetValue(index, out available);
+            }
 
-            if (!available.Contains(wanted))
+            // 序号模式用快照里缓存的可用动作；描述符模式按元素现读。
+            // 两者都为 null 时不做预检，让下面的 Pattern 尝试自己失败并报出来。
+            if (available != null && available.Count > 0 && !available.Contains(wanted))
                 return FailJson("ActionNotAvailable",
-                    "secondary action '" + wanted + "' is not available for element " + index +
+                    "secondary action '" + wanted + "' is not available for " + label +
                     "; available actions: " + string.Join(", ", available.ToArray()));
 
             string role = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
@@ -2047,14 +2223,14 @@ namespace Dsc
                 if (wanted == "Raise")
                 {
                     if (!el.TryGetCurrentPattern(WindowPattern.Pattern, out p))
-                        return FailJson("PatternLost", "element " + index + " no longer exposes WindowPattern");
+                        return FailJson("PatternLost", label + " no longer exposes WindowPattern");
                     // 置顶：先还原再前置，避免对已最小化的窗口直接 SetWindowVisualState 失败
                     ((WindowPattern)p).SetWindowVisualState(WindowVisualState.Normal);
                 }
                 else if (wanted.StartsWith("Scroll "))
                 {
                     if (!el.TryGetCurrentPattern(ScrollPattern.Pattern, out p))
-                        return FailJson("PatternLost", "element " + index + " no longer exposes ScrollPattern");
+                        return FailJson("PatternLost", label + " no longer exposes ScrollPattern");
                     ScrollPattern sp = (ScrollPattern)p;
                     if (wanted == "Scroll Up") sp.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeDecrement);
                     else if (wanted == "Scroll Down") sp.Scroll(ScrollAmount.NoAmount, ScrollAmount.LargeIncrement);
@@ -2064,7 +2240,7 @@ namespace Dsc
                 else
                 {
                     if (!el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p))
-                        return FailJson("PatternLost", "element " + index + " no longer exposes ExpandCollapsePattern");
+                        return FailJson("PatternLost", label + " no longer exposes ExpandCollapsePattern");
                     ExpandCollapsePattern ec = (ExpandCollapsePattern)p;
                     // ExpandCollapsePattern 的真实 API 是 Expand() / Collapse()，
                     // 没有可写属性（反射确认过，别再凭记忆写）。
@@ -2075,10 +2251,10 @@ namespace Dsc
                 Jw j = new Jw();
                 j.Obj().Key("ok").Bool(true)
                     .Key("hwnd").Num(hwnd.ToInt64())
-                    .Key("index").Num(index)
+                    .Key("index").Num(index).Key("selector").Val(selector)
                     .Key("role").Val(role)
                     .Key("action").Val(wanted)
-                    .Key("revision").Num(snap.Revision)
+                    .Key("revision").Num(snap != null ? snap.Revision : 0)
                  .End();
                 Console.WriteLine(j.ToString());
                 return 0;

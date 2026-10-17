@@ -203,7 +203,20 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "15. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "15. 截图→记录→点击引用 这条链（2.9.2 的断点）"
+# toolset 只返回 filepath/text 时，插件记下来的几何全是 undefined，
+# 于是每次带 shotId 的点击都误报"窗口尺寸从 undefinedxundefined 变了"。
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-shot-chain.mjs >/dev/null 2>&1; then
+    ok "几何作为字段返回 / shotId 模型可见 / 伪造 ID 被拒 / 无误报"
+  else
+    bad "截图坐标链断了 —— 单独跑 node tools/test-shot-chain.mjs"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "16. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

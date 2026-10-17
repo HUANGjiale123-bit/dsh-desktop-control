@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.9.2'
+const PLUGIN_VERSION = '2.9.3'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -714,15 +714,35 @@ function applyInner(ctx, config = {}) {
 
       // 记录这张截图的"坐标出处"，让后续点击可以绑定到它。
       const shotId = `shot-${args.hwnd}-${Date.now()}`
-      rememberShot(shotId, {
-        hwnd: args.hwnd,
-        x: r.originX,
-        y: r.originY,
-        w: r.width,
-        h: r.height,
-      })
 
-      const out = { filepath, summary: r.text, shotId }
+      // 几何要**校验过再记**。缺字段时记下 undefined 会让后面每一次比较
+      // 都判"变了"，于是一个本该有用的校验变成每次误报。
+      const geom = {
+        x: Number(r.originX),
+        y: Number(r.originY),
+        w: Number(r.width),
+        h: Number(r.height),
+      }
+      const geomOk =
+        Number.isFinite(geom.x) && Number.isFinite(geom.y) &&
+        Number.isFinite(geom.w) && Number.isFinite(geom.h) &&
+        geom.w > 0 && geom.h > 0
+      rememberShot(shotId, { hwnd: args.hwnd, ...(geomOk ? geom : {}), geomOk })
+
+      // shotId 必须出现在**模型能看到的地方**。
+      //
+      // render 只输出 image 和 summary，所以光把 shotId 放进返回对象里
+      // 模型是看不见的 —— 看不见就不会传回来，这个契约等于不存在。
+      const summary =
+        r.text +
+        (geomOk
+          ? `
+本次截图 ID：${shotId}` +
+            `（把这个 ID 传给 desktop_click 的 shotId，插件会核对窗口是否被移动或改过大小）`
+          : `
+⚠ 这次没拿到窗口几何，无法登记坐标出处 —— 点击时传 shotId 也核对不了。`)
+
+      const out = { filepath, summary, shotId }
       return image ? { ...out, image } : out
     },
     presentCall: args => ({ card: 'generic', title: `截取窗口 ${args.hwnd}`, kind: 'read' }),
@@ -788,22 +808,18 @@ function applyInner(ctx, config = {}) {
       //
       // 这一步在**点击之前**做：窗口被移动/改过大小意味着布局可能变了，
       // 那时最该做的是重新截图，而不是先点下去再解释为什么没点中。
-      let shotWarn = ''
+      // 只做"能不能确认这张截图属于这个窗口"的检查；几何比对交给
+      // toolset.click —— 它本来就要列窗口，复用那份数据，零额外开销。
+      let expectedGeom = null
       if (args.shotId) {
-        const pre = await set.tools.listWindows()
-        const win = pre.isError
-          ? null
-          : (pre.windows ?? []).find((w) => String(w.hwnd) === String(args.hwnd))
-        const chk = checkShot(args.shotId, args.hwnd, win)
+        const chk = checkShot(args.shotId, args.hwnd)
         if (chk.reject) throw new Error(chk.reject)
-        shotWarn = chk.warn ?? ''
+        expectedGeom = chk.geom ?? null
       }
 
-      const r = await set.tools.click(args)
+      const r = await set.tools.click({ ...args, expectedGeom })
       if (r.isError) throw new Error(r.text)
-      return { result: shotWarn ? `${shotWarn}
-
-${r.text}` : r.text }
+      return { result: r.text }
     },
     presentCall: args => ({
       card: 'generic',
@@ -1078,37 +1094,51 @@ ${r.text}` : r.text }
    * window 空间的坐标往往仍然有效；一拒绝就会把正常流程打断在猜测上。
    * 但 hwnd 对不上是明确错误，那种情况要拒绝。
    */
-  function checkShot(shotId, hwnd, win) {
+  function checkShot(shotId, hwnd) {
     const rec = recentShots.get(String(shotId))
+
+    // 这里只判"能不能确认这张截图就是这个窗口的、且足够新"。
+    // 几何是否变了交给 toolset.click 比 —— 它本来就要列窗口，
+    // 复用那份数据不会多起一个进程。
+    //
+    // 分级依据仍是"能不能证明失效"：
+    //   · 记录不存在        → 无法核对 → 拒绝（别假装核对过）
+    //   · hwnd 不同         → 确定错 → 拒绝
+    //   · 几何没记下来      → 无法核对 → 拒绝
+    //   · 过期              → 无法保证 → 拒绝
+    // 只平移是唯一放行的情况，而且 toolset 里还会再提示一次。
     if (!rec) {
-      return { warn: `⚠ 找不到截图 "${shotId}" 的记录（可能太旧已被清理）。无法核对坐标是否仍然有效。` }
+      return {
+        reject:
+          `失败：找不到截图 "${shotId}" 的记录。可能是插件重启过，或者这个 ID 太旧已被清理。
+` +
+          `坐标是否仍然有效无法核对。请重新截一张图，或去掉 shotId（那样插件就不做这项核对，由你负责）。`,
+      }
     }
     if (String(rec.hwnd) !== String(hwnd)) {
       return {
         reject:
           `失败：截图 "${shotId}" 是窗口 ${rec.hwnd} 的，而这次点击的目标是 ${hwnd}。` +
-          `两张不同的窗口坐标不能混用。`,
+          `两张不同窗口的坐标不能混用。`,
       }
     }
-    if (Date.now() - rec.at > SHOT_TTL_MS) {
-      return { warn: `⚠ 截图 "${shotId}" 已经是 ${Math.round((Date.now() - rec.at) / 60000)} 分钟前的，界面可能已经变了。` }
-    }
-    if (win && (win.width !== rec.w || win.height !== rec.h)) {
+    if (rec.geomOk !== true) {
       return {
-        warn:
-          `⚠ 截图 "${shotId}" 拍摄时窗口是 ${rec.w}x${rec.h}，现在是 ${win.width}x${win.height}。` +
-          `界面布局可能已经变了，坐标未必还指向同一个控件。建议重新截图。`,
+        reject:
+          `失败：截图 "${shotId}" 没有记录到有效的窗口几何，无法核对坐标是否过期。
+` +
+          `这通常意味着截图的返回里缺了 origin/尺寸字段。请重新截一张图。`,
       }
     }
-    if (win && (win.x !== rec.x || win.y !== rec.y)) {
+    const ageMs = Date.now() - rec.at
+    if (ageMs > SHOT_TTL_MS) {
       return {
-        warn:
-          `⚠ 窗口从 (${rec.x},${rec.y}) 移到了 (${win.x},${win.y})。` +
-          `如果你用的是 space="window"（图内坐标），这没关系；` +
-          `如果是 space="desktop"（桌面绝对坐标），原点已经变了。`,
+        reject:
+          `失败：截图 "${shotId}" 是 ${Math.round(ageMs / 60000)} 分钟前的，` +
+          `太久无法保证界面没变。请重新截图。`,
       }
     }
-    return { warn: '' }
+    return { geom: { x: rec.x, y: rec.y, w: rec.w, h: rec.h } }
   }
 
   /**

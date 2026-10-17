@@ -82,25 +82,46 @@ console.log()
 console.log('── 2. set_value 必须接受描述符，而不是只认遍历序号 ──')
 
 {
-  // 报错应当是"未找到"或"激活失败"，**不能是 FormatException**
-  // —— FormatException 说明它把 role=Edit/... 当成数字去 parse 了。
+  // ── 断言要精确，不能"只要不是 FormatException 就算过" ──
+  //
+  // 上一版写的是"不是 FormatException 就 ok"。第三方审查指出得对：
+  // 那个判据会把**无输出、崩溃、超时、以及任何其它错误**统统算成通过。
+  // 它只能区分"把描述符当数字解析"这一种失败，其余的失败全被放过。
+  //
+  // 现在要求：必须是结构化结果，且错误码精确落在允许的集合里。
   const r = run(['set_value', String(target.hwnd), 'role=Edit/name=绝对不存在的控件xyz', 'hello'], {
     DSC_ALLOWED_APPS: exeOf(target),
   })
-  if (r.json?.error === 'FormatException') {
-    bad('描述符被当成数字解析了 —— 说明没支持描述符模式')
+
+  if (r.json === null) {
+    bad(`没有拿到结构化 JSON（stdout=${JSON.stringify(r.stdout.slice(0, 60))}）`)
   } else {
-    ok(`描述符被正确识别（错误是 ${r.json?.error}，不是 FormatException）`)
+    if (r.json.error === 'FormatException') {
+      bad('描述符被当成数字解析了 —— 说明没支持描述符模式')
+    } else if (r.json.error === 'NotFound') {
+      ok('描述符被正确识别，并精确报 NotFound')
+    } else if (r.json.error === 'InvalidOperationException' && /激活/.test(r.json.message ?? '')) {
+      // 沙箱里激活不了窗口，这属于环境限制；关键是**错误码精确**，
+      // 而不是把任何异常都当成功。
+      ok('描述符被正确识别（环境无法激活窗口，错误信息明确）')
+    } else {
+      bad(`描述符模式的错误码不符预期：${JSON.stringify(r.json.error)} ${String(r.json.message ?? '').slice(0, 60)}`)
+    }
   }
 
-  // 序号模式仍然可用：越界应报 StaleSnapshot，而不是崩
+  // 序号模式仍然可用：越界必须精确报 StaleSnapshot，且消息里带得上序号
   const r2 = run(['set_value', String(target.hwnd), '99999', 'hello'], {
     DSC_ALLOWED_APPS: exeOf(target),
   })
-  if (r2.json?.error === 'StaleSnapshot' || r2.json?.error === 'InvalidOperationException') {
-    ok('序号模式仍然工作（越界走明确的错误码）')
+  if (r2.json === null) {
+    bad('序号模式没有返回结构化 JSON')
+  } else if (r2.json.error === 'StaleSnapshot') {
+    if (/99999/.test(r2.json.message ?? '')) ok('序号越界报 StaleSnapshot，且消息带得上序号')
+    else bad(`StaleSnapshot 的消息里没有序号：${String(r2.json.message ?? '').slice(0, 60)}`)
+  } else if (r2.json.error === 'InvalidOperationException' && /激活/.test(r2.json.message ?? '')) {
+    ok('序号模式被激活限制拦下（环境问题，不是解析问题）')
   } else {
-    bad(`序号模式行为异常：${JSON.stringify(r2.json?.error)}`)
+    bad(`序号模式行为异常：${JSON.stringify(r2.json.error)}`)
   }
 }
 
