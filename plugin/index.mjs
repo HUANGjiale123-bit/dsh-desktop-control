@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.13.1'
+const PLUGIN_VERSION = '2.13.2'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1348,7 +1348,42 @@ function applyInner(ctx, config = {}) {
    * 于是你在没有任何提示的情况下被操控了好几轮。用户指出"你操作腾讯视频
    * 不就是 computer use 吗"——对的，那就是 computer use，就该有提示。
    */
+  /**
+   * 闸门当前是不是拉着的（用户按了 ESC）。
+   *
+   * 读文件即可 —— 不存在、或内容表示"未拉下"都算没拉。
+   * 这里**只读**，绝不写；写闸门是 ESC 监听器和 halt 的事。
+   */
+  function isHalted() {
+    try {
+      const p = gateChecked()
+      if (!existsSync(p)) return false
+      const txt = readFileSync(p, 'utf8')
+      return !/^\s*(clear|0|false)/i.test(txt)
+    } catch {
+      return false
+    }
+  }
+
   function ensureIndicator() {
+    // ── 用户按过 ESC 就**不要**再拉起指示层 ──
+    //
+    // 这一条是用户实测报上来的：他在别的窗口用这个插件，物理按 ESC 想
+    // "先暂停一下"，结果蓝条过一会儿又出现了 —— 看着像是插件不听他的。
+    //
+    // 原因是 ensureIndicator 由 onAuthorized 触发：模型每重试一次
+    // （因为动作被闸门拒绝了，它会重试），授权就走一次，指示层就被
+    // 重新拉起来一次。于是屏幕上反复出现"它又活了"。
+    //
+    // 闸门拉着的时候，**任何"活过来"的迹象都不该有**。用户叫停就是叫停。
+    if (isHalted()) {
+      return {
+        ok: false,
+        halted: true,
+        reason: '用户按了 ESC 急停，指示层不再自动拉起。',
+      }
+    }
+
     // 先把锚点推后，再决定要不要拉起 —— 已经在跑时这里只做前者，
     // 所以连续操作期间不会重建进程、屏幕上不会闪。
     touchActivity()
@@ -1762,6 +1797,20 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const label = args.label ?? '已激活'
 
+      // 用户按过 ESC 之后就不要再拉起指示层了。
+      //
+      // 这是"叫停就该安静地停住"的一部分：蓝条重新出现，用户看到的是
+      // "它又开始干活了"，而他几秒前刚按过 ESC。
+      if (isHalted()) {
+        throw new Error(
+          '用户已按 ESC 叫停，指示层不会重新拉起。\n' +
+            '  这不是故障 —— 是急停生效中。解除需要**用户本人**执行：\n' +
+            '    dsc.exe stop --clear\n' +
+            '  （或删掉闸门文件 ' + gateChecked() + '）\n' +
+            '  **不要试图绕过**：绕过急停比停下来更糟。',
+        )
+      }
+
       // 光带、逃生条、ESC 钩子全在 dsc-esc 一个进程里。
       //
       // 原先拆成两个程序（dsc-edge 画光带、dsc-esc 管停止），结果是两者
@@ -1968,6 +2017,24 @@ function applyInner(ctx, config = {}) {
       lines.push(g.ok
         ? '闸门可用（已实测：写→查→删→再查全部通过）。'
         : '★ 闸门实测未通过 —— ESC 可能只关界面而不拦住操作。看上面「闸门实测」那一行的 stage 与 error。')
+
+      // ── 闸门拉着的时候，必须告诉用户**怎么解除** ──
+      //
+      // 用户实测报上来过：他在别的窗口用这个插件，按 ESC 想"先暂停"，
+      // 结果蓝条过一会儿又冒出来（ensureIndicator 不看闸门，已修）。
+      // 而更要紧的是：当时他不知道怎么恢复 —— 解除只有一条
+      // `dsc.exe stop --clear`，没有任何工具暴露它，diagnose 也没说过。
+      //
+      // 急停的语义是"暂停"，暂停就必须有"继续"。只有停止没有继续，
+      // 用户就只能删文件，或者以为插件坏了。
+      if (isHalted()) {
+        lines.push('')
+        lines.push('⚠ 急停**正在生效**（用户按了 ESC）。所有变更性操作都会被拒绝。')
+        lines.push('  解除方式（需要用户本人执行）：')
+        lines.push('    ' + escPath.replace(/dsc-esc\.exe$/, 'dsc.exe') + ' stop --clear')
+        lines.push('  或删除闸门文件：' + gateChecked())
+        lines.push('  模型**不应该**尝试自行解除 —— 急停是用户发起的，也该由用户结束。')
+      }
       return { result: lines.join(String.fromCharCode(10)) }
     },
     presentCall: () => ({ card: 'generic', title: '诊断桌面控制状态', kind: 'read' }),

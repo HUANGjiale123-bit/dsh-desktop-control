@@ -243,7 +243,20 @@ else
   echo "  （跳过：找不到 node 或 dsc.exe）"
 fi
 
-head_ "18. 改变布局的动作必须让旧截图坐标失效"
+head_ "18. 用户按 ESC 之后必须安静地停住（实测反馈的 bug）"
+# 用户原话："我物理按 esc 中止后，其实我的意思就是任务先暂停，但你老是会执拗的打开"。
+# 根因是 ensureIndicator 不看闸门：模型每重试一次，指示层就被重新拉起一次。
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-halt-quiet.mjs >/dev/null 2>&1; then
+    ok "急停生效期间不拉起指示层，且告诉用户怎么解除"
+  else
+    bad "急停之后指示层还会冒出来 —— 单独跑 node tools/test-halt-quiet.mjs"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "19. 改变布局的动作必须让旧截图坐标失效"
 # 滚轮滚动后，同一张截图上的坐标全部指向别处。不作废的话旧 shotId 会
 # 通过全部检查（窗口没移、没改大小、没过期），然后点到完全不同位置。
 if [ -n "$NODE" ]; then
@@ -256,7 +269,7 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "19. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "20. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

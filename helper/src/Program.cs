@@ -439,8 +439,11 @@ namespace Dsc
         {
             if (!IsHalted()) return;
             throw new InvalidOperationException(
-                "已被急停：闸门文件存在（" + GatePath() + "），拒绝执行 " + action + "。" +
-                "确认安全后用 `dsc.exe stop --clear` 解除。");
+                "已被急停：闸门文件存在（" + GatePath() + "），拒绝执行 " + action + "。\n" +
+                "这不是故障，是用户按了 ESC 叫停。\n" +
+                "**不要重试** —— 重试不会成功，只会让指示层反复冒出来，用户看起来像是插件不听他的。\n" +
+                "也不要自行解除：急停是用户发起的，该由用户结束（删掉 " + GatePath() + " 即可）。\n" +
+                "现在该做的是：停下，把情况告诉用户，等他决定。");
         }
 
         /* ═══════════════ 应用白名单闸门 ═══════════════
@@ -871,7 +874,24 @@ namespace Dsc
         /// </summary>
         private static int CmdHalt(string[] args)
         {
-            string reason = args.Length > 1 ? args[1] : "由调用方触发";
+            // 解析 --reason <值>，同时兼容直接给位置参数。
+            //
+            // 上一版直接取 args[1]，于是 `halt --reason "用户按了 ESC"`
+            // 把字面的 "--reason" 写进了闸门文件，而真正的原因丢了。
+            // 闸门内容后来会被 diagnose 显示成"为什么被停"，
+            // 所以这不只是丑，它让事后追查失真。
+            string reason = "由调用方触发";
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--reason")
+                {
+                    if (i + 1 < args.Length) reason = args[++i];
+                }
+                else if (!args[i].StartsWith("--"))
+                {
+                    reason = args[i];
+                }
+            }
             EnsureHalt(reason);
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
