@@ -1110,11 +1110,17 @@ export function createDesktopToolset(options = {}) {
         if (el) {
           lines.push(`  「${el.name ?? '（无名字）'}」 ${el.role ?? '?'}`)
           lines.push(`  矩形：(${el.x},${el.y}) ${el.w}x${el.h}  中心：(${el.x + Math.floor(el.w / 2)},${el.y + Math.floor(el.h / 2)})`)
-          lines.push(
-            el.actionable
-              ? `  → 可交互。**建议用 desktop_click_element 传 name="${el.name}" 去点**，比坐标可靠。`
-              : `  → 不是可交互控件（多半是背景或文字）。`,
-          )
+          // 三种状态要分清：
+          //   · 可点击控件 → 建议用描述符
+          //   · 标题栏     → 它不能"点"，但**可以拖**，别把它说成背景
+          //   · 其它       → 多半是容器或文字
+          if (el.actionable) {
+            lines.push(`  → 可交互。**建议用 desktop_click_element 传 name="${el.name}" 去点**，比坐标可靠。`)
+          } else if (el.role === 'TitleBar') {
+            lines.push(`  → 这是**标题栏**：不能点击，但可以拖动它来移动窗口（desktop_drag）。`)
+          } else {
+            lines.push(`  → 不是可交互控件（多半是容器/背景/文字）。`)
+          }
         }
       }
 

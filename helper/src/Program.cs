@@ -1799,10 +1799,20 @@ namespace Dsc
         ///    "6,755 个字符" 变成 "70 个字符，共"，选中内容也高亮了。
         ///    所以拖动本身是通的。
         ///
-        /// 3. 但**拖记事本（UWP）的标题栏仍然不动**。光标到位、按键释放，
-        ///    窗口就是不动。推测它的标题栏拖动走的是更底层的指针事件，
-        ///    不吃 mouse_event 合成的消息。这条尚未在别的窗口上复现或排除，
-        ///    所以在"能拖动窗口"这件事上不要给用户打包票。
+        /// 3. 拖记事本的标题栏**曾经**不动，而我当时把原因猜成"UWP 标题栏
+        ///    不吃合成消息"——**那个结论是错的**，已用 desktop_whatis 纠正。
+        ///
+        ///    真实原因：我以为的标题栏位置 (1530,197) 上面盖着一层
+        ///    `Pane @(1169,191 518x48)`（标签栏容器）。鼠标事件被那个 Pane
+        ///    收走，它不处理窗口拖动。真正的标题栏在 (1714,205)——
+        ///    那里在 Pane 右边、窗口按钮左边。
+        ///
+        ///    从 (1714,205) 拖到 (1550,327)，窗口从 (1100,177) 移到了
+        ///    (934,300)。**所以 UWP 标题栏是吃 mouse_event 的。**
+        ///
+        ///    教训：控件矩形会重叠，而 WindowFromPoint / FromPoint 返回的是
+        ///    z 序最上层的那个。想知道"这一点到底是什么"，用 desktop_whatis 问，
+        ///    不要看截图猜。
         ///
         /// ── 为什么每一步都要检查急停 ──
         ///
@@ -2267,7 +2277,14 @@ namespace Dsc
                 if (el == null) return null;
 
                 string name = SnapshotOps.SafeStr(delegate { return el.Current.Name; });
-                string role = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
+                // ★ 保留带前缀的原始名（ControlType.Button）用于**判断**，
+                //   只在输出时去掉前缀。
+                //
+                //   第一版这里直接 Replace 了再拿去和 "ControlType.Button" 比，
+                //   于是永远不相等 —— "最大化" 按钮被报成"不是可交互控件"。
+                //   判断和展示必须用同一个值，或者分开两个变量。
+                string roleFull = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName; });
+                string role = roleFull == null ? null : roleFull.Replace("ControlType.", "");
                 string aid = SnapshotOps.SafeStr(delegate { return el.Current.AutomationId; });
                 System.Windows.Rect r;
                 try { r = el.Current.BoundingRectangle; } catch { return null; }
@@ -2277,16 +2294,16 @@ namespace Dsc
                 // 只有窗口背景 / Pane 这类，说明调用方很可能点在空白处。
                 bool named = !string.IsNullOrEmpty(name);
                 bool interactive =
-                    role == "ControlType.Button" || role == "ControlType.Hyperlink" ||
-                    role == "ControlType.MenuItem" || role == "ControlType.TabItem" ||
-                    role == "ControlType.CheckBox" || role == "ControlType.RadioButton" ||
-                    role == "ControlType.ComboBox" || role == "ControlType.Edit" ||
-                    role == "ControlType.ListItem" || role == "ControlType.TreeItem";
+                    roleFull == "ControlType.Button" || roleFull == "ControlType.Hyperlink" ||
+                    roleFull == "ControlType.MenuItem" || roleFull == "ControlType.TabItem" ||
+                    roleFull == "ControlType.CheckBox" || roleFull == "ControlType.RadioButton" ||
+                    roleFull == "ControlType.ComboBox" || roleFull == "ControlType.Edit" ||
+                    roleFull == "ControlType.ListItem" || roleFull == "ControlType.TreeItem";
                 actionable = named && interactive;
 
                 StringBuilder sb = new StringBuilder();
                 sb.Append("{\"name\":").Append(name == null ? "null" : Jw.Str(name))
-                  .Append(",\"role\":").Append(role == null ? "null" : Jw.Str(role.Replace("ControlType.", "")))
+                  .Append(",\"role\":").Append(role == null ? "null" : Jw.Str(role))
                   .Append(",\"aid\":").Append(aid == null ? "null" : Jw.Str(aid))
                   .Append(",\"x\":").Append((int)r.X)
                   .Append(",\"y\":").Append((int)r.Y)
