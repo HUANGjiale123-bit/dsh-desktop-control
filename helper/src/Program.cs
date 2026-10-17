@@ -438,7 +438,7 @@ namespace Dsc
         private static void RequireNotHalted(string action)
         {
             if (!IsHalted()) return;
-            throw new InvalidOperationException(
+            throw new DscError("Halted", 
                 "已被急停：闸门文件存在（" + GatePath() + "），拒绝执行 " + action + "。\n" +
                 "这不是故障，是用户按了 ESC 叫停。\n" +
                 "**不要重试** —— 重试不会成功，只会让指示层反复冒出来，用户看起来像是插件不听他的。\n" +
@@ -790,8 +790,13 @@ namespace Dsc
             catch (Exception ex)
             {
                 Jw e = new Jw();
+                // 错误码优先取异常自带的。类名只在没有码时兜底 ——
+                // "InvalidOperationException" 这种对调用方毫无意义。
+                // C# 5：没有 null-conditional 运算符
+                DscError dscEx = ex as DscError;
+                string code = dscEx != null ? dscEx.Code : ex.GetType().Name;
                 e.Obj().Key("ok").Bool(false)
-                    .Key("error").Val(ex.GetType().Name)
+                    .Key("error").Val(code)
                     .Key("message").Val(ex.Message)
                  .End();
                 Console.WriteLine(e.ToString());
@@ -872,6 +877,23 @@ namespace Dsc
         /// 用法：dsc.exe halt [原因]
         /// 之后所有变更性动作（点击/输入/按键）一律失败，直到 stop --clear。
         /// </summary>
+        /// <summary>
+        /// 带**错误码**的异常。
+        ///
+        /// 为什么需要它：Main 的兜底 catch 一直用 `ex.GetType().Name` 当错误码，
+        /// 于是 RequireNotHalted 抛出来的是 "InvalidOperationException"。
+        /// 结果是插件侧的错误建议表查不到 Halted，退化成"未知 → 重新观察"，
+        /// 而那条消息里明明写着"不要重试" —— 自相矛盾。
+        ///
+        /// 实测发现的：按 ESC 之后调 read_window，返回的建议是 reobserve。
+        /// 所以错误码必须是**抛的人声明的事实**，不能是异常类名。
+        /// </summary>
+        private class DscError : Exception
+        {
+            public readonly string Code;
+            public DscError(string code, string message) : base(message) { Code = code; }
+        }
+
         private static int CmdHalt(string[] args)
         {
             // 解析 --reason <值>，同时兼容直接给位置参数。
