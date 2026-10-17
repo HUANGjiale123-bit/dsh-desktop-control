@@ -820,33 +820,66 @@ export function createDesktopToolset(options = {}) {
       }
     },
 
-    async click({ hwnd, x, y, button }) {
+    async click({ hwnd, x, y, button, space }) {
+      /* 坐标空间：默认 desktop（桌面绝对），可选 window（图内坐标）。
+       *
+       * ── 为什么加这个参数 ──
+       *
+       * desktop_screenshot 返回的是"图内坐标 + 窗口原点"，而 click 要的是
+       * 加好原点的桌面坐标。两个工具用两套命名，接口上没有把换算收进去，
+       * 于是踩点极其自然：第三方实测把图内坐标 (719,866) 直接传给 click，
+       * 结果点在了桌面 (719,866) —— 恰好落在另一个按钮上弹出菜单，
+       * 而工具返回"已在 (719,866) 执行点击"，**看起来完全成功**。
+       *
+       * 另一种做法是默认改成 window 空间，但那会静默改变现有调用的含义。
+       * 所以保留 desktop 为默认，另给一个显式选项，并且**在返回里回显
+       * 最终落到的桌面坐标**——传错了能立刻看出来。
+       */
+      const useWindowSpace = space === 'window'
+
       /* 先做范围检查，再走授权。
        *
-       * 顺序很重要：点击是**桌面绝对坐标**，而 authorize 只按 hwnd 校验。
-       * 于是会出现"hwnd 是记事本、坐标却在 DSH 窗口里"这种组合——
-       * 授权白问了用户一次，然后被 helper 的 WindowFromPoint 挡掉。
-       * 实测遇到过：白名单里因此多出一个用户其实没打算放行的应用。
+       * 顺序很重要：authorize 只按 hwnd 校验。于是会出现"hwnd 是记事本、
+       * 坐标却在 DSH 窗口里"这种组合——授权白问了用户一次，然后被 helper
+       * 的 WindowFromPoint 挡掉。实测遇到过：白名单里因此多出一个用户
+       * 其实没打算放行的应用。
        *
-       * 所以这里先用 list_windows 拿到该窗口的矩形做范围检查，
-       * 坐标不在窗口内就直接拒绝，并且**不触发授权询问**。
+       * 所以这里先拿窗口矩形做范围检查，坐标不在窗口内就直接拒绝，
+       * 并且**不触发授权询问**。
        */
       const pre = await runHelper(['list_windows'])
-      if (pre.ok) {
-        const w0 = (pre.windows ?? []).find((t) => String(t.hwnd) === String(hwnd))
-        if (w0) {
-          const inside =
-            x >= w0.x && x < w0.x + w0.width && y >= w0.y && y < w0.y + w0.height
-          if (!inside) {
-            return {
-              isError: true,
-              text:
-                `失败：坐标 (${x},${y}) 不在窗口 ${hwnd} 的范围内` +
+      const w0 = pre.ok
+        ? (pre.windows ?? []).find((t) => String(t.hwnd) === String(hwnd))
+        : undefined
+
+      if (useWindowSpace && !w0) {
+        return {
+          isError: true,
+          text:
+            `失败：无法取得窗口 ${hwnd} 的矩形，因此无法把图内坐标换算成桌面坐标。\n` +
+            `请先用 desktop_list_windows 确认窗口还在，或改用 space="desktop" 直接给桌面绝对坐标。`,
+        }
+      }
+
+      // 图内坐标 → 桌面坐标（纯平移，没有缩放）
+      const dx = useWindowSpace ? w0.x + x : x
+      const dy = useWindowSpace ? w0.y + y : y
+
+      if (w0) {
+        const inside = dx >= w0.x && dx < w0.x + w0.width && dy >= w0.y && dy < w0.y + w0.height
+        if (!inside) {
+          return {
+            isError: true,
+            text: useWindowSpace
+              ? `失败：图内坐标 (${x},${y}) 超出窗口 ${hwnd} 的尺寸` +
+                `（${w0.width}x${w0.height}）。换算后的桌面坐标是 (${dx},${dy})。\n` +
+                `已跳过授权询问——这个点击本来就到不了目标窗口。`
+              : `失败：桌面坐标 (${x},${y}) 不在窗口 ${hwnd} 的范围内` +
                 `（该窗口位于 ${w0.x},${w0.y}，尺寸 ${w0.width}x${w0.height}）。\n` +
                 `点击用的是**桌面绝对坐标**，不是窗口内相对坐标。` +
-                `正确做法：用 desktop_screenshot 拿到窗口原点，再把图内坐标加上原点。\n` +
+                `若你手上是截图里的图内坐标，请加 space:"window" 让插件自己加原点，` +
+                `或自己按"原点 + 图内坐标"换算。\n` +
                 `已跳过授权询问——这个点击本来就到不了目标窗口。`,
-            }
           }
         }
       }
@@ -854,9 +887,54 @@ export function createDesktopToolset(options = {}) {
       const auth = await authorize(hwnd, 'click')
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['click', String(x), String(y), button ?? 'left'], 'configured')
+      const r = await runHelper(['click', String(dx), String(dy), button ?? 'left'], 'configured')
       if (!r.ok) return { isError: true, text: failMessage(r) }
-      return { text: `已在 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键点击。` }
+
+      // ── 动作后的重新观察 ──
+      //
+      // 这里原来只说"已在 (x,y) 执行点击"。那句话证明不了任何事情：
+      // 光标没移过去的点击、点到别的窗口上的点击，返回的都是同一句话。
+      //
+      // 现在用 helper 回读到的两件事，把"点了"和"点成了"分开：
+      //   cursorLanded — 光标是否真的停在目标坐标
+      //   atExe        — 那个位置现在属于哪个应用
+      const lines = [
+        `已在桌面坐标 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键点击。`,
+      ]
+      if (useWindowSpace) {
+        lines.push(
+          `  坐标空间: window（图内 (${x},${y}) + 窗口原点 (${w0.x},${w0.y}) = 桌面 (${dx},${dy})）`,
+        )
+      } else {
+        lines.push(`  坐标空间: desktop（直接按桌面绝对坐标使用，未做换算）`)
+      }
+
+      if (r.cursorLanded === true) {
+        lines.push(`  光标已到位（回读 = ${r.cursorAfter}）`)
+      } else {
+        lines.push(
+          `  ⚠ 光标回读为 ${r.cursorAfter}，与目标 (${r.clickedX},${r.clickedY}) 不一致` +
+            ` —— 鼠标可能根本没移过去（沙箱/权限环境常见）。这次点击**没有真正发生**。`,
+        )
+      }
+
+      if (r.atExe) {
+        const target = String(auth.window?.exe ?? '').split(/[\\/]/).pop().toLowerCase()
+        if (target && r.atExe.toLowerCase() !== target) {
+          lines.push(
+            `  ⚠ 该坐标现在属于「${r.atExe}」，不是目标窗口的应用「${target}」` +
+              ` —— 点击落在了别的窗口上。`,
+          )
+        } else {
+          lines.push(`  落点属于「${r.atExe}」（与目标一致）`)
+        }
+      }
+
+      lines.push(
+        `  注意：以上只核实到"点击已发出且落在预期窗口"，` +
+          `**不能**证明应用响应了。要确认效果请重读界面或截图。`,
+      )
+      return { text: lines.join('\n') }
     },
 
     async clickElement({ hwnd, descriptor, button }) {

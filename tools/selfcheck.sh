@@ -152,7 +152,20 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "11. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "11. 坐标空间与点击验证（缺陷 4 回归）"
+# 图内坐标当桌面坐标传 → 点到别处还报成功。现在 space="window" 自己加原点，
+# 且返回里回显最终落到的桌面坐标，传错能立刻看出来。
+if [ -n "$NODE" ] && [ -f helper/bin/dsc.exe ]; then
+  if "$NODE" tools/test-click-space.mjs >/dev/null 2>&1; then
+    ok "space 换算正确 / 拒绝时给出换算结果 / 超范围不白问授权"
+  else
+    bad "坐标空间有问题 —— 单独跑 node tools/test-click-space.mjs 看明细"
+  fi
+else
+  echo "  （跳过：找不到 node 或 dsc.exe）"
+fi
+
+head_ "12. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

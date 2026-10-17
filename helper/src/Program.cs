@@ -1412,12 +1412,31 @@ namespace Dsc
 
             // 回读光标位置：调用成功不代表点在了期望处，读回来才是证据。
             Native.POINT after;
-            string actual = Native.GetCursorPos(out after) ? (after.X + "," + after.Y) : "?";
+            bool gotCursor = Native.GetCursorPos(out after);
+            string actual = gotCursor ? (after.X + "," + after.Y) : "?";
+            bool landed = gotCursor && after.X == x && after.Y == y;
+
+            // 点完之后再问一次"这个点现在属于谁"。
+            //
+            // 这一条是"动作后的重新观察"里最便宜、也最有用的一条：
+            //   · 光标有没有真的移过去（landed）
+            //   · 那个位置属于哪个应用（atExe）
+            // 两者合起来能区分"根本没点成"和"点了但应用没反应"——
+            // 在那之前，这两种情况返回的是一模一样的一句话。
+            IntPtr hitAfter = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+            IntPtr rootAfter = hitAfter == IntPtr.Zero
+                ? IntPtr.Zero : Native.GetAncestor(hitAfter, Native.GA_ROOT);
+            uint pidAfter = 0;
+            if (rootAfter != IntPtr.Zero) Native.GetWindowThreadProcessId(rootAfter, out pidAfter);
+            string atExe = BaseName(ProcessPath(pidAfter));
 
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("clickedX").Num(x).Key("clickedY").Num(y)
                 .Key("cursorAfter").Val(actual)
+                .Key("cursorLanded").Bool(landed)
+                .Key("atExe").Val(atExe)
+                .Key("atHwnd").Num(rootAfter.ToInt64())
                 .Key("button").Val(right ? "right" : "left")
              .End();
             Console.WriteLine(j.ToString());

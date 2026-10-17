@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.7.0'
+const PLUGIN_VERSION = '2.7.1'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -695,8 +695,12 @@ function applyInner(ctx, config = {}) {
   register({
     name: 'desktop_click',
     description:
-      '在桌面绝对坐标处点击（物理像素），需要目标窗口在白名单内。' +
-      '坐标应取自 desktop_screenshot 的图内坐标加上它返回的原点。' +
+      '按坐标点击（物理像素），需要目标窗口在白名单内。' +
+      '**两种坐标空间，用 space 区分**：' +
+      '默认 space="desktop" 表示你给的是桌面绝对坐标；' +
+      'space="window" 表示你给的是 desktop_screenshot 的**图内坐标**，插件自己加窗口原点。' +
+      '实测踩点：把图内坐标直接按桌面坐标传，会点到别处而且返回成功——' +
+      '所以返回里会回显最终落到的桌面坐标，传错了能立刻看出来。' +
       '**优先用 desktop_click_element 而不是这个工具**：按元素描述符定位不依赖坐标，' +
       '而坐标在部分应用上不可靠——实测腾讯视频（Electron）的搜索按钮，' +
       '用无障碍树给出的矩形算出的坐标连点两次毫无反应，改用元素描述符或回车立刻生效。' +
@@ -705,8 +709,27 @@ function applyInner(ctx, config = {}) {
       allowNote,
     parameters: {
       hwnd: { ...HWND, description: '目标窗口句柄，用于白名单与存活校验。' },
-      x: { type: 'integer', description: '桌面绝对 X（物理像素）。' },
-      y: { type: 'integer', description: '桌面绝对 Y（物理像素）。' },
+      x: {
+        type: 'integer',
+        description:
+          'X 坐标（物理像素）。含义取决于 space：' +
+          'space="desktop" 时是桌面绝对 X；space="window" 时是截图里的图内 X。',
+      },
+      y: {
+        type: 'integer',
+        description:
+          'Y 坐标（物理像素）。含义取决于 space：' +
+          'space="desktop" 时是桌面绝对 Y；space="window" 时是截图里的图内 Y。',
+      },
+      space: {
+        type: 'string',
+        enum: ['desktop', 'window'],
+        description:
+          '坐标空间，默认 desktop。' +
+          '**如果你手上的坐标来自 desktop_screenshot 的图内像素，请传 "window"** —— ' +
+          '那样插件会自己加窗口原点，不用你算。' +
+          '故意不把这个设成默认：静默改变坐标含义比让人多写一个参数危险。',
+      },
       button: BUTTON,
     },
     output: {
