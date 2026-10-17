@@ -37,18 +37,16 @@ console.log()
 console.log(`  闸门（临时）：${GATE}`)
 console.log('  （测试会真的拉起 dsc-esc，屏幕上会短暂出现光带）')
 
-// ── 构造一个把 IDLE_HIDE_MS 压到 4 秒的插件副本 ──
+// ── 构造插件副本 ──
+//
+// 原先这里改源码（`IDLE_HIDE_MS = 20000` → 4000），因为当时它是**硬编码**的。
+// 后来它变成了可配置（config.idleHideMs，默认 8000），这个替换就一直失败 ——
+// 而测试没人跑，所以坏了很久也没发现。
+//
+// 现在不再改源码：直接传 config.idleHideMs = 4000。
+// 这样源码怎么演化都不会让测试失效，而且测的是**真实路径**而不是打补丁后的。
 const srcPath = 'plugin/index.mjs'
-let src = readFileSync(srcPath, 'utf8')
-const before = src
-src = src.replace('const IDLE_HIDE_MS = 20000', 'const IDLE_HIDE_MS = 4000')
-if (src === before) {
-  console.log('  ✗ 没能替换 IDLE_HIDE_MS —— 源码结构变了，测试需要更新')
-  process.exit(1)
-}
-// 同步压缩兜底超时，否则那条会先触发，测不出滑动窗口是否工作
-src = src.replace('const AUTO_INDICATOR_TIMEOUT_MS = 300000', 'const AUTO_INDICATOR_TIMEOUT_MS = 600000')
-src = src.replace("from './toolset.mjs'", "from './toolset.mjs'")
+const src = readFileSync(srcPath, 'utf8')
 const patched = join(tmp, 'index.mjs')
 writeFileSync(patched, src)
 
@@ -92,7 +90,7 @@ try {
 }
 
 try {
-  await plugin.apply(ctx, { helperPath: DSC, escPath: ESC, gatePath: GATE })
+  await plugin.apply(ctx, { helperPath: DSC, escPath: ESC, gatePath: GATE, idleHideMs: 4000 })
 } catch (e) {
   console.log(`  ✗ apply 失败：${e.message}`)
   process.exit(1)

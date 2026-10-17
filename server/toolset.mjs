@@ -330,6 +330,14 @@ export function createDesktopToolset(options = {}) {
       retry: 'reobserve',
       hint: '读无障碍信息时出错。应用可能正忙或正在重绘，重新读一次或改用截图。',
     },
+    PatternLost: {
+      retry: 'reobserve',
+      hint: '元素的状态在操作过程中变了（比如它刚被重建）。重新读一次树再动。',
+    },
+    OutputNotWritable: {
+      retry: 'giveUp',
+      hint: '保存位置写不进去（通常是沙箱限制或路径不在工作区内）。换一个可写路径，重试同样的路径不会有不同结果。',
+    },
     StaleTarget: {
       retry: 'reobserve',
       hint: '目标窗口没了（关了，或句柄被复用）。重新列窗口，别用旧句柄。',
