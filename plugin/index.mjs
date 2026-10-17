@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.17.1'
+const PLUGIN_VERSION = '2.18.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1711,6 +1711,25 @@ function applyInner(ctx, config = {}) {
   }
 
   /**
+   * 给插件层的错误补上恢复建议。
+   *
+   * 为什么这里也要一份：toolset 有一份 `advice`，但它只在 toolset 内部可见。
+   * 而 index 层自己产生错误（shotId 校验、lease、闸门），那些同样需要
+   * 告诉调用方"下一步该做什么"。两份实现要语义一致 —— 都读同一个
+   * 概念：stop / reobserve / wait / disambiguate / giveUp。
+   */
+  const RETRY_HINTS = {
+    reobserve: '先重新观察（截图或读树），别拿旧证据继续。',
+    wait: '等一下再试。',
+    stop: '停下，把事情告诉用户。',
+    giveUp: '这个方向不行，换一种方法。',
+  }
+  function adviceText(retry, text) {
+    return `${text}
+  [retry=${retry}] ${RETRY_HINTS[retry] ?? ''}`
+  }
+
+  /**
    * 校验"这次点击用的坐标是不是来自这张截图"。
    *
    * 返回一句警告（可能为空）。**只警告不拒绝**：窗口被移动但大小没变时，
@@ -1718,6 +1737,17 @@ function applyInner(ctx, config = {}) {
    * 但 hwnd 对不上是明确错误，那种情况要拒绝。
    */
   function checkShot(shotId, hwnd) {
+    // 外面包一层补恢复建议，而不是在 4 个 reject 分支里分别加。
+    //
+    // 理由：这 4 种拒绝的**恢复动作完全一样**（重新截图或读树），
+    // 而它们各自的模板字符串结构不同（有的两行拼接、有的带真换行），
+    // 逐处改容易像刚才那样改坏引号。包一层只碰一个地方。
+    const r = checkShotInner(shotId, hwnd)
+    if (r && r.reject) return { reject: adviceText('reobserve', r.reject) }
+    return r
+  }
+
+  function checkShotInner(shotId, hwnd) {
     const rec = recentShots.get(String(shotId))
 
     // 这里只判"能不能确认这张截图就是这个窗口的、且足够新"。
@@ -1733,8 +1763,7 @@ function applyInner(ctx, config = {}) {
     if (!rec) {
       return {
         reject:
-          `失败：找不到截图 "${shotId}" 的记录。可能是插件重启过，或者这个 ID 太旧已被清理。
-` +
+          `失败：找不到截图 "${shotId}" 的记录。可能是插件重启过，或者这个 ID 太旧已被清理。` +
           `坐标是否仍然有效无法核对。请重新截一张图，或去掉 shotId（那样插件就不做这项核对，由你负责）。`,
       }
     }
@@ -1781,19 +1810,57 @@ function applyInner(ctx, config = {}) {
    * 读文件即可 —— 不存在、或内容表示"未拉下"都算没拉。
    * 这里**只读**，绝不写；写闸门是 ESC 监听器和 halt 的事。
    */
+  /**
+   * 急停的自动恢复时间（分钟）。0 = 永不自动恢复。
+   *
+   * 必须和 helper 的 HaltTtlMinutes() **完全一致** —— 否则会出现
+   * "插件认为已恢复、helper 还在拦"这种最难查的分裂状态。
+   * 两边都读 DSC_HALT_TTL_MINUTES，默认都是 10。
+   */
+  function haltTtlMinutes() {
+    const v = Number(process.env.DSC_HALT_TTL_MINUTES)
+    if (process.env.DSC_HALT_TTL_MINUTES !== undefined && Number.isFinite(v) && v >= 0) return v
+    return 10
+  }
+
+  /**
+   * 闸门现在是否**有效**（不只是"文件在不在"）。
+   *
+   * 超过 TTL 视为已自动恢复。依据是文件修改时间，所以 halt / stop
+   * 都会重置计时，不需要改文件格式。
+   */
   function isHalted() {
     try {
-      // ★ 用 gate() 而不是 gateChecked()：后者会顺带调
-      // helperLocationChecked()，那个函数可能抛错，而这里的 catch
-      // 会把它吞成"没拉闸"—— 急停状态下 isHalted() 返回 false，
-      // ensureIndicator 照样拉起指示层，用户又看到"它活了"。
-      // 实测抓到的：测试里闸门文件明明存在，diagnose 却认不出急停。
+      // 用 gate() 而不是 gateChecked()：后者会顺带调
+      // helperLocationChecked()，那个可能抛错，而 catch 会把异常
+      // 吞成"没拉闸" —— 于是急停状态下 isHalted() 返回 false。
       const gp = gate()
       if (!existsSync(gp)) return false
-      const txt = readFileSync(gp, 'utf8')
-      return !/^\s*(clear|0|false)/i.test(txt)
+
+      const ttl = haltTtlMinutes()
+      if (ttl === 0) return true
+
+      const ageMin = (Date.now() - statSync(gp).mtimeMs) / 60000
+      // 时钟倒退时按"刚拉下"处理：宁可多停一会儿，也不要误放行
+      if (ageMin < 0) return true
+      return ageMin < ttl
     } catch {
-      return false
+      // 读不到就当作**已拉下**：急停的默认方向是"停"，不是"放行"。
+      // 早先这里返回 false —— 等于读失败就放行。
+      return true
+    }
+  }
+
+  /** 闸门还剩多久自动恢复（毫秒）。0 或负数 = 已过期或永不恢复。 */
+  function haltRemainingMs() {
+    try {
+      const ttl = haltTtlMinutes()
+      if (ttl === 0) return Infinity
+      const gp = gate()
+      if (!existsSync(gp)) return 0
+      return ttl * 60000 - (Date.now() - statSync(gp).mtimeMs)
+    } catch {
+      return 0
     }
   }
 
@@ -2514,9 +2581,28 @@ function applyInner(ctx, config = {}) {
       if (isHalted()) {
         lines.push('')
         lines.push('⚠ 急停**正在生效**（用户按了 ESC）。所有变更性操作都会被拒绝。')
-        lines.push('  解除方式（需要用户本人执行）：')
+
+        // 告诉用户"它会自己恢复" —— 否则他以为要永远手动解除。
+        // 用户的反馈就是："应该是我按下阀门，任务中止，过一段时间后
+        // 阀门自动解除，而不是我手动解除"。
+        const ttl = haltTtlMinutes()
+        if (ttl === 0) {
+          lines.push('  自动恢复：**已关闭**（DSC_HALT_TTL_MINUTES=0），只能手动解除。')
+        } else {
+          const left = haltRemainingMs()
+          if (left > 0) {
+            const m = Math.floor(left / 60000)
+            const sec = Math.floor((left % 60000) / 1000)
+            lines.push(`  自动恢复：还有 ${m} 分 ${sec} 秒（总共 ${ttl} 分钟）。到时间后无需任何操作即可继续。`)
+          } else {
+            lines.push(`  自动恢复：已到期（${ttl} 分钟）—— 下一次操作会自动生效。`)
+          }
+        }
+
+        lines.push('  想提前解除：')
         lines.push('    ' + escPath.replace(/dsc-esc\.exe$/, 'dsc.exe') + ' stop --clear')
-        lines.push('  或删除闸门文件：' + gateChecked())
+        lines.push('    或删除闸门文件：' + gateChecked())
+        lines.push('    或双击工作区里的「解除急停.bat」')
         lines.push('  模型**不应该**尝试自行解除 —— 急停是用户发起的，也该由用户结束。')
       }
       return { result: lines.join(String.fromCharCode(10)) }

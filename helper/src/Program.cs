@@ -352,10 +352,54 @@ namespace Dsc
             catch { return false; }
         }
 
+        /// <summary>
+        /// 急停的自动恢复时间（分钟）。0 = 永不自动恢复。
+        ///
+        /// 为什么默认 10 分钟：用户按 ESC 说的是"先停一下"，不是
+        /// "永远别动我的电脑"。原先只有手动解除一条路，于是"暂停"实际上
+        /// 变成了"一直停到你想起那条命令"。
+        ///
+        /// 但也不能太短：按完 ESC 去接个电话，回来发现插件又在动了，
+        /// 那比停着更糟。10 分钟是"够离开一会儿、又不至于让人以为坏了"。
+        /// </summary>
+        private static int HaltTtlMinutes()
+        {
+            string v = Environment.GetEnvironmentVariable("DSC_HALT_TTL_MINUTES");
+            int n;
+            if (!string.IsNullOrEmpty(v) && int.TryParse(v, out n) && n >= 0) return n;
+            return 10;
+        }
+
+        /// <summary>
+        /// 闸门现在是否**有效**。
+        ///
+        /// 注意这里判断的不只是"文件在不在"，还要看它还**算不算数**：
+        /// 超过 TTL 的闸门视为已自动恢复。用文件修改时间作为依据，
+        /// 所以 halt / stop 都会重置计时，不需要改文件格式。
+        /// </summary>
         private static bool IsHalted()
         {
-            try { return File.Exists(GatePath()); }
-            catch { return false; }
+            try
+            {
+                string p = GatePath();
+                if (!File.Exists(p)) return false;
+
+                int ttl = HaltTtlMinutes();
+                if (ttl == 0) return true;   // 显式关闭自动恢复
+
+                DateTime mtime = File.GetLastWriteTime(p);
+                double ageMin = (DateTime.Now - mtime).TotalMinutes;
+                // 时钟倒退（改系统时间、时区）时 ageMin 会是负数 ——
+                // 那种情况按"刚拉下"处理，宁可多停一会儿也不要误放行。
+                if (ageMin < 0) return true;
+                return ageMin < ttl;
+            }
+            catch
+            {
+                // 读不到就当作**已拉下**：急停的默认方向是"停"，
+                // 不是"放行"。早先这里返回 false，等于读失败就放行。
+                return true;
+            }
         }
 
         /// <summary>
@@ -569,17 +613,17 @@ namespace Dsc
             uint pid;
             Native.GetWindowThreadProcessId(hwnd, out pid);
             if (pid == 0)
-                throw new InvalidOperationException("无法确定窗口 " + hwnd + " 所属进程，拒绝执行 " + action + "。");
+                throw new DscError("Refused", "无法确定窗口 " + hwnd + " 所属进程，拒绝执行 " + action + "。");
 
             string exe = BaseName(ProcessPath(pid));
             if (exe.Length == 0)
-                throw new InvalidOperationException(
+                throw new DscError("Refused", 
                     "无法确定窗口 " + hwnd + " 所属的可执行文件，拒绝执行 " + action + "（无法校验白名单）。");
 
             foreach (string a in allow)
                 if (a == exe) return;
 
-            throw new InvalidOperationException(
+            throw new DscError("Refused", 
                 "目标应用 \"" + exe + "\" 不在白名单内，拒绝执行 " + action + "。当前白名单：" +
                 string.Join(", ", allow) + "。");
         }
@@ -1650,7 +1694,7 @@ namespace Dsc
                 " 白名单=[" + string.Join(",", Allowlist()) + "]");
 
             if (hit == IntPtr.Zero)
-                throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口，拒绝点击。");
+                throw new DscError("StaleTarget", "坐标 (" + x + "," + y + ") 处没有窗口，拒绝点击。");
 
             if (target != IntPtr.Zero && root != target)
             {
@@ -1658,7 +1702,7 @@ namespace Dsc
                 //
                 // **这里必须拒绝，不能退回去点遮挡者**。这正是"点偏"的一种来源：
                 // 调用方给的是 A 的坐标，结果点了 B，而报告里写着成功。
-                throw new InvalidOperationException(
+                throw new DscError("Refused", 
                     "拒绝点击：坐标 (" + x + "," + y + ") 现在属于窗口 " + root.ToInt64() +
                     "（" + (hitExe ?? "?") + "），不是指定的目标窗口 " + target.ToInt64() + "。\n" +
                     "目标窗口可能被置顶窗口盖住，或坐标已经不在它身上。\n" +
@@ -1806,9 +1850,9 @@ namespace Dsc
             IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
             IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
             if (hit == IntPtr.Zero)
-                throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口，拒绝移动。");
+                throw new DscError("StaleTarget", "坐标 (" + x + "," + y + ") 处没有窗口，拒绝移动。");
             if (target != IntPtr.Zero && root != target)
-                throw new InvalidOperationException(
+                throw new DscError("Refused", 
                     "拒绝移动：坐标 (" + x + "," + y + ") 属于窗口 " + root.ToInt64() +
                     "，不是指定的目标窗口 " + target.ToInt64() + "。");
             RequireAllowedWindow(root, "move");
@@ -2072,9 +2116,9 @@ namespace Dsc
                 IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = atX, Y = atY });
                 IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
                 if (hit == IntPtr.Zero)
-                    throw new InvalidOperationException("--at (" + atX + "," + atY + ") 处没有窗口。");
+                    throw new DscError("StaleTarget", "--at (" + atX + "," + atY + ") 处没有窗口。");
                 if (target != IntPtr.Zero && root != target)
-                    throw new InvalidOperationException(
+                    throw new DscError("Refused", 
                         "拒绝滚动：--at 处属于窗口 " + root.ToInt64() +
                         "，不是指定的目标窗口 " + target.ToInt64() + "。");
                 if (target != IntPtr.Zero) RequireAllowedWindow(target, "wheel");
@@ -2174,9 +2218,9 @@ namespace Dsc
             IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
             IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
             if (hit == IntPtr.Zero)
-                throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口。");
+                throw new DscError("StaleTarget", "坐标 (" + x + "," + y + ") 处没有窗口。");
             if (target != IntPtr.Zero && root != target)
-                throw new InvalidOperationException(
+                throw new DscError("Refused", 
                     "拒绝按住：坐标处属于窗口 " + root.ToInt64() + "，不是目标窗口 " + target.ToInt64() + "。");
             RequireAllowedWindow(root, "hold");
 
