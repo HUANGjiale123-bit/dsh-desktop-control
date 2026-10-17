@@ -19,6 +19,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // 工具定义用本地的实现，而不是 `@deepseek-ai/dsh-tools`。
@@ -55,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.14.0'
+const PLUGIN_VERSION = '2.15.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -556,6 +557,9 @@ function applyInner(ctx, config = {}) {
     helperPath,
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
+    // 把 span 注进 toolset：它自己**不维护**当前 trace（那会在并发下串号），
+    // 只负责在自己认为值得计时的边界上调用这个函数。
+    span,
     requestApproval,
     // 变更性操作放行后自动确保指示层在跑——把"看得见"绑到 computer use
     // 状态本身，而不是绑到"助手记得开提示"。
@@ -590,6 +594,187 @@ function applyInner(ctx, config = {}) {
   // 忙碌期间一律不收，操作结束再重新起算。
   let _busy = 0
 
+  /* ═══════════ trace：一次工具调用花了多久、花在哪 ═══════════
+   *
+   * ── 为什么用 AsyncLocalStorage ──
+   *
+   * 一个模块级的 currentTrace 变量在并发下会把 A 的耗时串到 B 上：
+   * A 开始 → 记 currentTrace=A → B 开始 → currentTrace=B →
+   * A 结束 → 记到 B 上。授权等待尤其容易被串（它可能持续几分钟）。
+   *
+   * AsyncLocalStorage 跟着**异步调用链**走，所以：
+   *   · 并发的两个工具调用各自有独立的 span 列表
+   *   · 没有调用链时（测试、独立运行）getStore() 是 undefined，
+   *     span 自动退化成直接执行 —— 不静默回退到"最后一个会话"。
+   *
+   * ── 记录什么、不记录什么 ──
+   *
+   * 记：工具名、各阶段名与耗时、结果、错误码。
+   * 不记：输入的文字、截图内容、UIA 树文本、完整命令参数。
+   * 后面这些是用户数据，诊断不需要它们。
+   */
+  const als = new AsyncLocalStorage()
+
+  /** 最近 TRACE_KEEP 次调用。有界，不涨。 */
+  const TRACE_KEEP = 200
+  const traceRing = []
+
+  /**
+   * 给一段工作套一个 span。
+   *
+   * 同步和异步都支持：返回 Promise 时用 finally 记录，
+   * 否则立即记录。**不 await** —— 调用方拿到的还是原函数的返回值。
+   */
+  function span(name, fn) {
+    const ctx = als.getStore()
+    if (!ctx) return fn() // 没有 trace 上下文：直接执行，不记
+    const start = performance.now()
+    const record = () => {
+      const dur = performance.now() - start
+      ctx.trace.spans.push({ name, dur: Math.round(dur * 10) / 10 })
+    }
+    let r
+    try {
+      r = fn()
+    } catch (e) {
+      record()
+      throw e
+    }
+    if (r && typeof r.then === 'function') {
+      return r.then(
+        (v) => {
+          record()
+          return v
+        },
+        (e) => {
+          record()
+          throw e
+        },
+      )
+    }
+    record()
+    return r
+  }
+
+  function rememberTrace(trace) {
+    traceRing.push(trace)
+    while (traceRing.length > TRACE_KEEP) traceRing.shift()
+  }
+
+  /** 分位数。样本量小于门槛时直接说实话，不要编一个 p95。 */
+  function pct(values, p) {
+    if (values.length === 0) return null
+    const s = [...values].sort((a, b) => a - b)
+    const i = Math.min(s.length - 1, Math.max(0, Math.floor(s.length * p)))
+    return Math.round(s[i] * 10) / 10
+  }
+
+  /**
+   * 性能视图。**只读内存里的 trace，绝不碰窗口、闸门或 helper。**
+   *
+   * 展示原则（都来自实测教训）：
+   *   · total 是墙钟，spans 是其中的子段 —— **不相加**，并排列出
+   *   · 授权等待单独一列：用户点"同意"可能几分钟，混进操作耗时就没意义了
+   *   · 样本量必须显示。n=2 的 p95 不叫 p95
+   *   · 冷启动和热运行分开：第一次 spawn 含着进程启动，后面的不含
+   */
+  function renderPerf(last = 20) {
+    const n = Math.max(1, Math.min(200, Number(last) || 20))
+    const recent = traceRing.slice(-n)
+    const lines = []
+
+    if (recent.length === 0) {
+      return '还没有性能记录。先调几次工具再看。'
+    }
+
+    lines.push(`== 最近 ${recent.length} 次调用 ==`)
+    lines.push('  （total 是墙钟；helper.* 和 auth 是其中的子段，**不能相加**）')
+    for (const t of recent) {
+      const sub = t.spans
+        .slice()
+        .sort((a, b) => b.dur - a.dur)
+        .slice(0, 4)
+        .map((x) => `${x.name}=${x.dur}ms`)
+        .join(' ')
+      const flag = t.outcome === 'ok' ? '' : ` ✗ ${t.errorCode}`
+      lines.push(`  ${t.tool.padEnd(22)} ${String(t.total).padStart(8)}ms  ${sub}${flag}`)
+    }
+
+    // 按工具聚合
+    const byTool = new Map()
+    for (const t of recent) {
+      if (!byTool.has(t.tool)) byTool.set(t.tool, [])
+      byTool.get(t.tool).push(t)
+    }
+    lines.push('')
+    lines.push('== 按工具 ==')
+    for (const [tool, rows] of byTool) {
+      const oks = rows.filter((r) => r.outcome === 'ok')
+      const totals = oks.map((r) => r.total)
+      const p50 = pct(totals, 0.5)
+      const p95 = totals.length >= 5 ? pct(totals, 0.95) : null
+      const fails = rows.length - oks.length
+      lines.push(
+        `  ${tool.padEnd(22)} n=${String(rows.length).padStart(2)}  ` +
+          `p50=${p50 === null ? '—' : p50 + 'ms'}  ` +
+          `p95=${p95 === null ? `—（样本 ${totals.length} 个，太少）` : p95 + 'ms'}  ` +
+          `失败=${fails}`,
+      )
+    }
+
+    // helper 往返单独聚合：它是"每次操作里到底起了几个进程"的直接答案
+    const helperSpans = recent.flatMap((t) => t.spans).filter((x) => x.name.startsWith('helper.'))
+    if (helperSpans.length > 0) {
+      const durs = helperSpans.map((x) => x.dur)
+      lines.push('')
+      lines.push(
+        `== helper 往返（${helperSpans.length} 次，${recent.length} 次工具调用里）==`,
+      )
+      lines.push(
+        `  p50=${pct(durs, 0.5)}ms  p95=${pct(durs, 0.95)}ms  最慢=${Math.max(...durs)}ms`,
+      )
+      // 按子命令
+      const byCmd = new Map()
+      for (const h of helperSpans) {
+        if (!byCmd.has(h.name)) byCmd.set(h.name, [])
+        byCmd.get(h.name).push(h.dur)
+      }
+      for (const [name, ds] of byCmd) {
+        lines.push(`    ${name.padEnd(28)} n=${String(ds.length).padStart(2)}  p50=${pct(ds, 0.5)}ms`)
+      }
+    }
+
+    // 授权
+    const authSpans = recent.flatMap((t) => t.spans).filter((x) => x.name === 'auth')
+    if (authSpans.length > 0) {
+      const durs = authSpans.map((x) => x.dur)
+      lines.push('')
+      lines.push(`== 授权等待（${authSpans.length} 次，用户点"同意"的时间）==`)
+      lines.push(`  p50=${pct(durs, 0.5)}ms  最长=${Math.max(...durs)}ms`)
+      lines.push('  这一段**不属于插件开销** —— 是等人在界面上做决定。')
+    }
+
+    lines.push('')
+    lines.push('== 这个视图测不到什么 ==')
+    lines.push('  · 模型思考、生成、读图的耗时（那在插件之外）')
+    lines.push('  · 用户看到界面到真正动手之间的间隔')
+    lines.push('  所以这里的 total 不是"任务耗时"，只是"这一次工具执行了多久"。')
+
+    return lines.join(String.fromCharCode(10))
+  }
+
+  /** 从错误消息里猜一个短 code —— 只用于聚合统计，不是权威分类。 */
+  function guessErrorCode(text) {
+    const s = String(text ?? '')
+    if (/急停|ESC 叫停|Halted/.test(s)) return 'Halted'
+    if (/未授权|拒绝/.test(s)) return 'NotAuthorized'
+    if (/不存在或已关闭|找不到窗口/.test(s)) return 'StaleTarget'
+    if (/找不到截图/.test(s)) return 'StaleObservation'
+    if (/歧义|匹配到 \d+ 个/.test(s)) return 'AmbiguousTarget'
+    if (/超时|timeout/i.test(s)) return 'Timeout'
+    return 'Error'
+  }
+
   // ── 哪些工具会**改变**用户看到的东西 ──
   //
   // 这份名单决定"要不要主动拉起指示层"。只读工具（列窗口、读树、截图、
@@ -623,28 +808,53 @@ function applyInner(ctx, config = {}) {
         // 只读操作：只续命，不主动拉起。
         if (MUTATING_TOOLS.has(definition.name)) ensureIndicator()
         else touchActivity()
-        try {
-          return await definition.execute(args, exec)
-        } finally {
-          _busy--
-          // ── 旧截图作废：统一在这里做 ──
-          //
-          // 原先散落在 wheel / drag / type 三个工具里，而 click、
-          // press_key、set_value、do_action、move、hold **一个都没有**。
-          // 实测踩到过：点一下网易云，界面从首页变成了全屏播放页，
-          // 而那张旧截图仍然"有效" —— 再点一次就会落到别的地方。
-          //
-          // 放在 finally 是有意的：**尝试过副作用就算**，哪怕报 unknown。
-          // 判断"这个动作有没有真的改变界面"是做不到的，所以保守作废。
-          if (MUTATING_TOOLS.has(definition.name)) {
-            const h = args && typeof args === 'object' ? args.hwnd : undefined
-            invalidateShotsFor(h)
-          }
-          // 结束时刷新锚点：这样"空闲"从**操作完成**开始算，
-          // 而不是从它开始算 —— 否则一个跑了 30 秒的输入，
-          // 刚结束就被判定为空闲超时。
-          touchActivity()
+
+        // 一次工具调用 = 一个 trace。用 ALS 带着走，
+        // 并发的两次调用不会互相污染对方的 span 列表。
+        const trace = {
+          id: 'tr-' + Math.random().toString(36).slice(2, 8),
+          tool: definition.name,
+          at: Date.now(),
+          spans: [],
+          outcome: 'ok',
+          errorCode: null,
         }
+
+        // ★ 用 als.run 包住整个工具执行。
+        //
+        // 不这么做的话 span() 拿不到上下文，所有计时都会丢 —— 而更糟的是
+        // 用全局变量的那种写法在并发下会把 A 的耗时记到 B 头上。
+        const startedAt = performance.now()
+        return als.run({ trace }, async () => {
+          try {
+            return await definition.execute(args, exec)
+          } catch (e) {
+            trace.outcome = 'error'
+            trace.errorCode = guessErrorCode(e?.message)
+            throw e
+          } finally {
+            trace.total = Math.round((performance.now() - startedAt) * 10) / 10
+            _busy--
+            // ── 旧截图作废：统一在这里做 ──
+            //
+            // 原先散落在 wheel / drag / type 三个工具里，而 click、
+            // press_key、set_value、do_action、move、hold **一个都没有**。
+            // 实测踩到过：点一下网易云，界面从首页变成了全屏播放页，
+            // 而那张旧截图仍然"有效" —— 再点一次就会落到别的地方。
+            //
+            // 放在 finally 是有意的：**尝试过副作用就算**，哪怕报 unknown。
+            // 判断"这个动作有没有真的改变界面"是做不到的，所以保守作废。
+            if (MUTATING_TOOLS.has(definition.name)) {
+              const h = args && typeof args === 'object' ? args.hwnd : undefined
+              invalidateShotsFor(h)
+            }
+            // 结束时刷新锚点：这样"空闲"从**操作完成**开始算，
+            // 而不是从它开始算 —— 否则一个跑了 30 秒的输入，
+            // 刚结束就被判定为空闲超时。
+            touchActivity()
+            rememberTrace(trace)
+          }
+        })
       },
     })
     return ctx.tools.register(defineTool(wrapped))
@@ -2037,7 +2247,18 @@ function applyInner(ctx, config = {}) {
       '诊断桌面控制的内部状态：helper 路径、闸门路径是怎么解析出来的、' +
       '当前白名单与会话授权、各子程序位置。**只读**，不碰任何窗口、不启动任何程序。' +
       '闸门路径不对时（ESC 只关界面却拦不住操作）用它定位卡在哪一层。',
-    parameters: {},
+    parameters: {
+      perf: {
+        type: 'boolean',
+        description:
+          '只看性能数据：最近几次调用各花了多久、花在哪（helper 往返 / 授权等待 / 其它），' +
+          '以及按工具的分位数。**完全只读** —— 不碰窗口、不动闸门、不启动 helper。',
+      },
+      last: {
+        type: 'integer',
+        description: '配合 perf，看最近多少次，默认 20，最大 200。',
+      },
+    },
     output: {
       schema: {
         type: 'object',
@@ -2052,7 +2273,12 @@ function applyInner(ctx, config = {}) {
           ? [value.image, { type: 'text', text: value.result }]
           : [{ type: 'text', text: value.result }],
     },
-    async execute() {
+    async execute(args) {
+      // 性能视图优先：它不进后面那套流程，所以连 gate_probe 都不会跑。
+      // Codex 的要求是"性能查询只读诊断数据，不应为了诊断再次点击或改真实闸门"。
+      if (args && (args.perf === true || Number.isFinite(args.last))) {
+        return { result: renderPerf(args.last ?? 20) }
+      }
       const g = await debugGatePath()
       const lines = []
       lines.push('== 版本 ==')

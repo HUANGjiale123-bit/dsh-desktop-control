@@ -79,6 +79,16 @@ export function createDesktopToolset(options = {}) {
    * 契约：async (app) => boolean —— true 表示"本次会话内放行这个应用"。
    * 钩子自身抛错一律视为拒绝（fail closed）。
    */
+  // ── 计时钩子 ──
+  //
+  // 插件层用 AsyncLocalStorage 维护 trace 上下文，把 span 函数注进来；
+  // 独立运行时（测试、MCP 服务器）没有 trace，就退化成直接调用。
+  //
+  // **不在这里维护"当前 trace"** —— 一个模块级变量在并发调用下会把
+  // A 的耗时和 B 的授权串到一起。上下文只由调用方通过 async 链带着走。
+  const span =
+    typeof options.span === 'function' ? options.span : (name, fn) => fn()
+
   const requestApproval =
     typeof options.requestApproval === 'function' ? options.requestApproval : null
 
@@ -172,7 +182,18 @@ export function createDesktopToolset(options = {}) {
    *     裸坐标点击：插件无法预知会点到谁，只能让 helper 用 WindowFromPoint
    *     自行判定，因此必须把完整名单交出去。
    */
+  // ── 每次 helper 往返是一个独立 span ──
+  //
+  // 包装而不是改主体：主体那段（spawn / 环境变量 / 闸门路径）一个字都不动，
+  // 只把它的生命周期套进 span 里。
+  //
+  // 名字用 helper.<子命令>，这样"一次点击花了 300ms，其中两次 helper 往返
+  // 各占 95ms"能直接看出来 —— 而这两次往返是**可以并行化或合并**的候选。
   function runHelper(args, allow, timeoutMs = 30000) {
+    return span(`helper.${args[0]}`, () => runHelperInner(args, allow, timeoutMs))
+  }
+
+  function runHelperInner(args, allow, timeoutMs = 30000) {
     return new Promise((done) => {
       if (!existsSync(helperPath)) {
         done({
@@ -332,7 +353,9 @@ export function createDesktopToolset(options = {}) {
 
     let approved = false
     try {
-      approved = await requestApproval(base, toolName ?? 'desktop')
+      // 授权单独计时：用户点"同意"可能要几秒也可能要几分钟，
+      // 把它算进"操作耗时"会让性能数据完全失真。
+      approved = await span('auth', () => requestApproval(base, toolName ?? 'desktop'))
     } catch (e) {
       // 钩子抛错 = 拒绝。授权通道出问题时必须 fail closed。
       return {
@@ -418,7 +441,7 @@ export function createDesktopToolset(options = {}) {
 
     let approved = false
     try {
-      approved = await requestApproval(appBase, toolName ?? 'launchApp')
+      approved = await span('auth', () => requestApproval(appBase, toolName ?? 'launchApp'))
     } catch (e) {
       return { ok: false, message: `失败：会话授权检查出错，按拒绝处理 — ${e?.message ?? e}` }
     }
