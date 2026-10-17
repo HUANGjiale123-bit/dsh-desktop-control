@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.12.2'
+const PLUGIN_VERSION = '2.13.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1546,7 +1546,15 @@ function applyInner(ctx, config = {}) {
       },
       steps: {
         type: 'integer',
-        description: '分几步移动，默认 12。步子太少时应用可能把拖动当成点击；范围 2~200。',
+        description: '每段分几步移动，默认 12。步子太少时应用可能把拖动当成点击；范围 2~200。',
+      },
+      path: {
+        type: 'array',
+        items: { type: 'array', items: { type: 'integer' } },
+        description:
+          '可选，路径拐点 [[x,y], [x,y], ...]。' +
+          '给了就依次经过这些点（起点→拐点→终点），而不是走直线。' +
+          '用途：直线会扫过别的控件时（例如从行首拖到第 5 行，要先垂直再水平）。',
       },
       button: { type: 'string', enum: ['left', 'right', 'middle'], description: '用哪个键拖，默认 left。' },
       observe: OBSERVE,
@@ -1575,6 +1583,63 @@ function applyInner(ctx, config = {}) {
       title: `拖动 (${a.x1},${a.y1}) → (${a.x2},${a.y2})`,
       kind: 'other',
     }),
+  })
+
+  register({
+    name: 'desktop_hold',
+    description:
+      '按住鼠标键**不松开**，用于"按住 Ctrl 点多选"这类需要按住的操作。' +
+      '**用完必须调 desktop_release** —— 忘记松开的话，用户接下来任何点击都会变成拖拽。' +
+      '一个鼠标只有一个，所以按住期间用户自己也没法正常操作。' + allowNote,
+    parameters: {
+      hwnd: { ...HWND, description: '目标窗口句柄。' },
+      x: { type: 'integer', description: 'X（space="desktop" 为桌面绝对，=window 为图内）。' },
+      y: { type: 'integer', description: 'Y（同上）。' },
+      space: { type: 'string', enum: ['desktop', 'window'], description: '坐标空间，默认 desktop。' },
+      button: { type: 'string', enum: ['left', 'right', 'middle'], description: '按哪个键，默认 left。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_a, v) => [{ type: 'text', text: v.result }],
+    },
+    async execute(args) {
+      const r = await set.tools.hold(args)
+      if (r.isError) throw new Error(r.text)
+      return { result: r.text }
+    },
+    presentCall: a => ({ card: 'generic', title: `按住 ${a.button ?? 'left'} 键`, kind: 'other' }),
+  })
+
+  register({
+    name: 'desktop_release',
+    description:
+      '松开鼠标键。**不受急停与白名单限制** —— 松开是恢复动作，任何时候都该能执行。' +
+      '不带参数时松开左中右三个键（宁可多松，也不要让鼠标卡在按下状态）。',
+    parameters: {
+      button: {
+        type: 'string',
+        enum: ['left', 'right', 'middle'],
+        description: '只松开某一个键。不给则三个都松。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_a, v) => [{ type: 'text', text: v.result }],
+    },
+    async execute(args) {
+      const r = await set.tools.release(args)
+      if (r.isError) throw new Error(r.text)
+      return { result: r.text }
+    },
+    presentCall: () => ({ card: 'generic', title: '松开鼠标键', kind: 'other' }),
   })
 
   register({

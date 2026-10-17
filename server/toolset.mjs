@@ -1051,7 +1051,16 @@ export function createDesktopToolset(options = {}) {
       if (r.atElement) {
         try {
           const el = typeof r.atElement === 'string' ? JSON.parse(r.atElement) : r.atElement
-          if (el && el.actionable === false) {
+          // 禁用的元素在 **Win32 层不接收鼠标**（事件穿透到父控件），
+          // 但在 UIA 层仍然存在、FromPoint 仍然会返回它。
+          // 实测踩到：靶子里的提示 Label 盖住了接收区，中键事件其实到了父控件，
+          // 而这里却报"点到空白处"。所以 enabled=false 要单独说明。
+          if (el && el.enabled === false) {
+            lines.push(
+              `  · 该坐标下是「${el.name ?? '（无名）'}」(${el.role ?? '?'})，但它处于**禁用**状态 ——` +
+                `鼠标事件会穿透到它下面的控件，所以点击本身仍然有效。`,
+            )
+          } else if (el && el.actionable === false) {
             lines.push(
               `  ⚠ 该坐标下没有可交互元素（读到的是一层 "${el.role ?? '?'}"` +
                 `${el.name ? ` 叫 "${el.name}"` : '，没有名字'}，矩形 ${el.w}x${el.h}）。` +
@@ -1170,34 +1179,108 @@ export function createDesktopToolset(options = {}) {
      *   · **无论怎么退出都释放按键**（helper 里的 try/finally）——
      *     否则鼠标会一直处于按下状态，用户接下来任何点击都变成拖拽
      */
-    async drag({ hwnd, x1, y1, x2, y2, space, steps, button }) {
+    async drag({ hwnd, x1, y1, x2, y2, space, steps, button, path }) {
       const a = await resolvePoint(hwnd, x1, y1, space, 'drag 起点')
       if (a.err) return { isError: true, text: a.err }
       const b = await resolvePoint(hwnd, x2, y2, space, 'drag 终点')
       if (b.err) return { isError: true, text: b.err }
+
+      // ── 带路径的拖动 ──
+      //
+      // 直线表达不了"绕过去"：从行首拖到第 5 行，直线会扫过中间那些控件。
+      // 给了 path 就依次经过每个拐点，每段仍走多步。
+      const via = Array.isArray(path) ? path : null
 
       const auth = await authorize(hwnd, 'drag', { windows: a.w ? [a.w] : undefined })
       if (!auth.ok) return { isError: true, text: auth.message }
 
       const n = Number.isFinite(Number(steps)) ? Math.max(2, Math.min(200, Number(steps))) : 12
       const btn = button === 'right' || button === 'middle' ? button : 'left'
-      const r = await runHelper(
-        [
+
+      let runArgs
+      if (via && via.length > 0) {
+        // 起点 + 每个拐点 + 终点，全部换成桌面坐标（成对传）
+        const points = [[a.px, a.py]]
+        for (const pt of via) {
+          if (!Array.isArray(pt) || pt.length < 2) {
+            return { isError: true, text: '失败：path 里每一项都要是 [x, y]。' }
+          }
+          const rp = await resolvePoint(hwnd, Number(pt[0]), Number(pt[1]), space, 'drag 路径点')
+          if (rp.err) return { isError: true, text: rp.err }
+          points.push([rp.px, rp.py])
+        }
+        points.push([b.px, b.py])
+        runArgs = ['dragpath']
+        for (const [px, py] of points) runArgs.push(String(px), String(py))
+        runArgs.push(btn, '--steps', String(Math.max(2, Math.min(100, Math.ceil(n / 2)))), '--hwnd', String(hwnd))
+      } else {
+        runArgs = [
           'drag', String(a.px), String(a.py), String(b.px), String(b.py),
           btn, '--steps', String(n), '--hwnd', String(hwnd),
-        ],
-        'configured',
-        60000,
-      )
+        ]
+      }
+      const r = await runHelper(runArgs, 'configured', 60000)
       if (!r.ok) return { isError: true, text: failMessage(r) }
 
-      const lines = [
-        `已拖动：(${r.from}) → (${r.to})，${r.steps} 步，${r.button} 键。`,
+      const lines = r.path
+        ? [`已沿路径拖动：${r.path}` + `（${r.legs} 段 × ${r.stepsPerLeg} 步，${r.button} 键）`]
+        : [`已拖动：(${r.from}) → (${r.to})，${r.steps} 步，${r.button} 键。`]
+      lines.push(
         `  光标回读：${r.cursorAfter ?? '?'}`,
         `  按键已确认释放（拖动中途被急停打断时也是这样）。`,
         `  未核实：拖动结果（文件是否移动、滚动条是否变化）要重新观察。`,
-      ]
+      )
       return { text: lines.join('\n') }
+    },
+
+    /**
+     * 按住鼠标键不放。
+     *
+     * helper 是短进程：命令返回后它就退出了，而**按键状态留在系统里**。
+     * 所以这里必须把"用完要松开"说得足够响 —— 忘了松开的话，用户接下来
+     * 任何点击都会变成拖拽，一种很难自己恢复的状态。
+     */
+    async hold({ hwnd, x, y, space, button }) {
+      const pt = await resolvePoint(hwnd, x, y, space, 'hold')
+      if (pt.err) return { isError: true, text: pt.err }
+
+      const auth = await authorize(hwnd, 'hold', { windows: pt.w ? [pt.w] : undefined })
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const btn = button === 'right' || button === 'middle' ? button : 'left'
+      const r = await runHelper(['hold', String(pt.px), String(pt.py), btn, '--hwnd', String(hwnd)], 'configured')
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      return {
+        text:
+          `已在 (${r.x},${r.y}) 按下 ${r.held} 键，**现在处于按住状态**。
+` +
+          `  ⚠ 它会一直保持到你调用 desktop_release。
+` +
+          `  忘了松开的话，用户接下来任何点击都会变成拖拽 —— 用完请立即松开。
+` +
+          `  光标回读：${'?'}`,
+      }
+    },
+
+    /**
+     * 松开鼠标键。
+     *
+     * 刻意不检查闸门、不检查白名单：松开是**恢复动作**。
+     * 急停时用户最需要的正是把按着的东西松开，这时候拦下来只会让鼠标卡得更久。
+     */
+    async release({ button }) {
+      const btn = button === 'left' || button === 'right' || button === 'middle' ? button : null
+      const args = ['release']
+      if (btn) args.push(btn)
+      const r = await runHelper(args, 'configured')
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+      return {
+        text:
+          `已松开：${r.released}。
+` +
+          `  这一条不受急停和白名单限制 —— 松开是恢复动作，任何时候都该能执行。`,
+      }
     },
 
     /**

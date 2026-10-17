@@ -766,6 +766,9 @@ namespace Dsc
                     case "drag": return CmdDrag(args);
                     case "wheel": return CmdWheel(args);
                     case "whatis": return CmdWhatIs(args);
+                    case "hold": return CmdHold(args);
+                    case "release": return CmdRelease(args);
+                    case "dragpath": return CmdDragPath(args);
                     case "set_value": return CmdSetValue(args);
                     case "do_action": return CmdDoAction(args);
                     case "type": return CmdType(args);
@@ -1631,7 +1634,14 @@ namespace Dsc
             Native.POINT after;
             bool gotCursor = Native.GetCursorPos(out after);
             string actual = gotCursor ? (after.X + "," + after.Y) : "?";
-            bool landed = gotCursor && after.X == x && after.Y == y;
+            // 容差要和 MoveCursorAbsolute 的校验收一致（±2）。
+            //
+            // 两处用不同判据的后果实测到了：SetCursorPos 落到 187 而目标是 186，
+            // MoveCursorAbsolute 认为没问题（差 1 < 2），而这里用精确相等判成
+            // "没有真正发生" —— 于是一次成功的点击被报成失败。
+            // 同一个概念在两处用不同标准，结果就是自相矛盾。
+            bool landed = gotCursor &&
+                          Math.Abs(after.X - x) <= 2 && Math.Abs(after.Y - y) <= 2;
 
             // 点完之后再问一次"这个点现在属于谁"。
             //
@@ -2071,6 +2081,260 @@ namespace Dsc
             return target;
         }
 
+
+        /// <summary>
+        /// 按住鼠标键不放。用法：hold &lt;x&gt; &lt;y&gt; [left|right|middle] [--hwnd H]
+        ///
+        /// ── 用完必须 release ──
+        ///
+        /// 这是短进程：命令返回后进程就退出了，而**按键状态留在系统里**。
+        /// 忘了松开的话，用户接下来任何点击都会变成拖拽 —— 一种很难自己
+        /// 恢复的状态。所以返回里会明确提示，并且 release 命令不需要坐标、
+        /// 不需要白名单、也不受急停限制（急停时更需要松开）。
+        /// </summary>
+        private static int CmdHold(string[] args)
+        {
+            RequireNotHalted("hold");
+
+            string button = "left";
+            List<string> pos = new List<string>();
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "left" || args[i] == "right" || args[i] == "middle") button = args[i];
+                else pos.Add(args[i]);
+            }
+            IntPtr target = IntPtr.Zero;
+            List<string> clean = new List<string>();
+            for (int i = 0; i < pos.Count; i++)
+            {
+                if (pos[i] == "--hwnd")
+                {
+                    if (i + 1 >= pos.Count) throw new ArgumentException("--hwnd 后面需要窗口句柄");
+                    target = new IntPtr(long.Parse(pos[++i]));
+                }
+                else clean.Add(pos[i]);
+            }
+            pos = clean;
+            if (pos.Count < 2) throw new ArgumentException("hold 需要 x y");
+
+            int x = int.Parse(pos[0]), y = int.Parse(pos[1]);
+
+            if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "hold");
+                RequireActivated(target, "hold");
+            }
+
+            IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+            IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
+            if (hit == IntPtr.Zero)
+                throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口。");
+            if (target != IntPtr.Zero && root != target)
+                throw new InvalidOperationException(
+                    "拒绝按住：坐标处属于窗口 " + root.ToInt64() + "，不是目标窗口 " + target.ToInt64() + "。");
+            RequireAllowedWindow(root, "hold");
+
+            uint down, up;
+            ButtonFlags(button, out down, out up);
+            MoveCursorAbsolute(x, y);
+            System.Threading.Thread.Sleep(60);
+            Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("held").Val(button)
+                .Key("x").Num(x).Key("y").Num(y)
+                .Key("atExe").Val(BaseName(ProcessPath(PidOfWindow(root))))
+                .Key("verified").Bool(false)
+                .Key("warning").Val(
+                    "按键现在处于**按下状态**，并且会一直保持到你调用 release。" +
+                    "不松开的话，用户接下来任何点击都会变成拖拽。用完请立即执行：dsc.exe release")
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 松开鼠标键。用法：release [left|right|middle] [--all]
+        ///
+        /// 刻意不做三件事：不需要坐标、不检查白名单、**不受急停限制**。
+        /// 理由：松开按键是恢复动作。急停时用户最需要的正是"把按着的东西松开"，
+        /// 这时候拦下来只会让鼠标卡得更久。
+        /// </summary>
+        private static int CmdRelease(string[] args)
+        {
+            bool all = false;
+            string button = null;
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--all") all = true;
+                else if (args[i] == "left" || args[i] == "right" || args[i] == "middle") button = args[i];
+            }
+
+            List<string> released = new List<string>();
+            string[] buttons = all || button == null
+                ? new string[] { "left", "right", "middle" }
+                : new string[] { button };
+
+            foreach (string b in buttons)
+            {
+                uint down, up;
+                ButtonFlags(b, out down, out up);
+                Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+                released.Add(b);
+                System.Threading.Thread.Sleep(20);
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("released").Val(string.Join(",", released.ToArray()))
+                .Key("verified").Bool(false)
+                .Key("note").Val(
+                    "已发送松开事件。注意这只能松开**本插件按下的键**，" +
+                    "如果用户自己正按着鼠标，也会被一起松开——鼠标只有一个。")
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 带路径的拖动：按下 → 依次经过每个拐点 → 抬起。用法：
+        /// dragpath &lt;x1&gt; &lt;y1&gt; &lt;x2&gt; &lt;y2&gt; [x3 y3 ...] [--hwnd H] [--steps N] [left|right|middle]
+        ///
+        /// 为什么需要它：直线拖拽表达不了"绕过去"。例如从行首拖到第 5 行，
+        /// 直线会扫过中间的控件；而真实的操作是"先垂直往下、再水平移动"。
+        /// 多点路径就是给这种情况用的。
+        ///
+        /// 与 drag 一样：每步检查急停、退出时一定释放按键。
+        /// </summary>
+        private static int CmdDragPath(string[] args)
+        {
+            RequireNotHalted("dragpath");
+
+            string button = "left";
+            int stepsPerLeg = 8;
+            List<string> pos = new List<string>();
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--steps")
+                {
+                    if (i + 1 >= args.Length) throw new ArgumentException("--steps 后面需要数字");
+                    stepsPerLeg = int.Parse(args[++i]);
+                    if (stepsPerLeg < 2) stepsPerLeg = 2;
+                    if (stepsPerLeg > 100) stepsPerLeg = 100;
+                }
+                else if (args[i] == "left" || args[i] == "right" || args[i] == "middle") button = args[i];
+                else pos.Add(args[i]);
+            }
+            IntPtr target = IntPtr.Zero;
+            List<string> clean = new List<string>();
+            for (int i = 0; i < pos.Count; i++)
+            {
+                if (pos[i] == "--hwnd")
+                {
+                    if (i + 1 >= pos.Count) throw new ArgumentException("--hwnd 后面需要窗口句柄");
+                    target = new IntPtr(long.Parse(pos[++i]));
+                }
+                else clean.Add(pos[i]);
+            }
+            pos = clean;
+
+            if (pos.Count < 4 || pos.Count % 2 != 0)
+                throw new ArgumentException("dragpath 需要成对的坐标：x1 y1 x2 y2 [x3 y3 ...]");
+
+            List<int> xs = new List<int>();
+            List<int> ys = new List<int>();
+            for (int i = 0; i + 1 < pos.Count; i += 2)
+            {
+                xs.Add(int.Parse(pos[i]));
+                ys.Add(int.Parse(pos[i + 1]));
+            }
+
+            if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "dragpath");
+                RequireActivated(target, "dragpath");
+            }
+            else
+            {
+                IntPtr h = Native.WindowFromPoint(new Native.POINT { X = xs[0], Y = ys[0] });
+                IntPtr rt = h == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(h, Native.GA_ROOT);
+                if (rt != IntPtr.Zero) RequireAllowedWindow(rt, "dragpath");
+            }
+
+            uint down2, up2;
+            ButtonFlags(button, out down2, out up2);
+
+            bool pressed = false;
+            int moved = 0;
+            try
+            {
+                MoveCursorAbsolute(xs[0], ys[0]);
+                System.Threading.Thread.Sleep(80);
+                Native.mouse_event(down2, 0, 0, 0, UIntPtr.Zero);
+                pressed = true;
+                System.Threading.Thread.Sleep(150);
+
+                for (int leg = 1; leg < xs.Count; leg++)
+                {
+                    int ax = xs[leg - 1], ay = ys[leg - 1];
+                    int bx = xs[leg], by = ys[leg];
+                    for (int i = 1; i <= stepsPerLeg; i++)
+                    {
+                        if (IsHalted())
+                            throw new InvalidOperationException(
+                                "拖动被急停中断（第 " + leg + " 段，已移动 " + moved + " 步）。按键已释放。");
+
+                        int tx = ax + (bx - ax) * i / stepsPerLeg;
+                        int ty = ay + (by - ay) * i / stepsPerLeg;
+                        Native.POINT cur;
+                        if (!Native.GetCursorPos(out cur)) { cur.X = tx; cur.Y = ty; }
+                        int mdx = tx - cur.X, mdy = ty - cur.Y;
+                        if (mdx != 0 || mdy != 0)
+                        {
+                            Native.mouse_event(Native.MOUSEEVENTF_MOVE, mdx, mdy, 0, UIntPtr.Zero);
+                            moved++;
+                        }
+                        System.Threading.Thread.Sleep(30);
+                    }
+                }
+
+                System.Threading.Thread.Sleep(120);
+                Native.mouse_event(up2, 0, 0, 0, UIntPtr.Zero);
+                pressed = false;
+            }
+            finally
+            {
+                if (pressed)
+                {
+                    try { Native.mouse_event(up2, 0, 0, 0, UIntPtr.Zero); } catch { }
+                }
+            }
+
+            StringBuilder pathSb = new StringBuilder();
+            for (int i = 0; i < xs.Count; i++)
+            {
+                if (i > 0) pathSb.Append(" -> ");
+                pathSb.Append('(').Append(xs[i]).Append(',').Append(ys[i]).Append(')');
+            }
+
+            Native.POINT final;
+            bool got = Native.GetCursorPos(out final);
+            Jw jj = new Jw();
+            jj.Obj().Key("ok").Bool(true)
+                .Key("path").Val(pathSb.ToString())
+                .Key("legs").Num(xs.Count - 1)
+                .Key("stepsPerLeg").Num(stepsPerLeg)
+                .Key("movedSteps").Num(moved)
+                .Key("button").Val(button)
+                .Key("cursorAfter").Val(got ? (final.X + "," + final.Y) : "?")
+                .Key("verified").Bool(false)
+                .Key("note").Val("路径拖动已发出，按键已释放。结果要重新观察。")
+             .End();
+            Console.WriteLine(jj.ToString());
+            return 0;
+        }
+
         private static uint PidOfWindow(IntPtr hwnd)
         {
             uint pid;
@@ -2309,6 +2573,7 @@ namespace Dsc
                   .Append(",\"y\":").Append((int)r.Y)
                   .Append(",\"w\":").Append((int)r.Width)
                   .Append(",\"h\":").Append((int)r.Height)
+                  .Append(",\"enabled\":").Append(SnapshotOps.SafeBool(delegate { return el.Current.IsEnabled; }) ? "true" : "false")
                   .Append(",\"actionable\":").Append(actionable ? "true" : "false")
                   .Append("}");
                 return sb.ToString();

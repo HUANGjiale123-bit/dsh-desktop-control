@@ -46,6 +46,11 @@ const POLICY = {
   CmdTree: 'both',
   CmdScreenshot: 'both',
   CmdWhatIs: 'both',
+  CmdHold: 'both',
+  CmdDragPath: 'both',
+  // release **刻意**既不检查急停也不检查白名单：
+  // 松开是恢复动作，急停时用户最需要的正是把按着的东西松开。
+  CmdRelease: 'none',
   CmdMove: 'both',
   CmdDrag: 'both',
   CmdWheel: 'both',

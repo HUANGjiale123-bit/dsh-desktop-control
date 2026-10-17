@@ -209,6 +209,56 @@ namespace DscTarget
             };
             f.Controls.Add(lv);
 
+            // ── 接收区：记录滚轮与拖动 ──
+            //
+            // 滚轮和拖动没有"按钮"可点，所以需要一块自己的区域来接收事件。
+            // 没有它，验证滚轮就只能靠"看页面滚了"，而那不可核对。
+            Panel pad = new Panel();
+            pad.Name = "Pad";
+            pad.AccessibleName = "Pad";
+            pad.BackColor = Color.FromArgb(245, 247, 250);
+            pad.BorderStyle = BorderStyle.FixedSingle;
+            pad.Location = new Point(20, 190);
+            pad.Size = new Size(150, 220);
+            f.Controls.Add(pad);
+
+            Label padHint = new Label();
+            padHint.Text = "滚轮 / 拖动区\n(把鼠标放在这里)";
+            padHint.Dock = DockStyle.Fill;
+            padHint.TextAlign = ContentAlignment.MiddleCenter;
+            padHint.ForeColor = Color.Gray;
+            // ★ 必须禁用，否则它会把鼠标事件全吃掉。
+            //
+            // 实测：把 Label 铺满 Pad 之后，中键点击、滚轮、拖动全部落在
+            // Label 上，Pad 一个事件都收不到 —— 而 desktop_click 的
+            // "该坐标下没有可交互元素（读到的是一层 Text）" 正是这个意思。
+            // 那条警告替我指出了靶子本身的 bug。
+            padHint.Enabled = false;
+            pad.Controls.Add(padHint);
+
+            int wheelSum = 0;
+            pad.MouseWheel += delegate(object sender, MouseEventArgs e)
+            {
+                wheelSum += e.Delta;
+                Log("\"event\":\"wheel\",\"id\":\"Pad\",\"delta\":" + e.Delta +
+                    ",\"sum\":" + wheelSum);
+            };
+            pad.MouseDown += delegate(object sender, MouseEventArgs e)
+            {
+                Log("\"event\":\"pad_down\",\"id\":\"Pad\",\"button\":\"" + e.Button + "\"");
+            };
+            pad.MouseUp += delegate(object sender, MouseEventArgs e)
+            {
+                Log("\"event\":\"pad_up\",\"id\":\"Pad\",\"button\":\"" + e.Button + "\"");
+            };
+            pad.MouseMove += delegate(object sender, MouseEventArgs e)
+            {
+                // 只在按下状态记录移动 —— 那是"拖动"，否则是普通悬停
+                if (e.Button != MouseButtons.None)
+                    Log("\"event\":\"pad_drag\",\"id\":\"Pad\",\"x\":" + e.X +
+                        ",\"y\":" + e.Y + ",\"button\":\"" + e.Button + "\"");
+            };
+
             // ── 状态栏：让人一眼看出"靶子在、日志在写" ──
             Label status = new Label();
             status.Name = "Status";
