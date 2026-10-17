@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.12.1'
+const PLUGIN_VERSION = '2.12.2'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -973,7 +973,8 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.type(args)
       if (r.isError) throw new Error(r.text)
-      // 输入也是动作 —— 输完该能看到结果（比如搜索建议、表单校验）
+      // 输入可能触发表单校验、列表刷新、自动补全 —— 布局跟着变
+      invalidateShotsFor(args.hwnd)
       return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: args => ({ card: 'generic', title: `输入文本`, kind: 'other', rawInput: args }),
@@ -1255,6 +1256,31 @@ function applyInner(ctx, config = {}) {
       const oldest = recentShots.keys().next().value
       recentShots.delete(oldest)
     }
+  }
+
+  /**
+   * 让某个窗口的**所有**已知截图作废。
+   *
+   * ── 什么时候必须调用 ──
+   *
+   * 只要动作用改变了窗口内容的布局，那张截图上的坐标就全部失效了：
+   *   · 滚轮     —— 内容滚了，原来那个位置是别的东西
+   *   · 拖动     —— 可能重排，也可能真的移动了东西
+   *   · 输入文本 —— 可能触发表单变化、列表刷新
+   *
+   * 不这么做的后果比"目测不准"更糟：旧 shotId 会**通过全部检查**
+   * （窗口没移、没改大小、没过期），然后把点击送到一个完全不同的位置。
+   * 校验通过了但结论是错的，这比没有校验更危险。
+   */
+  function invalidateShotsFor(hwnd) {
+    let n = 0
+    for (const [id, rec] of recentShots) {
+      if (String(rec.hwnd) === String(hwnd)) {
+        recentShots.delete(id)
+        n++
+      }
+    }
+    return n
   }
 
   /**
@@ -1540,6 +1566,8 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.drag(args)
       if (r.isError) throw new Error(r.text)
+      // 拖动可能重排（拖动列表项、拖滚动条）
+      invalidateShotsFor(args.hwnd)
       return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: a => ({
@@ -1581,6 +1609,8 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.wheel(args)
       if (r.isError) throw new Error(r.text)
+      // 内容滚动了 —— 这张截图上所有坐标立即失效
+      invalidateShotsFor(args.hwnd)
       return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: a => ({ card: 'generic', title: `滚轮 ${a.notches} 格`, kind: 'other' }),

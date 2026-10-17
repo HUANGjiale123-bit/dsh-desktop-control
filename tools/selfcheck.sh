@@ -243,7 +243,20 @@ else
   echo "  （跳过：找不到 node 或 dsc.exe）"
 fi
 
-head_ "18. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "18. 改变布局的动作必须让旧截图坐标失效"
+# 滚轮滚动后，同一张截图上的坐标全部指向别处。不作废的话旧 shotId 会
+# 通过全部检查（窗口没移、没改大小、没过期），然后点到完全不同位置。
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-shot-invalidate.mjs >/dev/null 2>&1; then
+    ok "wheel/drag/type 后作废旧 shotId，新截图不受影响"
+  else
+    bad "旧截图坐标未失效 —— 单独跑 node tools/test-shot-invalidate.mjs"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "19. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。
