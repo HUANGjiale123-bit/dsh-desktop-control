@@ -153,6 +153,49 @@ if (!existsSync(ESC)) {
   else bad('超时写了闸门 —— 用户没按停止却留下闸门，下次操作会被莫名拒绝')
 }
 
+console.log()
+console.log('── 5. 截图必须报告遮挡（缺陷 5 回归）──')
+
+// 截图走 CopyFromScreen，抓的是**屏幕区域**而不是窗口内容。
+// 窗口被盖住时截到的是遮挡者的画面，而且不报错 —— 第三方实测因此
+// 差点得出"QQ音乐的界面是 DSH"的错误结论。所以必须带 occluded 字段。
+const shot = join(tmp, 'shot.png')
+{
+  const wins = (run(DSC, ['list_windows']).json?.windows ?? []).filter(
+    (w) => w.width > 300 && w.height > 300,
+  )
+  const fg = wins.find((w) => w.foreground)
+  const notFg = wins.filter((w) => !w.foreground)
+
+  if (fg) {
+    const exe = (fg.exe ?? '').split(/[\\/]/).pop().toLowerCase()
+    const s = run(DSC, ['screenshot', String(fg.hwnd), shot], { DSC_ALLOWED_APPS: exe })
+    if (typeof s.json?.occluded === 'boolean') ok('截图返回 occluded 字段（布尔）')
+    else bad('截图没有返回 occluded 字段 —— 遮挡会被静默忽略')
+    if (s.json?.occluded === false) ok('前台窗口报告未遮挡')
+    else if (s.json?.occluded === true) {
+      console.log(`  · 前台窗口也报遮挡（有置顶窗口压着）：${s.json?.occludedPoints}`)
+    }
+  } else {
+    console.log('  （跳过：没有前台窗口）')
+  }
+
+  if (notFg.length > 0) {
+    const w = notFg[0]
+    const exe = (w.exe ?? '').split(/[\\/]/).pop().toLowerCase()
+    const s = run(DSC, ['screenshot', String(w.hwnd), shot], { DSC_ALLOWED_APPS: exe })
+    if (typeof s.json?.occluded === 'boolean') {
+      ok(`非前台窗口也返回 occluded 字段（${s.json.occluded ? '遮挡' : '未遮挡'}）`)
+      if (s.json.occluded) {
+        if (s.json.occludedPoints) ok('遮挡时给出了具体是哪个窗口盖住了')
+        else bad('报告了 occluded 却没说是谁挡的 —— 无法据此处理')
+      }
+    } else {
+      bad('非前台窗口截图没有 occluded 字段')
+    }
+  }
+}
+
 // 清理
 try { rmSync(tmp, { recursive: true, force: true }) } catch { }
 

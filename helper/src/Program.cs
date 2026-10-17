@@ -1204,6 +1204,61 @@ namespace Dsc
         }
 
         /// <summary>
+        /// 检测窗口有哪些部分被别的窗口盖住了。
+        ///
+        /// **为什么必须有这个**：截图走的是 `CopyFromScreen`，它抓的是
+        /// **屏幕上的那块区域**，不是窗口自身的内容。窗口被遮挡时，
+        /// 遮挡者的画面会原样被截进来 —— 而不报任何错。
+        ///
+        /// 第三方实测踩到的正是这个：截一个 QQ音乐 窗口（窗口列表明确写的
+        /// exe=QQMusic.exe），拿到的图却是 DSH 自己的界面，因为 QQ音乐
+        /// 那时被 DSH 盖着。差一点据此得出"QQ音乐的界面内容是 DSH"的
+        /// 错误结论。**静默返回别人的画面，比直接报错危险得多**——
+        /// 调用方会基于错误画面做决策，而且完全无从察觉。
+        ///
+        /// 做法：在矩形内采五个点（中心 + 四角内缩），逐点问
+        /// `WindowFromPoint` 那个点实际属于哪个窗口（用 GA_ROOT 归到顶层，
+        /// 免得把自己窗口的子控件误判成遮挡）。任何一个点属于别人就算被遮挡。
+        ///
+        /// 采样而不是逐像素，是因为逐像素要几百万次跨进程调用；
+        /// 五个点足以覆盖"盖住一大块"这种实际情况，而细缝遮挡对截图
+        /// 的可用性影响很小。
+        /// </summary>
+        private static List<string> DetectOcclusion(IntPtr hwnd, Native.RECT r)
+        {
+            List<string> blocked = new List<string>();
+            int w = r.Right - r.Left, h = r.Bottom - r.Top;
+            if (w <= 0 || h <= 0) return blocked;
+
+            // 内缩：窗口边缘常有阴影、圆角或 1px 边框，
+            // 贴着边界采样容易把阴影判成遮挡。
+            int inset = Math.Max(8, Math.Min(w, h) / 33);
+            int midX = r.Left + w / 2, midY = r.Top + h / 2;
+
+            string[] labels = { "中心", "左上", "右上", "左下", "右下" };
+            int[] xs = { midX, r.Left + inset, r.Right - inset, r.Left + inset, r.Right - inset };
+            int[] ys = { midY, r.Top + inset, r.Top + inset, r.Bottom - inset, r.Bottom - inset };
+
+            for (int i = 0; i < labels.Length; i++)
+            {
+                Native.POINT p = new Native.POINT();
+                p.X = xs[i];
+                p.Y = ys[i];
+
+                IntPtr hit = Native.WindowFromPoint(p);
+                if (hit == IntPtr.Zero) continue;
+                IntPtr root = Native.GetAncestor(hit, Native.GA_ROOT);
+                if (root == hwnd) continue;          // 属于目标窗口（含其子控件）
+
+                uint pid;
+                Native.GetWindowThreadProcessId(root, out pid);
+                string exe = BaseName(ProcessPath(pid));
+                blocked.Add(labels[i] + "=" + (exe.Length > 0 ? exe : "hwnd:" + root.ToInt64()));
+            }
+            return blocked;
+        }
+
+        /// <summary>
         /// 截取窗口画面。
         ///
         /// 坐标是窗口在桌面上的物理像素矩形（因进程已声明 DPI 感知，
@@ -1297,6 +1352,10 @@ namespace Dsc
                 return 9;
             }
 
+            // 检测遮挡：截图抓的是屏幕区域，被盖住的地方拿到的是遮挡者的画面。
+            // 必须在返回里说清楚，否则调用方会基于错误画面做决策且无从察觉。
+            List<string> occluded = DetectOcclusion(hwnd, r);
+
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("hwnd").Num(hwnd.ToInt64())
@@ -1304,6 +1363,8 @@ namespace Dsc
                 .Key("width").Num(w).Key("height").Num(h)
                 .Key("originX").Num(r.Left).Key("originY").Num(r.Top)
                 .Key("coords").Val("physical-pixels")
+                .Key("occluded").Bool(occluded.Count > 0)
+                .Key("occludedPoints").Val(string.Join(", ", occluded.ToArray()))
              .End();
             Console.WriteLine(j.ToString());
             return 0;

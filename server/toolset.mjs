@@ -712,8 +712,27 @@ export function createDesktopToolset(options = {}) {
       const path = join(shotDir, `win-${hwnd}-${Date.now()}.png`)
       const r = await runHelper(['screenshot', String(hwnd), path], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      // ── 被遮挡时必须先说，而且说在最前面 ──
+      //
+      // 截图走 CopyFromScreen，抓的是**屏幕上那块区域**，不是窗口自身内容。
+      // 窗口被盖住时，遮挡者的画面会被原样截进来，而且不报任何错。
+      //
+      // 第三方实测踩到的正是这个：截一个 QQ音乐 窗口（窗口列表明确写着
+      // exe=QQMusic.exe），拿到的图却是 DSH 自己的界面——因为那时 QQ音乐
+      // 被 DSH 盖着。差一点据此得出"QQ音乐的界面内容是 DSH"的错误结论。
+      //
+      // 所以警告放在正文**之前**。放在后面等于没说：调用方读到"截图已保存"
+      // 就已经开始看图了。
+      const warn = r.occluded
+        ? `⚠ 这张图**不完全是目标窗口**：以下位置被别的窗口盖住，截到的是它们的画面\n` +
+          `   ${r.occludedPoints}\n` +
+          `   要用这张图判断界面内容之前，先把目标窗口提到前台再截一次。\n\n`
+        : ''
+
       return {
         text:
+          warn +
           `窗口 ${hwnd} 截图已保存：${r.filepath}\n` +
           `尺寸 ${r.width}x${r.height}，桌面原点 (${r.originX},${r.originY})，坐标空间 ${r.coords}。\n` +
           `若要点图中某点 (ix,iy)，桌面坐标即 (${r.originX}+ix, ${r.originY}+iy)。`,
