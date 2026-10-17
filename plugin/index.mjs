@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.0'
+const PLUGIN_VERSION = '2.18.1'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1811,16 +1811,29 @@ function applyInner(ctx, config = {}) {
    * 这里**只读**，绝不写；写闸门是 ESC 监听器和 halt 的事。
    */
   /**
-   * 急停的自动恢复时间（分钟）。0 = 永不自动恢复。
+   * 急停的自动恢复时间（**秒**）。0 = 永不自动恢复。
    *
-   * 必须和 helper 的 HaltTtlMinutes() **完全一致** —— 否则会出现
+   * 必须和 helper 的 HaltTtlSeconds() **完全一致** —— 否则会出现
    * "插件认为已恢复、helper 还在拦"这种最难查的分裂状态。
-   * 两边都读 DSC_HALT_TTL_MINUTES，默认都是 10。
+   * 两边都读 DSC_HALT_TTL_SECONDS，默认都是 60；且都兼容
+   * DSC_HALT_TTL_MINUTES（设了就换算成秒）。
+   *
+   * 为什么 60 秒而不是 10 分钟：用户原话是"有时候只是临时看到你做错了，
+   * 想和你说一下，只要任务中止后，你没继续在干活就可以解除了"。
+   * ESC 是**打断**，不是**锁** —— 说完了就该好。
    */
-  function haltTtlMinutes() {
-    const v = Number(process.env.DSC_HALT_TTL_MINUTES)
-    if (process.env.DSC_HALT_TTL_MINUTES !== undefined && Number.isFinite(v) && v >= 0) return v
-    return 10
+  function haltTtlSeconds() {
+    const sv = process.env.DSC_HALT_TTL_SECONDS
+    if (sv !== undefined) {
+      const n = Number(sv)
+      if (Number.isFinite(n) && n >= 0) return n
+    }
+    const mv = process.env.DSC_HALT_TTL_MINUTES
+    if (mv !== undefined) {
+      const n = Number(mv)
+      if (Number.isFinite(n) && n >= 0) return n * 60
+    }
+    return 60
   }
 
   /**
@@ -1837,13 +1850,13 @@ function applyInner(ctx, config = {}) {
       const gp = gate()
       if (!existsSync(gp)) return false
 
-      const ttl = haltTtlMinutes()
+      const ttl = haltTtlSeconds()
       if (ttl === 0) return true
 
-      const ageMin = (Date.now() - statSync(gp).mtimeMs) / 60000
+      const ageSec = (Date.now() - statSync(gp).mtimeMs) / 1000
       // 时钟倒退时按"刚拉下"处理：宁可多停一会儿，也不要误放行
-      if (ageMin < 0) return true
-      return ageMin < ttl
+      if (ageSec < 0) return true
+      return ageSec < ttl
     } catch {
       // 读不到就当作**已拉下**：急停的默认方向是"停"，不是"放行"。
       // 早先这里返回 false —— 等于读失败就放行。
@@ -1854,11 +1867,11 @@ function applyInner(ctx, config = {}) {
   /** 闸门还剩多久自动恢复（毫秒）。0 或负数 = 已过期或永不恢复。 */
   function haltRemainingMs() {
     try {
-      const ttl = haltTtlMinutes()
+      const ttl = haltTtlSeconds()
       if (ttl === 0) return Infinity
       const gp = gate()
       if (!existsSync(gp)) return 0
-      return ttl * 60000 - (Date.now() - statSync(gp).mtimeMs)
+      return ttl * 1000 - (Date.now() - statSync(gp).mtimeMs)
     } catch {
       return 0
     }
@@ -2585,17 +2598,19 @@ function applyInner(ctx, config = {}) {
         // 告诉用户"它会自己恢复" —— 否则他以为要永远手动解除。
         // 用户的反馈就是："应该是我按下阀门，任务中止，过一段时间后
         // 阀门自动解除，而不是我手动解除"。
-        const ttl = haltTtlMinutes()
+        const ttl = haltTtlSeconds()
         if (ttl === 0) {
-          lines.push('  自动恢复：**已关闭**（DSC_HALT_TTL_MINUTES=0），只能手动解除。')
+          lines.push('  自动恢复：**已关闭**（DSC_HALT_TTL_SECONDS=0），只能手动解除。')
         } else {
           const left = haltRemainingMs()
           if (left > 0) {
-            const m = Math.floor(left / 60000)
-            const sec = Math.floor((left % 60000) / 1000)
-            lines.push(`  自动恢复：还有 ${m} 分 ${sec} 秒（总共 ${ttl} 分钟）。到时间后无需任何操作即可继续。`)
+            const sec = Math.ceil(left / 1000)
+            lines.push(
+              `  自动恢复：还有 ${sec} 秒（总共 ${ttl} 秒）。到时间后**无需任何操作**即可继续。`,
+            )
+            lines.push('  ESC 是"打断"，不是"锁"：你说完这句话、我停下来之后，它本来就该好了。')
           } else {
-            lines.push(`  自动恢复：已到期（${ttl} 分钟）—— 下一次操作会自动生效。`)
+            lines.push(`  自动恢复：已到期（${ttl} 秒）—— 下一次操作会自动生效。`)
           }
         }
 

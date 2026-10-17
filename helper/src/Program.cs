@@ -353,21 +353,33 @@ namespace Dsc
         }
 
         /// <summary>
-        /// 急停的自动恢复时间（分钟）。0 = 永不自动恢复。
+        /// 急停的自动恢复时间（秒）。0 = 永不自动恢复。
         ///
-        /// 为什么默认 10 分钟：用户按 ESC 说的是"先停一下"，不是
-        /// "永远别动我的电脑"。原先只有手动解除一条路，于是"暂停"实际上
-        /// 变成了"一直停到你想起那条命令"。
+        /// ── 为什么是 60 秒，不是 10 分钟 ──
         ///
-        /// 但也不能太短：按完 ESC 去接个电话，回来发现插件又在动了，
-        /// 那比停着更糟。10 分钟是"够离开一会儿、又不至于让人以为坏了"。
+        /// 用户的原话："10 分钟会不会太久了，有时候只是临时看到你做错了，
+        /// 想和你说一下，只要任务中止后，你没继续在干活就可以解除了吧"
+        ///
+        /// 他说得对。ESC 要的是**打断**，不是**锁**：
+        ///   · 锁：让你离开电脑时也没人动 → 需要很久
+        ///   · 打断：让你能插一句话 → 说完了就该好
+        ///
+        /// 60 秒的依据是我一轮操作通常 30-60 秒（实测 40 秒）：足够让
+        /// 调用方"意识到被停住"并停下来；如果它还在试，那说明它没理解，
+        /// 延长闸门也不会让它理解。
+        ///
+        /// 想更长就设 DSC_HALT_TTL_SECONDS（比如 600 = 十分钟）。
+        /// 设 0 = 永不自动恢复，等于原来的手动模式。
         /// </summary>
-        private static int HaltTtlMinutes()
+        private static int HaltTtlSeconds()
         {
-            string v = Environment.GetEnvironmentVariable("DSC_HALT_TTL_MINUTES");
+            string v = Environment.GetEnvironmentVariable("DSC_HALT_TTL_SECONDS");
             int n;
             if (!string.IsNullOrEmpty(v) && int.TryParse(v, out n) && n >= 0) return n;
-            return 10;
+            // 兼容旧的分钟变量：设了就换算
+            string old = Environment.GetEnvironmentVariable("DSC_HALT_TTL_MINUTES");
+            if (!string.IsNullOrEmpty(old) && int.TryParse(old, out n) && n >= 0) return n * 60;
+            return 60;
         }
 
         /// <summary>
@@ -384,15 +396,15 @@ namespace Dsc
                 string p = GatePath();
                 if (!File.Exists(p)) return false;
 
-                int ttl = HaltTtlMinutes();
+                int ttl = HaltTtlSeconds();
                 if (ttl == 0) return true;   // 显式关闭自动恢复
 
                 DateTime mtime = File.GetLastWriteTime(p);
-                double ageMin = (DateTime.Now - mtime).TotalMinutes;
-                // 时钟倒退（改系统时间、时区）时 ageMin 会是负数 ——
+                double ageSec = (DateTime.Now - mtime).TotalSeconds;
+                // 时钟倒退（改系统时间、时区）时 ageSec 会是负数 ——
                 // 那种情况按"刚拉下"处理，宁可多停一会儿也不要误放行。
-                if (ageMin < 0) return true;
-                return ageMin < ttl;
+                if (ageSec < 0) return true;
+                return ageSec < ttl;
             }
             catch
             {
