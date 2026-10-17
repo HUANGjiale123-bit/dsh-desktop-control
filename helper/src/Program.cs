@@ -1939,6 +1939,10 @@ namespace Dsc
                     System.Threading.Thread.Sleep(30);
                 }
 
+                // 抬起前强制对齐终点 —— 理由同 dragpath：
+                // mouse_event 受鼠标加速影响，落点会偏；而落点决定 drop 位置。
+                Native.SetCursorPos(x2, y2);
+                System.Threading.Thread.Sleep(60);
                 System.Threading.Thread.Sleep(120);
                 Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
                 pressed = false;
@@ -2299,6 +2303,17 @@ namespace Dsc
                     }
                 }
 
+                // ★ 抬起之前**强制对齐到终点**。
+                //
+                // 中间步用 mouse_event(MOVE) 是为了产生移动事件，但它受鼠标
+                // 加速影响，闭环校正只能减小误差、不能消除。实测拖到 (250,500)
+                // 时回读是 (227,573) —— 差了 73 像素。
+                //
+                // 而**落点决定东西放在哪里**：文件拖到错误位置、滚动条拖不到位。
+                // 所以最后一步换成 SetCursorPos：它不产生移动事件，但能精确
+                // 摆放光标；抬起时系统用的是光标当前所在位置。
+                Native.SetCursorPos(xs[xs.Count - 1], ys[ys.Count - 1]);
+                System.Threading.Thread.Sleep(60);
                 System.Threading.Thread.Sleep(120);
                 Native.mouse_event(up2, 0, 0, 0, UIntPtr.Zero);
                 pressed = false;
