@@ -192,6 +192,15 @@ namespace Dsc
         public const uint MOUSEEVENTF_LEFTUP = 0x0004;
         public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
         public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+        public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+        public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+
+        // 滚轮。dwData 用带符号的"格数 × WHEEL_DELTA"表达：
+        //   正数 = 向上/远离用户（内容向上滚），负数 = 向下。
+        // WHEEL_DELTA 固定 120，这是 Windows 的约定，不是本项目的选择。
+        public const uint MOUSEEVENTF_WHEEL = 0x0800;
+        public const uint MOUSEEVENTF_HWHEEL = 0x1000;
+        public const int WHEEL_DELTA = 120;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
@@ -747,6 +756,9 @@ namespace Dsc
                     case "screenshot": return CmdScreenshot(args);
                     case "click": return CmdClick(args);
                     case "click_element": return CmdClickElement(args);
+                    case "move": return CmdMove(args);
+                    case "drag": return CmdDrag(args);
+                    case "wheel": return CmdWheel(args);
                     case "set_value": return CmdSetValue(args);
                     case "do_action": return CmdDoAction(args);
                     case "type": return CmdType(args);
@@ -1544,7 +1556,25 @@ namespace Dsc
             if (pos.Count < 2) throw new ArgumentException("click 需要 x y 参数（桌面绝对物理像素）");
             int x = int.Parse(pos[0]);
             int y = int.Parse(pos[1]);
-            bool right = pos.Count > 2 && pos[2] == "right";
+
+            // 第三个位置参数是按钮名；--count 是后加的（从 pos 里剥出来）。
+            string clickButton = "left";
+            int clickCount = 1;
+            List<string> rest2 = new List<string>();
+            for (int i = 0; i < pos.Count; i++)
+            {
+                if (i == 2 && (pos[i] == "left" || pos[i] == "right" || pos[i] == "middle"))
+                    clickButton = pos[i];
+                else if (pos[i] == "--count")
+                {
+                    if (i + 1 >= pos.Count) throw new ArgumentException("--count 后面需要数字");
+                    clickCount = int.Parse(pos[++i]);
+                    if (clickCount < 1) clickCount = 1;
+                    if (clickCount > 3) clickCount = 3;
+                }
+                else if (i >= 2) rest2.Add(pos[i]);
+            }
+            bool right = clickButton == "right";
 
             // 有目标窗口时先激活它。激活不只是为了注入能被接受，
             // 也是为了**把目标提到前台，让"落点属于谁"这件事变得可判断**。
@@ -1588,7 +1618,7 @@ namespace Dsc
             if (target == IntPtr.Zero) RequireActivated(root, "click");
 
             MoveCursorAbsolute(x, y);
-            SendMouseButton(right, 1);
+            SendMouseButton(clickButton, clickCount);
 
             // 回读光标位置：调用成功不代表点在了期望处，读回来才是证据。
             Native.POINT after;
@@ -1618,7 +1648,7 @@ namespace Dsc
                 .Key("targetHwnd").Num(target.ToInt64())
                 .Key("atExe").Val(atExe)
                 .Key("atHwnd").Num(rootAfter.ToInt64())
-                .Key("button").Val(right ? "right" : "left")
+                .Key("button").Val(clickButton).Key("count").Num(clickCount)
              .End();
             Console.WriteLine(j.ToString());
             return 0;
@@ -1675,6 +1705,295 @@ namespace Dsc
         /// 点击用坐标而非 Invoke 模式：坐标与截图同处一个坐标空间，
         /// 所见即所点，不需要为每个控件类型判断该用哪个 Pattern。
         /// </summary>
+
+        /// <summary>
+        /// 把鼠标移动到指定点，**不点击**。用法：move &lt;x&gt; &lt;y&gt; [--hwnd H]
+        ///
+        /// 用途是触发 hover（悬停菜单、工具提示）。之前只有 click，
+        /// 而 click 会按下再抬起，很多界面因此走的是"点击"分支而不是"悬停"分支。
+        /// </summary>
+        private static int CmdMove(string[] args)
+        {
+            RequireNotHalted("move");
+            List<string> pos = new List<string>();
+            IntPtr target = ParseOptionalHwnd(args, pos);
+            if (pos.Count < 2) throw new ArgumentException("move 需要 x y 参数（桌面绝对物理像素）");
+            int x = int.Parse(pos[0]);
+            int y = int.Parse(pos[1]);
+
+            if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "move");
+                RequireActivated(target, "move");
+            }
+
+            IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+            IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
+            if (hit == IntPtr.Zero)
+                throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口，拒绝移动。");
+            if (target != IntPtr.Zero && root != target)
+                throw new InvalidOperationException(
+                    "拒绝移动：坐标 (" + x + "," + y + ") 属于窗口 " + root.ToInt64() +
+                    "，不是指定的目标窗口 " + target.ToInt64() + "。");
+            RequireAllowedWindow(root, "move");
+
+            MoveCursorAbsolute(x, y);
+
+            Native.POINT after;
+            bool got = Native.GetCursorPos(out after);
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("x").Num(x).Key("y").Num(y)
+                .Key("cursorAfter").Val(got ? (after.X + "," + after.Y) : "?")
+                .Key("atExe").Val(BaseName(ProcessPath(PidOfWindow(root))))
+                .Key("verified").Bool(false)
+                .Key("note").Val("光标已移动，未点击。hover 效果是否出现要重新观察。")
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 拖动：在起点按下，分步移动到终点，抬起。
+        /// 用法：drag &lt;x1&gt; &lt;y1&gt; &lt;x2&gt; &lt;y2&gt; [--hwnd H] [--steps N] [left|right|middle]
+        ///
+        /// ── 为什么必须分步移动 ──
+        ///
+        /// 直接把光标从 A 移到 B 再抬起，多数应用收不到中间的移动事件，
+        /// 于是"拖拽"被当成一次普通点击 —— 文件不会被拖走，滚动条不会动。
+        /// 真实拖动要靠一连串中间位置，让应用看到按下状态下的位移。
+        ///
+        /// ── 为什么每一步都要检查急停 ──
+        ///
+        /// 拖动是有副作用的动作（移动文件、调整窗口大小），而且耗时最长。
+        /// 用户在这期间按 ESC 必须立即停下 —— 但**停下的同时必须松开按键**，
+        /// 否则鼠标会一直处于按下状态，用户接下来在桌面上的任何点击都会变成拖拽。
+        /// 那是一种很难自己恢复的坏状态，所以用 try/finally 保证释放。
+        /// </summary>
+        private static int CmdDrag(string[] args)
+        {
+            RequireNotHalted("drag");
+
+            string button = "left";
+            int steps = 12;
+            List<string> pos = new List<string>();
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--steps")
+                {
+                    if (i + 1 >= args.Length) throw new ArgumentException("--steps 后面需要数字");
+                    steps = int.Parse(args[++i]);
+                    if (steps < 2) steps = 2;
+                    if (steps > 200) steps = 200;
+                }
+                else if (args[i] == "left" || args[i] == "right" || args[i] == "middle")
+                    button = args[i];
+                else pos.Add(args[i]);
+            }
+            // --hwnd 要从 pos 里剥掉
+            IntPtr target = IntPtr.Zero;
+            List<string> clean = new List<string>();
+            for (int i = 0; i < pos.Count; i++)
+            {
+                if (pos[i] == "--hwnd")
+                {
+                    if (i + 1 >= pos.Count) throw new ArgumentException("--hwnd 后面需要窗口句柄");
+                    target = new IntPtr(long.Parse(pos[++i]));
+                }
+                else clean.Add(pos[i]);
+            }
+            pos = clean;
+
+            if (pos.Count < 4)
+                throw new ArgumentException("drag 需要 x1 y1 x2 y2（桌面绝对物理像素）");
+            int x1 = int.Parse(pos[0]), y1 = int.Parse(pos[1]);
+            int x2 = int.Parse(pos[2]), y2 = int.Parse(pos[3]);
+
+            if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "drag");
+                RequireActivated(target, "drag");
+            }
+            else
+            {
+                IntPtr h = Native.WindowFromPoint(new Native.POINT { X = x1, Y = y1 });
+                IntPtr rt = h == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(h, Native.GA_ROOT);
+                if (rt != IntPtr.Zero) RequireAllowedWindow(rt, "drag");
+            }
+
+            uint down, up;
+            ButtonFlags(button, out down, out up);
+
+            bool pressed = false;
+            try
+            {
+                MoveCursorAbsolute(x1, y1);
+                System.Threading.Thread.Sleep(60);
+                Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+                pressed = true;
+                System.Threading.Thread.Sleep(60);
+
+                for (int i = 1; i <= steps; i++)
+                {
+                    if (IsHalted())
+                        throw new InvalidOperationException(
+                            "拖动被急停中断（已移动 " + (i - 1) + " / " + steps + " 步）。按键已释放，不会卡在按下状态。");
+
+                    int cx = x1 + (x2 - x1) * i / steps;
+                    int cy = y1 + (y2 - y1) * i / steps;
+                    Native.SetCursorPos(cx, cy);
+                    System.Threading.Thread.Sleep(12);
+                }
+
+                System.Threading.Thread.Sleep(80);
+                Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+                pressed = false;
+            }
+            finally
+            {
+                // ★ 无论怎么退出，**必须**抬起来。
+                //   上面那条 throw 会跳过正常路径，如果没有这个 finally，
+                //   用户就得到一个"一直按着左键"的鼠标。
+                if (pressed)
+                {
+                    try { Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero); }
+                    catch { }
+                }
+            }
+
+            Native.POINT after;
+            bool got = Native.GetCursorPos(out after);
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("from").Val(x1 + "," + y1)
+                .Key("to").Val(x2 + "," + y2)
+                .Key("steps").Num(steps)
+                .Key("button").Val(button)
+                .Key("cursorAfter").Val(got ? (after.X + "," + after.Y) : "?")
+                .Key("verified").Bool(false)
+                .Key("note").Val(
+                    "拖动事件已发出，按键已确认释放。拖动的结果（文件是否移动、滚动条是否变化）" +
+                    "要重新观察才能确认。")
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// 发送鼠标滚轮。用法：wheel &lt;格数&gt; [--at x,y] [--hwnd H] [--horiz]
+        ///
+        /// 格数是**带符号的整数**：正数向上/远离用户，负数向下。内部乘 WHEEL_DELTA(120)。
+        ///
+        /// ── 为什么要有它 ──
+        ///
+        /// 之前只能靠 UIA 的 ScrollPattern（do_action 的 Scroll Up/Down）。
+        /// 那条路只对"声明了滚动模式的控件"有效，网页、画布、自绘列表全都不认。
+        /// 真实滚轮是通用手段：滚到哪由系统送给光标下的窗口。
+        ///
+        /// ── 为什么要指定位置 ──
+        ///
+        /// 滚轮的作用对象是**光标下面的窗口**，不是"当前前台窗口"。
+        /// 所以不指定位置就可能滚错窗口 —— 光标停在哪就滚哪。
+        /// 给了 --at 就先移过去，同时校验落点属于目标窗口。
+        /// </summary>
+        private static int CmdWheel(string[] args)
+        {
+            RequireNotHalted("wheel");
+
+            bool horiz = false;
+            IntPtr target = IntPtr.Zero;
+            int atX = int.MinValue, atY = int.MinValue;
+            List<string> pos = new List<string>();
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--horiz") { horiz = true; continue; }
+                if (args[i] == "--hwnd")
+                {
+                    if (i + 1 >= args.Length) throw new ArgumentException("--hwnd 后面需要窗口句柄");
+                    target = new IntPtr(long.Parse(args[++i]));
+                    continue;
+                }
+                if (args[i] == "--at")
+                {
+                    if (i + 1 >= args.Length) throw new ArgumentException("--at 后面需要 x,y");
+                    string[] xy = args[++i].Split(',');
+                    if (xy.Length != 2) throw new ArgumentException("--at 的格式是 x,y");
+                    atX = int.Parse(xy[0]); atY = int.Parse(xy[1]);
+                    continue;
+                }
+                pos.Add(args[i]);
+            }
+            if (pos.Count < 1) throw new ArgumentException("wheel 需要格数（正=上，负=下）");
+            int notches = int.Parse(pos[0]);
+            if (notches == 0) throw new ArgumentException("格数不能是 0");
+
+            if (atX != int.MinValue)
+            {
+                IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = atX, Y = atY });
+                IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
+                if (hit == IntPtr.Zero)
+                    throw new InvalidOperationException("--at (" + atX + "," + atY + ") 处没有窗口。");
+                if (target != IntPtr.Zero && root != target)
+                    throw new InvalidOperationException(
+                        "拒绝滚动：--at 处属于窗口 " + root.ToInt64() +
+                        "，不是指定的目标窗口 " + target.ToInt64() + "。");
+                if (target != IntPtr.Zero) RequireAllowedWindow(target, "wheel");
+                else RequireAllowedWindow(root, "wheel");
+                MoveCursorAbsolute(atX, atY);
+                System.Threading.Thread.Sleep(40);
+            }
+            else if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "wheel");
+                // 没给位置时把光标放到目标窗口中心，否则会滚到光标当前所在窗口
+                RequireActivated(target, "wheel");
+                Native.RECT r;
+                if (Native.GetWindowRect(target, out r))
+                {
+                    MoveCursorAbsolute((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2);
+                    System.Threading.Thread.Sleep(40);
+                }
+            }
+
+            uint flag = horiz ? Native.MOUSEEVENTF_HWHEEL : Native.MOUSEEVENTF_WHEEL;
+            Native.mouse_event(flag, 0, 0, (uint)(notches * Native.WHEEL_DELTA), UIntPtr.Zero);
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("notches").Num(notches)
+                .Key("delta").Num(notches * Native.WHEEL_DELTA)
+                .Key("horizontal").Bool(horiz)
+                .Key("at").Val(atX != int.MinValue ? (atX + "," + atY) : "（窗口中心）")
+                .Key("verified").Bool(false)
+                .Key("note").Val("滚轮事件已发出。滚动结果要重新观察才能确认。")
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>从参数里取 --hwnd，其余按位置参数返回。</summary>
+        private static IntPtr ParseOptionalHwnd(string[] args, List<string> positional)
+        {
+            IntPtr target = IntPtr.Zero;
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--hwnd")
+                {
+                    if (i + 1 >= args.Length) throw new ArgumentException("--hwnd 后面需要窗口句柄");
+                    target = new IntPtr(long.Parse(args[++i]));
+                }
+                else positional.Add(args[i]);
+            }
+            return target;
+        }
+
+        private static uint PidOfWindow(IntPtr hwnd)
+        {
+            uint pid;
+            Native.GetWindowThreadProcessId(hwnd, out pid);
+            return pid;
+        }
+
         private static int CmdClickElement(string[] args)
         {
             RequireNotHalted("click_element");
@@ -2637,18 +2956,38 @@ namespace Dsc
         }
 
         /// <summary>发送一次鼠标按键（按下 + 抬起）。</summary>
-        private static void SendMouseButton(bool right, int clickCount)
+        /// <summary>按钮名 → (按下, 抬起) 两个事件标志。</summary>
+        private static void ButtonFlags(string button, out uint down, out uint up)
         {
-            uint down = right ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_LEFTDOWN;
-            uint up = right ? Native.MOUSEEVENTF_RIGHTUP : Native.MOUSEEVENTF_LEFTUP;
+            string b = (button ?? "left").ToLowerInvariant();
+            if (b == "right") { down = Native.MOUSEEVENTF_RIGHTDOWN; up = Native.MOUSEEVENTF_RIGHTUP; return; }
+            if (b == "middle") { down = Native.MOUSEEVENTF_MIDDLEDOWN; up = Native.MOUSEEVENTF_MIDDLEUP; return; }
+            if (b != "left") throw new ArgumentException("button 只能是 left / right / middle：" + button);
+            down = Native.MOUSEEVENTF_LEFTDOWN; up = Native.MOUSEEVENTF_LEFTUP;
+        }
 
-            for (int i = 0; i < Math.Max(1, clickCount); i++)
+        private static void SendMouseButton(string button, int clickCount)
+        {
+            uint down, up;
+            ButtonFlags(button, out down, out up);
+
+            int n = Math.Max(1, clickCount);
+            for (int i = 0; i < n; i++)
             {
-                System.Threading.Thread.Sleep(40);
+                // 双击的两次之间要短：系统的双击判据看间隔（默认 500ms），
+                // 但 40ms 那种"间隔很快的两次单击"在多数应用里会被当成双击。
+                // 第一次按下前多等一点，让前一个动作的界面响应先到位。
+                System.Threading.Thread.Sleep(i == 0 ? 40 : 30);
                 Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
-                System.Threading.Thread.Sleep(40);
+                System.Threading.Thread.Sleep(n > 1 ? 30 : 40);
                 Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
             }
+        }
+
+        /// <summary>兼容旧调用（只分左右）。</summary>
+        private static void SendMouseButton(bool right, int clickCount)
+        {
+            SendMouseButton(right ? "right" : "left", clickCount);
         }
 
         private static string WindowTitle(IntPtr h)

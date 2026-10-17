@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.10.1'
+const PLUGIN_VERSION = '2.11.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -848,7 +848,11 @@ function applyInner(ctx, config = {}) {
           '那样插件会自己加窗口原点，不用你算。' +
           '故意不把这个设成默认：静默改变坐标含义比让人多写一个参数危险。',
       },
-      button: BUTTON,
+      button: { type: 'string', enum: ['left', 'right', 'middle'], description: '鼠标键，默认 left。' },
+      count: {
+        type: 'integer',
+        description: '点几次，默认 1。传 2 就是双击 —— 两次点击在**同一次调用内**完成，间隔由插件控制，比调两次 click 可靠。',
+      },
       observe: OBSERVE,
       settleMs: SETTLE_MS,
     },
@@ -1417,6 +1421,140 @@ function applyInner(ctx, config = {}) {
       kind: 'other',
       raw: args,
     }),
+  })
+
+  /* ───────── 悬停 / 拖动 / 滚轮 ─────────
+   *
+   * 这三种之前完全没有，而它们是真实任务里常用的：
+   *   · 悬停 —— 很多菜单要"光标停在那里"才展开，点击走的是另一条分支
+   *   · 拖动 —— 移动文件、调窗口大小、拖滚动条
+   *   · 滚轮 —— 比 UIA 的 ScrollPattern 通用（网页/画布/自绘列表都不认 Pattern）
+   *
+   * 共同点：**都不能靠返回值证明成功**。悬停有没有出菜单、拖动有没有真的
+   * 移动了东西、滚轮滚了几屏 —— 只能重新观察。所以它们都接 observe。
+   */
+
+  register({
+    name: 'desktop_move',
+    description:
+      '把鼠标移动到指定坐标，**不点击**。用于触发悬停效果（菜单、工具提示）。' +
+      '之前只有 desktop_click，而点击会按下再抬起，很多界面因此走的是"点击"分支而不是"悬停"分支。' +
+      '坐标含义取决于 space（同 desktop_click）。' + allowNote,
+    parameters: {
+      hwnd: { ...HWND, description: '目标窗口句柄，用于白名单与存活校验。' },
+      x: { type: 'integer', description: 'X（space="desktop" 时是桌面绝对 X，=window 时是图内 X）。' },
+      y: { type: 'integer', description: 'Y（同上）。' },
+      space: {
+        type: 'string',
+        enum: ['desktop', 'window'],
+        description: '坐标空间，默认 desktop。图内坐标传 window，插件自己加窗口原点。',
+      },
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面' },
+        },
+      },
+      render: (_a, v) => (v.image ? [v.image, { type: 'text', text: v.result }] : [{ type: 'text', text: v.result }]),
+    },
+    async execute(args) {
+      const r = await set.tools.move(args)
+      if (r.isError) throw new Error(r.text)
+      return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
+    },
+    presentCall: a => ({ card: 'generic', title: `悬停 (${a.x}, ${a.y})`, kind: 'other' }),
+  })
+
+  register({
+    name: 'desktop_drag',
+    description:
+      '从一个点拖到另一个点：起点按下 → 分步移动 → 抬起。用于移动文件、调整窗口大小、拖滚动条。' +
+      '坐标含义取决于 space（同 desktop_click），起点和终点用同一套。' +
+      '**中途按 ESC 会停在原地并释放按键**，不会把鼠标卡在按下状态。' +
+      '拖动是最慢、副作用最大的一类动作，结果必须重新观察才能确认。' + allowNote,
+    parameters: {
+      hwnd: { ...HWND, description: '目标窗口句柄。' },
+      x1: { type: 'integer', description: '起点 X。' },
+      y1: { type: 'integer', description: '起点 Y。' },
+      x2: { type: 'integer', description: '终点 X。' },
+      y2: { type: 'integer', description: '终点 Y。' },
+      space: {
+        type: 'string',
+        enum: ['desktop', 'window'],
+        description: '坐标空间，默认 desktop。',
+      },
+      steps: {
+        type: 'integer',
+        description: '分几步移动，默认 12。步子太少时应用可能把拖动当成点击；范围 2~200。',
+      },
+      button: { type: 'string', enum: ['left', 'right', 'middle'], description: '用哪个键拖，默认 left。' },
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面' },
+        },
+      },
+      render: (_a, v) => (v.image ? [v.image, { type: 'text', text: v.result }] : [{ type: 'text', text: v.result }]),
+    },
+    async execute(args) {
+      const r = await set.tools.drag(args)
+      if (r.isError) throw new Error(r.text)
+      return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
+    },
+    presentCall: a => ({
+      card: 'generic',
+      title: `拖动 (${a.x1},${a.y1}) → (${a.x2},${a.y2})`,
+      kind: 'other',
+    }),
+  })
+
+  register({
+    name: 'desktop_wheel',
+    description:
+      '发送鼠标滚轮，比 desktop_do_action 的 Scroll Up/Down 通用得多。' +
+      '滚动对象是**光标下面的窗口**，所以位置很重要：不给 at 时自动把光标放到目标窗口中心。' +
+      'notches 是带符号格数：正数向上/远离用户，负数向下。' + allowNote,
+    parameters: {
+      hwnd: { ...HWND, description: '目标窗口句柄。' },
+      notches: { type: 'integer', description: '滚动格数，正数向上，负数向下。不能是 0。' },
+      at: {
+        type: 'array',
+        items: { type: 'integer' },
+        description: '可选，[x, y] 指定滚动位置（桌面绝对坐标）。不给则用窗口中心。',
+      },
+      horiz: { type: 'boolean', description: '横向滚动（默认纵向）。' },
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面' },
+        },
+      },
+      render: (_a, v) => (v.image ? [v.image, { type: 'text', text: v.result }] : [{ type: 'text', text: v.result }]),
+    },
+    async execute(args) {
+      const r = await set.tools.wheel(args)
+      if (r.isError) throw new Error(r.text)
+      return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
+    },
+    presentCall: a => ({ card: 'generic', title: `滚轮 ${a.notches} 格`, kind: 'other' }),
   })
 
   register({

@@ -27,7 +27,18 @@
 // ——后者会让模型收到错误的参数契约，且完全没有征兆。
 
 /** 允许出现在参数规格里的属性。不在这个集合里的一律报错。 */
-const ALLOWED_SPEC_KEYS = new Set(['type', 'description', 'required', 'enum'])
+const ALLOWED_SPEC_KEYS = new Set([
+  'type',
+  'description',
+  'required',
+  'enum',
+  // array 的元素规格。
+  //
+  // 之前不支持，于是任何数组参数都没法定义 —— 而"坐标对 [x,y]"这种形状
+  // 迟早要用到（desktop_wheel 的 at 就是）。与其把它拆成两个参数糊过去，
+  // 不如把转换补全：拆参数会让"这两个数必须一起给"这件事没法在 schema 里表达。
+  'items',
+])
 
 /** 允许出现在输出 schema 里的顶层键。 */
 const ALLOWED_OUTPUT_KEYS = new Set([
@@ -82,6 +93,17 @@ function specToSchema(spec, path) {
   if (spec.enum !== undefined) {
     if (!Array.isArray(spec.enum)) schemaError(`${path}.enum 必须是数组`)
     out.enum = spec.enum.slice()
+  }
+  if (spec.items !== undefined) {
+    if (spec.type !== 'array') {
+      schemaError(`${path}.items 只在 type 为 "array" 时有意义（当前是 "${spec.type}"）`)
+    }
+    // 递归：元素规格本身也可以是对象/数组。
+    out.items = specToSchema(spec.items, `${path}.items`)
+  }
+  if (spec.type === 'array' && spec.items === undefined) {
+    // 没给元素规格的数组等于"什么东西都能塞"，那会在运行时才发现问题。
+    schemaError(`${path} 是 array 但没有 items —— 元素类型不明，拒绝生成一个无约束的数组`)
   }
   return out
 }

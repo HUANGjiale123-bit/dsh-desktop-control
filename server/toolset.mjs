@@ -402,6 +402,35 @@ export function createDesktopToolset(options = {}) {
     }
   }
 
+  /**
+   * 把图内坐标换算成桌面坐标，并做范围检查。
+   * drag / move / wheel 都要这套，抽出来免得各写一遍走样。
+   */
+  async function resolvePoint(hwnd, x, y, space, what) {
+    const pre = await runHelper(['list_windows'])
+    const w = pre.ok
+      ? (pre.windows ?? []).find((t) => String(t.hwnd) === String(hwnd))
+      : undefined
+    if (space === 'window' && !w) {
+      return { err: `失败：无法取得窗口 ${hwnd} 的矩形，无法把图内坐标换算成桌面坐标。` }
+    }
+    const px = space === 'window' ? w.x + x : x
+    const py = space === 'window' ? w.y + y : y
+    if (w) {
+      const inside = px >= w.x && px < w.x + w.width && py >= w.y && py < w.y + w.height
+      if (!inside) {
+        return {
+          err:
+            `失败：${what} 的坐标 (${px},${py}) 不在窗口 ${hwnd} 范围内` +
+            `（窗口在 ${w.x},${w.y}，尺寸 ${w.width}x${w.height}）。` +
+            (space === 'window' ? `图内坐标 (${x},${y}) 超出了窗口尺寸。` : `若你手上是图内坐标，请加 space:"window"。`),
+        }
+      }
+    }
+    return { px, py, w }
+  }
+
+
   const tools = {
     /**
      * 列出已安装的应用。
@@ -858,7 +887,7 @@ export function createDesktopToolset(options = {}) {
       }
     },
 
-    async click({ hwnd, x, y, button, space, expectedGeom }) {
+    async click({ hwnd, x, y, button, count, space, expectedGeom }) {
       /* 坐标空间：默认 desktop（桌面绝对），可选 window（图内坐标）。
        *
        * ── 为什么加这个参数 ──
@@ -976,10 +1005,11 @@ export function createDesktopToolset(options = {}) {
 
       // 把目标窗口一起传下去 —— 少了它，原生程序只能按"落点属于谁"判断，
       // 目标被遮挡时会去点遮挡者。
-      const r = await runHelper(
-        ['click', String(dx), String(dy), button ?? 'left', '--hwnd', String(hwnd)],
-        'configured',
-      )
+      const btn = button === 'right' || button === 'middle' ? button : 'left'
+      const n = Number.isFinite(Number(count)) ? Math.max(1, Math.min(3, Number(count))) : 1
+      const clickArgs = ['click', String(dx), String(dy), btn, '--hwnd', String(hwnd)]
+      if (n > 1) clickArgs.push('--count', String(n))
+      const r = await runHelper(clickArgs, 'configured')
       if (!r.ok) return { isError: true, text: failMessage(r) }
 
       // ── 动作后的重新观察 ──
@@ -990,8 +1020,9 @@ export function createDesktopToolset(options = {}) {
       // 现在用 helper 回读到的两件事，把"点了"和"点成了"分开：
       //   cursorLanded — 光标是否真的停在目标坐标
       //   atExe        — 那个位置现在属于哪个应用
+      const times = r.count > 1 ? `${r.count} 次` : ''
       const lines = [
-        `已在桌面坐标 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键点击。`,
+        `已在桌面坐标 (${r.clickedX},${r.clickedY}) 执行 ${r.button} 键${times}点击。`,
       ]
       if (geomWarn) lines.unshift(geomWarn.trimEnd())
       if (useWindowSpace) {
@@ -1027,6 +1058,106 @@ export function createDesktopToolset(options = {}) {
         `  注意：以上只核实到"点击已发出且落在预期窗口"，` +
           `**不能**证明应用响应了。要确认效果请重读界面或截图。`,
       )
+      return { text: lines.join('\n') }
+    },
+
+    /**
+     * 悬停：把光标移过去但**不点击**。
+     *
+     * 之前只有 click，而 click 会按下再抬起 —— 很多界面的悬停菜单、
+     * 工具提示只认"光标停在那里"，收到点击走的是另一条分支。
+     */
+    async move({ hwnd, x, y, space }) {
+      const pt = await resolvePoint(hwnd, x, y, space, 'move')
+      if (pt.err) return { isError: true, text: pt.err }
+
+      const auth = await authorize(hwnd, 'move', { windows: pt.w ? [pt.w] : undefined })
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const r = await runHelper(['move', String(pt.px), String(pt.py), '--hwnd', String(hwnd)], 'configured')
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      const lines = [`已把光标移到桌面坐标 (${r.x},${r.y})，**没有点击**。`]
+      if (space === 'window') lines.push(`  坐标空间: window（图内 (${x},${y}) + 原点 (${pt.w.x},${pt.w.y})）`)
+      if (r.cursorAfter) lines.push(`  光标回读：${r.cursorAfter}`)
+      if (r.atExe) lines.push(`  落点属于「${r.atExe}」`)
+      lines.push(`  未核实：悬停效果（菜单/提示是否出现）要重新观察。`)
+      return { text: lines.join('\n') }
+    },
+
+    /**
+     * 拖动：起点按下 → 分步移动 → 抬起。
+     *
+     * 时间最长、副作用最大的一类动作（移动文件、调窗口大小、拖滚动条），
+     * 所以它有两个额外的保证：
+     *   · 每步都检查急停，按 ESC 立即停在原地
+     *   · **无论怎么退出都释放按键**（helper 里的 try/finally）——
+     *     否则鼠标会一直处于按下状态，用户接下来任何点击都变成拖拽
+     */
+    async drag({ hwnd, x1, y1, x2, y2, space, steps, button }) {
+      const a = await resolvePoint(hwnd, x1, y1, space, 'drag 起点')
+      if (a.err) return { isError: true, text: a.err }
+      const b = await resolvePoint(hwnd, x2, y2, space, 'drag 终点')
+      if (b.err) return { isError: true, text: b.err }
+
+      const auth = await authorize(hwnd, 'drag', { windows: a.w ? [a.w] : undefined })
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const n = Number.isFinite(Number(steps)) ? Math.max(2, Math.min(200, Number(steps))) : 12
+      const btn = button === 'right' || button === 'middle' ? button : 'left'
+      const r = await runHelper(
+        [
+          'drag', String(a.px), String(a.py), String(b.px), String(b.py),
+          btn, '--steps', String(n), '--hwnd', String(hwnd),
+        ],
+        'configured',
+        60000,
+      )
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      const lines = [
+        `已拖动：(${r.from}) → (${r.to})，${r.steps} 步，${r.button} 键。`,
+        `  光标回读：${r.cursorAfter ?? '?'}`,
+        `  按键已确认释放（拖动中途被急停打断时也是这样）。`,
+        `  未核实：拖动结果（文件是否移动、滚动条是否变化）要重新观察。`,
+      ]
+      return { text: lines.join('\n') }
+    },
+
+    /**
+     * 鼠标滚轮。
+     *
+     * 比 UIA 的 ScrollPattern 通用得多：那条路只对声明了滚动模式的控件有效，
+     * 网页、画布、自绘列表全都不认。真实滚轮是系统送给"光标下的窗口"，
+     * 所以必须先把光标放到目标上 —— 这里不给位置时自动放到窗口中心。
+     */
+    async wheel({ hwnd, notches, at, horiz }) {
+      const n = Number(notches)
+      if (!Number.isFinite(n) || n === 0) {
+        return { isError: true, text: '失败：notches 必须是非零整数（正数向上/远离用户，负数向下）。' }
+      }
+
+      let atX = null, atY = null
+      if (Array.isArray(at) && at.length === 2) {
+        const pt = await resolvePoint(hwnd, Number(at[0]), Number(at[1]), at.length > 2 ? 'window' : 'desktop', 'wheel --at')
+        if (pt.err) return { isError: true, text: pt.err }
+        atX = pt.px; atY = pt.py
+      }
+
+      const auth = await authorize(hwnd, 'wheel')
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const args = ['wheel', String(Math.round(n)), '--hwnd', String(hwnd)]
+      if (atX !== null) args.push('--at', `${atX},${atY}`)
+      if (horiz) args.push('--horiz')
+      const r = await runHelper(args, 'configured')
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      const lines = [
+        `已滚动 ${r.notches} 格（${r.horizontal ? '横向' : '纵向'}，delta=${r.delta}）。`,
+        `  位置：${r.at}`,
+        `  未核实：滚动结果要重新观察。`,
+      ]
       return { text: lines.join('\n') }
     },
 
