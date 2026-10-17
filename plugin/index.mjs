@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.15.0'
+const PLUGIN_VERSION = '2.16.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -394,6 +394,69 @@ function applyInner(ctx, config = {}) {
   }
 
   /**
+   * "有键按着"的记录文件，和闸门放同一个目录。
+   *
+   * 为什么需要它：见 desktop_hold 的 execute —— helper 是短进程，
+   * 按下之后按键状态留在系统里，而进程已经退出了。插件一旦重启，
+   * 就没人知道"现在还按着一个键"。
+   */
+  function pressedPath() {
+    return join(dirname(gate()), 'pressed.json')
+  }
+
+  /**
+   * 启动时收拾上一次的遗留。
+   *
+   * 发现"有键按着"的记录就**直接松手**，并明确告诉用户发生了什么。
+   * 宁可在没人按着的时候多松一次（无害），也不要让用户的鼠标卡在按下状态。
+   */
+  async function cleanupStalePress() {
+    let p = ''
+    try {
+      p = pressedPath()
+      if (!existsSync(p)) return
+      const raw = readFileSync(p, 'utf8')
+      let info = null
+      try {
+        info = JSON.parse(raw)
+      } catch {
+        info = null
+      }
+      const ago = info?.at ? Math.round((Date.now() - info.at) / 1000) : null
+      ctx.logger?.warn?.(
+        `[desktop-control] 发现上次遗留的按键状态（${info?.button ?? '?'}` +
+          `${ago !== null ? `，${ago} 秒前按下` : ''}），正在自动松开。` +
+          `这通常意味着上一次桌面操作没有正常结束（插件崩溃或被强杀）。`,
+      )
+      try {
+        await spawnAsync(helperPath, ['release'])
+      } catch {
+        /* 松手失败也要删记录，否则每次启动都会重复告警 */
+      }
+      rmSync(p, { force: true })
+    } catch {
+      /* 收拾失败不该阻止插件启动 */
+    }
+  }
+
+  /** 用一个短进程执行一次 dsc.exe 命令（只用于启动时的收拾）。 */
+  function spawnAsync(exe, args) {
+    return new Promise((resolve) => {
+      try {
+        const c = spawn(exe, args, { windowsHide: true })
+        c.on('error', () => resolve())
+        c.on('close', () => resolve())
+        setTimeout(() => {
+          try { c.kill() } catch {}
+          resolve()
+        }, 5000)
+      } catch {
+        resolve()
+      }
+    })
+  }
+
+  /**
    * 诊断：把闸门路径的解析过程摊开。
    *
    * 为什么需要它：这条链上有四个可能出错的环节，而症状完全一样
@@ -582,6 +645,10 @@ function applyInner(ctx, config = {}) {
   // 记录已注册的工具名：日志里报数量与名单，这样"哪个版本跑起来了"
   // 可以直接从日志读出来，不必靠工具是否可调来推断。
   const registered = []
+
+  // 收拾上一次的遗留：如果上次有键没松开，现在松。
+  // 不 await —— 插件加载不该等一个可能的 5 秒超时。
+  cleanupStalePress().catch(() => {})
 
   // ── 正在执行的操作计数 ──
   //
@@ -799,6 +866,64 @@ function applyInner(ctx, config = {}) {
     'desktop_indicate',
   ])
 
+  /* ═══════════ 执行权（lease）：同一时刻只有一个操作在碰桌面 ═══════════
+   *
+   * ── 为什么必须有 ──
+   *
+   * 没有它的时候，两个调用可以这样交错：
+   *
+   *   A: 截图 → 算出 Alpha 在 (186,161)
+   *   B: 把窗口拖走
+   *   A: 点 (186,161)        ← 点到别的东西
+   *
+   * 而 shotId 防不住这个：它检查的是**窗口几何**，而 B 拖走窗口之后
+   * 几何确实变了 —— 但如果 B 只是滚动内容，几何没变，shotId 照样通过。
+   * 真正的修法不是加更多校验，是**同一时刻只让一个操作进行**。
+   *
+   * ── 为什么是"拒绝"而不是"排队到底" ──
+   *
+   * Codex 给的两条路是"跨进程协调"或"显式单控制器限制"，我选后者：
+   * 拿不到执行权就等一小会儿，还拿不到就**明确说不行**，让调用方决定
+   * 是重试还是放弃。无限排队会把"卡住了"变成一种沉默状态。
+   *
+   * ── 为什么按 trace 记而不是用 async lock 库 ──
+   *
+   * Node 单线程，`_lease` 的读和写之间没有 await，所以判定天然是原子的。
+   * 这里不需要一把真的互斥锁，只需要一个"谁在占用"的记录。
+   */
+  let _lease = null
+
+  const LEASE_WAIT_MS = 8000
+
+  /** 等待执行权。返回 { ok, waitedMs, holder } */
+  async function acquireLease(tool) {
+    const start = performance.now()
+    while (_lease) {
+      if (performance.now() - start > LEASE_WAIT_MS) {
+        return {
+          ok: false,
+          waitedMs: Math.round(performance.now() - start),
+          holder: _lease.tool,
+          heldForMs: Math.round(performance.now() - _lease.at),
+        }
+      }
+      await new Promise((r) => setTimeout(r, 40))
+    }
+    _lease = { tool, at: performance.now() }
+    return { ok: true, waitedMs: Math.round(performance.now() - start) }
+  }
+
+  function releaseLease() {
+    _lease = null
+  }
+
+  /** 这些工具不碰桌面，不需要执行权（也拿不到就等，没意义）。 */
+  const NO_LEASE_TOOLS = new Set([
+    'desktop_list_apps',
+    'desktop_off',
+    'desktop_revoke_grants',
+  ])
+
   const register = (definition) => {
     registered.push(definition.name)
     const wrapped = Object.assign({}, definition, {
@@ -826,6 +951,29 @@ function applyInner(ctx, config = {}) {
         // 用全局变量的那种写法在并发下会把 A 的耗时记到 B 头上。
         const startedAt = performance.now()
         return als.run({ trace }, async () => {
+          // ── 先取执行权，再碰桌面 ──
+          //
+          // 这一次等待单独记一个 span：它既不是操作耗时（我们在等，
+          // 什么都没做），也不是授权等待（那是在等人）。
+          let lease = { ok: true, waitedMs: 0 }
+          if (!NO_LEASE_TOOLS.has(definition.name)) {
+            lease = await span('lease', () => acquireLease(definition.name))
+            if (!lease.ok) {
+              trace.outcome = 'rejected'
+              trace.errorCode = 'Busy'
+              const sec = (lease.heldForMs / 1000).toFixed(1)
+              throw new Error(
+                `没拿到执行权：另一个操作（${lease.holder}）已经占用 ${sec} 秒，` +
+                  `等了 ${(lease.waitedMs / 1000).toFixed(1)} 秒仍然没释放。
+` +
+                  `  **这不是故障** —— 同一时刻只允许一个操作碰桌面，` +
+                  `否则两个操作会互相踩到对方的光标和焦点。
+` +
+                  `  现在该做的：等一下再试。如果反复出现，说明有操作卡住了，` +
+                  `用 desktop_diagnose({perf:true}) 看最近几次的耗时。`,
+              )
+            }
+          }
           try {
             return await definition.execute(args, exec)
           } catch (e) {
@@ -852,6 +1000,9 @@ function applyInner(ctx, config = {}) {
             // 而不是从它开始算 —— 否则一个跑了 30 秒的输入，
             // 刚结束就被判定为空闲超时。
             touchActivity()
+            // 释放执行权：放在 finally 里，异常也释放。
+            // 如果这里漏了，整个插件会永久卡在"有人占用"上。
+            if (!NO_LEASE_TOOLS.has(definition.name)) releaseLease()
             rememberTrace(trace)
           }
         })
@@ -1915,6 +2066,23 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.hold(args)
       if (r.isError) throw new Error(r.text)
+      // ── 留下"有键按着"的记录 ──
+      //
+      // helper 是短进程，按下之后它就退出了，而按键状态留在系统里。
+      // 如果插件随后崩溃或被重启，release 就再也没人调 —— 用户的鼠标
+      // 会一直处于按下状态，他没办自己恢复（不知道该松开什么）。
+      //
+      // 所以把这个状态写在磁盘上，下次启动时收拾。
+      try {
+        const dir = dirname(gate())
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(
+          pressedPath(),
+          JSON.stringify({ button: args.button ?? 'left', at: Date.now(), tool: 'desktop_hold' }),
+        )
+      } catch {
+        /* 记不下来不影响按住本身 */
+      }
       return { result: r.text }
     },
     presentCall: a => ({ card: 'generic', title: `按住 ${a.button ?? 'left'} 键`, kind: 'other' }),
@@ -1943,6 +2111,12 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.release(args)
       if (r.isError) throw new Error(r.text)
+      // 松开成功 —— 记录可以清了
+      try {
+        rmSync(pressedPath(), { force: true })
+      } catch {
+        /* 清不掉下次启动还会再松一次，无害 */
+      }
       return { result: r.text }
     },
     presentCall: () => ({ card: 'generic', title: '松开鼠标键', kind: 'other' }),
