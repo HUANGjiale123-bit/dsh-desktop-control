@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.9.4'
+const PLUGIN_VERSION = '2.9.5'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -551,9 +551,36 @@ function applyInner(ctx, config = {}) {
   // 记录已注册的工具名：日志里报数量与名单，这样"哪个版本跑起来了"
   // 可以直接从日志读出来，不必靠工具是否可调来推断。
   const registered = []
+
+  // ── 正在执行的操作计数 ──
+  //
+  // 为什么必须有它：空闲计时器只看"距上次操作多久"。而一次工具调用可能
+  // 跑很久（长文本输入按 8ms/字符，几千字符就是几十秒），期间没有任何新的
+  // 工具调用 —— 于是空闲计时器会把 dsc-esc 杀掉，**而 dsc-esc 就是监听 ESC
+  // 的那个进程**。用户在输入过程中按 ESC，什么都不会发生。
+  //
+  // 也就是说：8 秒的空闲超时无意中给急停开了一个窗口期。
+  // 忙碌期间一律不收，操作结束再重新起算。
+  let _busy = 0
+
   const register = (definition) => {
     registered.push(definition.name)
-    return ctx.tools.register(defineTool(definition))
+    const wrapped = Object.assign({}, definition, {
+      async execute(args, exec) {
+        _busy++
+        touchActivity()
+        try {
+          return await definition.execute(args, exec)
+        } finally {
+          _busy--
+          // 结束时刷新锚点：这样"空闲"从**操作完成**开始算，
+          // 而不是从它开始算 —— 否则一个跑了 30 秒的输入，
+          // 刚结束就被判定为空闲超时。
+          touchActivity()
+        }
+      },
+    })
+    return ctx.tools.register(defineTool(wrapped))
   }
 
   register({
@@ -1043,6 +1070,9 @@ function applyInner(ctx, config = {}) {
         _idleTimer = null
         return
       }
+      // 有操作正在执行：**绝不收**。dsc-esc 同时是 ESC 的监听进程，
+      // 收掉它等于在长操作中途把急停关掉。
+      if (_busy > 0) return
       const idle = Date.now() - _lastOpAt
       if (idle < IDLE_HIDE_MS) return
       // 直接杀进程 = 正常收起。强杀不走 dsc-esc 的 FormClosing，
@@ -1384,41 +1414,44 @@ function applyInner(ctx, config = {}) {
       }
       liveOverlays.clear()
 
-      // ② 拉下闸门：即使还有进程活着，动作也做不了。
+      // ② **绝不动闸门。**
       //
-      // 为什么"停止"和"闸门"是两件事，这里必须分清：
-      //   · ESC / 逃生条 = **停止信号**。它要留下闸门，因为那是"别再动我电脑"
-      //     的持久表达——按了 ESC 之后再来的操作应当被拒绝，而不是悄悄放行。
-      //   · desktop_off  = **正常关闭**。它由助手主动调用，意图是"这段结束了"，
-      //     不是"我被劫持了"。此时如果也留一道永久闸门，下一次操作会被无条件
-      //     拒绝，用户看到的是"插件坏了"，而且没有任何提示告诉他怎么解。
+      // 上一版是"拉闸 → 立即 --clear"，注释里还写着"ESC 留下的闸门保持不动"。
+      // 那是错的，而且是危险的错：--clear 无条件删除闸门文件，所以
       //
-      // 所以 desktop_off 拉闸门（确保关闭瞬间就生效）之后**立即解除**，
-      // 让闸门回到"未触发"的初始状态。ESC 留下的闸门则保持不动，由用户
-      // 显式用 stop --clear 解除。
+      //     用户按了 ESC（闸门存在）
+      //     → 助手调 desktop_off 收浮层
+      //     → halt 覆盖掉用户写的原因
+      //     → stop --clear 把闸门删掉
+      //     → 用户的急停**被静默解除**
+      //
+      // 注释把两件事说清楚了，代码做的却是第三件事。
+      //
+      // desktop_off 的语义只是"这段 computer use 结束了、把界面收掉"。
+      // 它没有任何理由去改变急停状态：闸门存在就让它存在，不存在就继续
+      // 不存在。所以这里只读一次状态用于**报告**，不写、不删。
       let gateNote
       try {
-        const h = await set.runHelper(['halt', '由 desktop_off 触发'])
-        if (!h.ok) {
-          gateNote = `闸门操作失败：${h.message ?? h.error ?? '未知原因'}`
+        const st = await set.runHelper(['stop'])
+        if (!st.ok) {
+          gateNote = ` 闸门状态读取失败（${st.message ?? st.error ?? '未知原因'}），未做任何改动`
+        } else if (st.halted) {
+          gateNote =
+            ` **闸门仍处于拉下状态**（很可能是你按了 ESC）——` +
+            `这里没有替你解除。确认安全后执行 \`dsc.exe stop --clear\` 恢复操作。`
         } else {
-          const c = await set.runHelper(['stop', '--clear'])
-          gateNote = c.ok && c.cleared
-            ? '闸门已拉下并随即解除（正常关闭，不留永久封锁）'
-            : c.ok
-              ? `闸门已拉下；解除时报告：${c.note ?? '未清除'}`
-              : `闸门已拉下，但解除失败：${c.message ?? c.error ?? '未知原因'}`
+          gateNote = ' 闸门未拉下，无需处理。'
         }
       } catch (e) {
-        gateNote = '闸门操作异常：' + (e?.message ?? e)
+        gateNote = ' 闸门状态读取异常（' + (e?.message ?? e) + '），未做任何改动'
       }
 
       return {
         result:
-          `已关闭 ${killed} 个由本插件拉起的指示浮层与逃生条。${gateNote}。` +
-          `注意：如果是**按 ESC 停止**的，闸门会保留，后续操作会被拒绝——` +
-          `确认安全后用 \`dsc.exe stop --clear\` 解除。` +
-          `若屏幕上仍有残留光带，可在终端执行：taskkill /IM dsc-esc.exe /F`,
+          `已关闭 ${killed} 个由本插件拉起的指示浮层与逃生条。` +
+          `${gateNote}\n` +
+          `（这个工具只收界面，不改变急停状态。` +
+          `若屏幕上仍有残留光带，可在终端执行：taskkill /IM dsc-esc.exe /F）`,
       }
     },
     presentCall: () => ({ card: 'generic', title: '关闭 computer use', kind: 'other' }),

@@ -918,10 +918,32 @@ export function createDesktopToolset(options = {}) {
           }
         }
         if (w0.x !== expectedGeom.x || w0.y !== expectedGeom.y) {
+          // ── 窗口移动了：两种坐标空间的后果完全不同 ──
+          //
+          //   · space="window"：原点是用**当前**矩形算的，坐标仍然对 —— 放行。
+          //   · space="desktop"：那个坐标是"截图时窗口原点 + 图内偏移"，
+          //     窗口一移就**一定错了**。只警告然后照点，等于明知坐标已失效
+          //     还把点击发出去。
+          //
+          // 上一版两种情况都只警告。第三方复核指出这点，并复现了它：
+          // 一个已经失效的桌面坐标，插件警告之后依然点了下去。
+          if (!useWindowSpace) {
+            return {
+              isError: true,
+              text:
+                `失败：截图拍摄时窗口在 (${expectedGeom.x},${expectedGeom.y})，` +
+                `现在在 (${w0.x},${w0.y})。
+` +
+                `你用的是 space="desktop"（桌面绝对坐标），窗口一移这个坐标就指向别处了，` +
+                `所以不点。
+` +
+                `两个办法：改用 space="window"（图内坐标，原点按当前窗口算，移了也没关系），` +
+                `或者重新截图拿新坐标。`,
+            }
+          }
           geomWarn =
             `⚠ 窗口从 (${expectedGeom.x},${expectedGeom.y}) 移到了 (${w0.x},${w0.y})。` +
-            `用 space="window" 没问题（原点按当前矩形算）；` +
-            `用 space="desktop" 这个坐标已经错了。`
+            `因为用的是 space="window"，原点按当前矩形计算，坐标仍然有效。`
         }
       }
 

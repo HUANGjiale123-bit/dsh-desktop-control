@@ -230,7 +230,20 @@ else
   echo "  （跳过：会弹出测试窗口，需要时用 DSC_SELFCHECK_TARGET=1 开启）"
 fi
 
-head_ "17. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "17. 急停闸门不能被收尾动作解除（复核报告的两条漏洞）"
+# desktop_off 曾经 halt 之后 --clear，把用户按 ESC 的急停删掉；
+# gate_probe 曾经拿真实闸门做写删测试，调一次诊断就解除一次急停。
+if [ -n "$NODE" ] && [ -f helper/bin/dsc.exe ]; then
+  if "$NODE" tools/test-gate-safety.mjs >/dev/null 2>&1; then
+    ok "闸门在收尾/诊断前后原样保留（存在、内容都不变）"
+  else
+    bad "闸门会被静默解除 —— 单独跑 node tools/test-gate-safety.mjs"
+  fi
+else
+  echo "  （跳过：找不到 node 或 dsc.exe）"
+fi
+
+head_ "18. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

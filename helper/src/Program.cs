@@ -875,13 +875,65 @@ namespace Dsc
         ///   写闸门 → 查它是否被认定为已拉下 → 删掉 → 查是否恢复
         /// 三步都对才算通过。这是功能性判断，和目录名无关。
         /// </summary>
+        /// <summary>
+        /// 探测闸门路径是否可用：能写、能读回、能删掉。
+        ///
+        /// ── 绝不能拿真实闸门做这个测试 ──
+        ///
+        /// 上一版直接用 GatePath() 写、再删。问题是：**闸门此刻可能正拉下**
+        /// （用户按了 ESC 在急停）。那样这个"诊断"会
+        ///   1. 把用户按 ESC 的原因覆盖成 "gate_probe"
+        ///   2. 然后把闸门删掉 —— 用户的急停被静默解除
+        /// 而且它还会报告 healthy。`desktop_diagnose` 每调一次就解除一次急停。
+        ///
+        /// 所以分两种情况：
+        ///   · 闸门**不存在**：可以放心用真实路径做写→查→删，
+        ///     因为这正是要验证的"写入与读取是同一个路径"。
+        ///   · 闸门**存在**：绝不动它。改用同目录的临时探测文件验证
+        ///     "这个目录可写"，然后如实报告"闸门当前处于拉下状态"。
+        /// </summary>
         private static int CmdGateProbe()
         {
             string p = GatePath();
-            Jw j = new Jw();
-            j.Obj().Key("ok").Bool(true).Key("gatePath").Val(p);
+            bool alreadyHalted = IsHalted();
 
-            // ① 写
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true).Key("gatePath").Val(p)
+                .Key("alreadyHalted").Bool(alreadyHalted);
+
+            if (alreadyHalted)
+            {
+                // ── 闸门正拉下：只测目录可写，不碰闸门 ──
+                string probe = p + ".probe-" + System.Diagnostics.Process.GetCurrentProcess().Id;
+                try
+                {
+                    File.WriteAllText(probe, "probe");
+                    bool wrote = File.Exists(probe);
+                    File.Delete(probe);
+                    bool gone = !File.Exists(probe);
+                    j.Key("writable").Bool(wrote && gone)
+                     .Key("stage").Val("probe-only")
+                     .Key("note").Val(
+                         "闸门当前处于拉下状态，**没有动它**——只用同目录的临时文件" +
+                         "验证了目录可写。用户按 ESC 造成的急停保持有效。");
+                    if (!(wrote && gone))
+                        j.Key("error").Val("临时探测文件写不进去或删不掉");
+                    j.End();
+                    Console.WriteLine(j.ToString());
+                    return wrote && gone ? 0 : 3;
+                }
+                catch (Exception e)
+                {
+                    j.Key("writable").Bool(false)
+                     .Key("stage").Val("probe-only")
+                     .Key("error").Val(e.GetType().Name + ": " + e.Message)
+                     .End();
+                    Console.WriteLine(j.ToString());
+                    return 3;
+                }
+            }
+
+            // ── 闸门不存在：可以用真实路径做完整测试 ──
             try
             {
                 EnsureHalt("gate_probe");
@@ -896,8 +948,6 @@ namespace Dsc
                 return 3;
             }
 
-            // ② 写完之后，闸门是否真的被认定为"已拉下"。
-            //    只写成功还不够——路径不一致时文件写了但查的是另一处。
             bool halted = IsHalted();
             if (!halted)
             {
@@ -910,7 +960,6 @@ namespace Dsc
                 return 4;
             }
 
-            // ③ 删掉，确认能恢复
             try
             {
                 File.Delete(p);
@@ -929,7 +978,8 @@ namespace Dsc
             j.Key("writable").Bool(true)
              .Key("halted").Bool(true)
              .Key("clearable").Bool(cleared)
-             .Key("healthy").Bool(cleared);
+             .Key("healthy").Bool(cleared)
+             .Key("note").Val("闸门原本不存在，用真实路径做了完整测试并已清理");
             if (!cleared)
                 j.Key("error").Val("闸门删掉了，但 IsHalted() 仍认为已拉下");
             j.End();
@@ -1649,7 +1699,7 @@ namespace Dsc
             if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
 
             MatchTally tally = new MatchTally();
-            AutomationElement found = FindByDescriptor(root, want, 0, 4000, tally);
+            AutomationElement found = FindByDescriptor(root, want, 0, new SearchBudget { Remaining = 4000, DeadlineMs = 5000 }, tally);
             if (tally.Count > 1)
                 throw new InvalidOperationException(
                     "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + desc + "\n" +
@@ -1818,6 +1868,38 @@ namespace Dsc
         }
 
         /// <summary>
+        /// 搜索预算：**所有分支共享同一个计数器**，外加总时长上限。
+        ///
+        /// ── 为什么不能靠递归传参 ──
+        ///
+        /// 上一版每个分支传的是 budget - 1。那意味着预算**只随深度下降**：
+        /// 一个宽树（同一个父节点下几千个兄弟）里，每个兄弟拿到的预算都一样，
+        /// 谁都耗不尽它 —— 实际限制退化成"深度 × 宽度"，可以走到很远。
+        ///
+        /// 加了唯一性检查之后更要紧：为了确认"是否唯一"，得找到第二个匹配
+        /// 才停，遍历的节点比以前更多。所以这里改成共享计数 + 时间上限，
+        /// 两条都要满足才继续。
+        ///
+        /// 注意：这只能拦住"我们自己还要不要继续找"，**拦不住一个已经阻塞在
+        /// COM 调用里的 UIA 查询**。那种情况只能靠进程级超时（helper 是短进程，
+        /// 插件那边有 30 秒硬超时兜底）。
+        /// </summary>
+        private sealed class SearchBudget
+        {
+            public int Remaining;
+            public long DeadlineMs;
+            private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+
+            public bool Take()
+            {
+                if (Remaining <= 0) return false;
+                if (_clock.ElapsedMilliseconds >= DeadlineMs) return false;
+                Remaining--;
+                return true;
+            }
+        }
+
+        /// <summary>
         /// 按描述符查找元素，并统计匹配数量。
         ///
         /// 返回第一个匹配（供调用方使用），同时通过 tally 告知是否唯一。
@@ -1826,10 +1908,12 @@ namespace Dsc
         /// </summary>
         private static AutomationElement FindByDescriptor(
             AutomationElement el, Dictionary<string, string> want,
-            int depth, int budget, MatchTally tally)
+            int depth, SearchBudget budget, MatchTally tally)
         {
-            if (depth > 64 || budget <= 0) return null;
+            if (depth > 64) return null;
             if (tally != null && tally.Count >= tally.Limit) return tally.First;
+            // 共享预算：所有兄弟分支从同一个计数器里扣
+            if (budget != null && !budget.Take()) return tally != null ? tally.First : null;
 
             bool match = true;
             foreach (KeyValuePair<string, string> kv in want)
@@ -1874,7 +1958,7 @@ namespace Dsc
             try { child = TreeWalker.ControlViewWalker.GetFirstChild(el); } catch { }
             while (child != null)
             {
-                AutomationElement hit = FindByDescriptor(child, want, depth + 1, budget - 1, tally);
+                AutomationElement hit = FindByDescriptor(child, want, depth + 1, budget, tally);
                 if (tally != null && tally.Count >= tally.Limit) return tally.First;
                 if (tally == null && hit != null) return hit;
                 try { child = TreeWalker.ControlViewWalker.GetNextSibling(child); } catch { break; }
@@ -1886,7 +1970,8 @@ namespace Dsc
         private static AutomationElement FindByDescriptor(
             AutomationElement el, Dictionary<string, string> want, int depth, int budget)
         {
-            return FindByDescriptor(el, want, depth, budget, null);
+            return FindByDescriptor(el, want, depth,
+                new SearchBudget { Remaining = budget, DeadlineMs = 5000 }, null);
         }
 
         /// <summary>
@@ -1955,7 +2040,7 @@ namespace Dsc
                     throw new ArgumentException("描述符为空，例如 role=Edit/name=搜索");
                 label = "元素 [" + selector + "]";
                 MatchTally tally = new MatchTally();
-                el = FindByDescriptor(root, want, 0, 4000, tally);
+                el = FindByDescriptor(root, want, 0, new SearchBudget { Remaining = 4000, DeadlineMs = 5000 }, tally);
                 if (tally.Count > 1)
                     return FailJson("AmbiguousTarget",
                         "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + selector +
@@ -1984,7 +2069,7 @@ namespace Dsc
                     throw new ArgumentException("描述符为空，例如 role=Button/name=保存");
                 label = "元素 [" + selector + "]";
                 MatchTally tally = new MatchTally();
-                target = FindByDescriptor(root, want, 0, 4000, tally);
+                target = FindByDescriptor(root, want, 0, new SearchBudget { Remaining = 4000, DeadlineMs = 5000 }, tally);
                 if (tally.Count > 1)
                     return FailJson("AmbiguousTarget",
                         "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + selector +
@@ -2185,7 +2270,7 @@ namespace Dsc
                     throw new ArgumentException("描述符为空，例如 role=Button/name=保存");
                 label = "元素 [" + selector + "]";
                 MatchTally tally = new MatchTally();
-                el = FindByDescriptor(root, want, 0, 4000, tally);
+                el = FindByDescriptor(root, want, 0, new SearchBudget { Remaining = 4000, DeadlineMs = 5000 }, tally);
                 if (tally.Count > 1)
                     return FailJson("AmbiguousTarget",
                         "描述符匹配到多个元素（至少 " + tally.Count + " 个）：" + selector +
@@ -2337,8 +2422,22 @@ namespace Dsc
             //
             // SendInput 的 KEYBDINPUT.wScan 是 USHORT，能装下整个 BMP，
             // 因此中文、日文、emoji（BMP 内）都能原样送达。
+            // 输入过程中**必须重新检查急停**。
+            //
+            // 上一版只在命令入口查一次闸门。而文本输入是按 8ms/字符串行发出的，
+            // 一段 5000 字的文本要 40 秒 —— 用户在这 40 秒里按 ESC，
+            // 输入会照常打完。急停的意义恰恰是"立刻停"，不是"下一条命令才停"。
+            //
+            // 每 16 个字符查一次：读一个文件约几十微秒，对总体速度没有影响，
+            // 而 16 字符 ≈ 128ms，人手按 ESC 的反应时间远长于它。
+            int typedChars = 0;
             foreach (char c in text)
             {
+                if ((typedChars % 16) == 0 && IsHalted())
+                    return FailJson("Halted",
+                        "输入被急停中断：已输入 " + typedChars + " / " + text.Length +
+                        " 个字符。闸门是拉下状态，其余内容没有发送。");
+
                 Native.INPUT[] pair = new Native.INPUT[2];
 
                 pair[0].type = Native.INPUT_KEYBOARD;
@@ -2359,6 +2458,7 @@ namespace Dsc
                         "文本输入在第 " + (text.IndexOf(c) + 1) + " 个字符处失败 (Win32 错误 " + err + ": " +
                         new System.ComponentModel.Win32Exception(err).Message + ")。");
                 }
+                typedChars++;
                 System.Threading.Thread.Sleep(8);
             }
 
