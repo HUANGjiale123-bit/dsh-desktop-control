@@ -725,6 +725,10 @@ export function createDesktopToolset(options = {}) {
       // 早期版本写"白名单为空——只能观察"，那在只有静态白名单时是对的；
       // 加了会话级授权之后就不对了，会让人以为功能坏了。
       return {
+        // windows 单独给出来：上层要用它做坐标核对（例如核对某张截图
+        // 拍摄时的窗口矩形是否还成立）。原先只有拼好的文本，
+        // 上层只能再起一个进程重新列一次。
+        windows: r.windows ?? [],
         text:
           `本机可见窗口 ${rows.length} 个（坐标为物理像素）：\n` +
           rows.join('\n') +

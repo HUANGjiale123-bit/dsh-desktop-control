@@ -11,7 +11,10 @@
 #         `src/Program.cs` 会被截成 `Program.cs`，报 "未能找到源文件"，
 #         且报文里显示的是被截断后的路径。应对：源文件路径用反斜杠 `src\Program.cs`。
 #
-# DPI 感知在程序内声明，见 src/Program.cs 的 SetProcessDPIAware。
+# DPI 感知由 src/app.manifest 声明为 Per-Monitor V2（比代码里的
+# SetProcessDPIAware 更精确：后者只能拿到 System aware）。
+# 清单优先于代码，所以程序里那次调用会返回 false——那是正常的，
+# 真正的判据是 `dsc.exe ping` 读回来的 dpiAwareness。
 
 set -euo pipefail
 
@@ -69,6 +72,7 @@ echo "编译 dsc.exe ..."
     -target:exe \
     -platform:x64 \
     -out:bin/dsc.exe \
+    -win32manifest:'src\app.manifest' \
     -r:System.dll \
     -r:System.Drawing.dll \
     -r:System.Windows.Forms.dll \
@@ -90,6 +94,7 @@ echo "编译 dsc-esc.exe （逃生条 + 边缘光带 + 唯一的 ESC 钩子）..
     -target:winexe \
     -platform:x64 \
     -out:bin/dsc-esc.exe \
+    -win32manifest:'src\app.manifest' \
     -r:System.dll \
     -r:System.Drawing.dll \
     -r:System.Windows.Forms.dll \

@@ -32,6 +32,20 @@ namespace Dsc
         [DllImport("user32.dll")]
         public static extern bool SetProcessDPIAware();
 
+        // ── DPI 状态的**读取**（区别于上面的设置）──
+        //
+        // 之前 ping 里直接输出 dpiAware=true，那是**写死的字面量**：
+        // 既没看 SetProcessDPIAware 的返回值，也没读进程的真实状态。
+        // 一个没被读过的值比不输出更糟——它让人以为已经确认过。
+        //
+        // GetThreadDpiAwarenessContext 需要 Win10 1703+，老系统上会抛
+        // EntryPointNotFoundException，所以调用处必须兜住。
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetThreadDpiAwarenessContext();
+
+        [DllImport("user32.dll")]
+        public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr value);
+
         [DllImport("user32.dll")]
         public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
@@ -667,10 +681,38 @@ namespace Dsc
 
         private static int _nextElementId = 1;
 
+        /// <summary>SetProcessDPIAware() 的返回值（true=调用被接受）。</summary>
+        private static bool _dpiAwareCallOk;
+
+        /// <summary>读回来的实际 DPI 感知级别；-1 表示没读到。</summary>
+        private static int _dpiAwareness = -1;
+
+        /// <summary>把 DPI 感知级别转成可读名字。</summary>
+        private static string DpiAwarenessName()
+        {
+            switch (_dpiAwareness)
+            {
+                case 0: return "UNAWARE";
+                case 1: return "SYSTEM_AWARE";
+                case 2: return "PER_MONITOR_AWARE";
+                case -1: return "UNREAD";
+                default: return "UNKNOWN(" + _dpiAwareness + ")";
+            }
+        }
+
         private static int Main(string[] args)
         {
             _argsRaw = args;
-            Native.SetProcessDPIAware();   // ★ 必须先于任何窗口/坐标 API
+
+            // ★ 必须先于任何窗口/坐标 API。
+            // 同时把**返回值**和**实际状态**都记下来，供 ping 如实报告。
+            _dpiAwareCallOk = Native.SetProcessDPIAware();
+            try
+            {
+                IntPtr ctx = Native.GetThreadDpiAwarenessContext();
+                _dpiAwareness = Native.GetAwarenessFromDpiAwarenessContext(ctx);
+            }
+            catch { _dpiAwareness = -1; }
 
             // 注：曾在此处调用 BindInputDesktop() 想切到当前输入桌面。
             // 实测撤销：SetThreadDesktop 确实成功（句柄从 328 变成 704），
@@ -778,7 +820,12 @@ namespace Dsc
         {
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
-                .Key("dpiAware").Bool(true)
+                // dpiAware 现在是**读出来的**，不是写死的。
+                // 另附可读级别与初始化调用的结果——三者合起来才能判断
+                // "坐标为什么可能偏移"，只给一个 true 什么也说明不了。
+                .Key("dpiAware").Bool(_dpiAwareness > 0)
+                .Key("dpiAwareness").Val(DpiAwarenessName())
+                .Key("dpiInitOk").Bool(_dpiAwareCallOk)
                 .Key("halted").Bool(IsHalted())
                 .Key("gatePath").Val(GatePath())
                 .Key("clr").Val(Environment.Version.ToString())
@@ -1562,6 +1609,65 @@ namespace Dsc
             if (found == null)
                 throw new InvalidOperationException("未找到匹配元素：" + desc);
 
+            // ── 优先用 InvokePattern，而不是算矩形中心去点 ──
+            //
+            // InvokePattern 是控件自己声明的"我被触发了"的语义入口：
+            //   · 不依赖坐标 → 不受 DPI / 缩放 / 遮挡影响
+            //   · 不移动鼠标 → 不打断用户，也不会点到别处
+            //   · 可达性更好 → 中心被别的控件压住时仍然有效
+            //
+            // 但它不是万能：很多自绘控件（画布、视频控件、部分 Electron 组件）
+            // 根本不实现它；右键也没有对应的"Invoke"语义。
+            // 所以这里只作为**优先级更高的尝试**，失败则原样退回坐标点击，
+            // 并把实际用了哪种方式写进返回值——调用方不该去猜。
+            //
+            // 强制走坐标：给 --coords（有些控件实现 Invoke 但行为与真实点击不同）。
+            string method = "";
+            bool forceCoords = false;
+            foreach (string a2 in args)
+                if (a2 == "--coords") forceCoords = true;
+
+            if (!right && !forceCoords)
+            {
+                object ip = null;   // 必须先赋值：out 在 try 里，catch 后可能未赋值
+                bool hasInvoke = false;
+                try { hasInvoke = found.TryGetCurrentPattern(InvokePattern.Pattern, out ip); }
+                catch { hasInvoke = false; }
+
+                if (hasInvoke)
+                {
+                    try
+                    {
+                        ((InvokePattern)ip).Invoke();
+                        method = "InvokePattern";
+                    }
+                    catch (Exception ex)
+                    {
+                        // 控件声明支持却抛异常：记下来，退回坐标点击，不算失败。
+                        Console.Error.WriteLine("[click_element] InvokePattern 调用失败，退回坐标点击: " + ex.Message);
+                    }
+                }
+            }
+
+            if (method == "InvokePattern")
+            {
+                // 没有取矩形、没有移动鼠标。诚实说明：Invoke 是异步投递，
+                // 返回成功只代表"控件接受了触发请求"，不代表界面已经变了。
+                Jw jv = new Jw();
+                jv.Obj().Key("ok").Bool(true)
+                    .Key("matched").Val(desc)
+                    .Key("method").Val("InvokePattern")
+                    .Key("cursorMoved").Bool(false)
+                    .Key("verified").Bool(false)
+                    .Key("note").Val(
+                        "已通过控件的 InvokePattern 触发，没有移动鼠标。" +
+                        "Invoke 是异步投递，返回成功不代表界面已经改变——" +
+                        "要确认效果请重读一次界面或截图。")
+                 .End();
+                Console.WriteLine(jv.ToString());
+                return 0;
+            }
+
             Native.RECT r;
             GetElementRect(found, out r);
 
@@ -1609,9 +1715,11 @@ namespace Dsc
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("matched").Val(desc)
+                .Key("method").Val("CoordinateClick")
                 .Key("rect").Val(r.Left + "," + r.Top + " " + (r.Right - r.Left) + "x" + (r.Bottom - r.Top))
                 .Key("clickedX").Num(cx).Key("clickedY").Num(cy)
                 .Key("cursorAfter").Val(actual)
+                .Key("cursorMoved").Bool(true)
                 .Key("button").Val(right ? "right" : "left")
              .End();
             Console.WriteLine(j.ToString());

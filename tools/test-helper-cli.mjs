@@ -22,6 +22,16 @@ const HELPER_DIR = process.argv[2] ?? 'helper/bin'
 const DSC = join(HELPER_DIR, 'dsc.exe')
 const ESC = join(HELPER_DIR, 'dsc-esc.exe')
 
+// 本插件自己的窗口（dsc-esc 的全屏光带、逃生条）不该被当成"要操作的目标"：
+// 它们的尺寸满足"够大的窗口"，但 dsc-esc 不在白名单里，选中必然被拒，
+// 而报出来的错会指向完全无关的地方（踩过：五条 press_key 断言全红）。
+//
+// 注意分隔符必须同时认 `/` 和 `\`：Windows 路径用的是反斜杠，
+// 只写 /[\/]/ 的话 split 切不开，pop 拿到整条路径，isOurs 恒为 false ——
+// 过滤器看着在，实际什么也没滤掉（这个写法我第一版就写错了）。
+// 刻意保持单行：tools/test-isourwindow.mjs 会把这行取出来验证，跨行会让提取失败。
+const isOurs = (w) => /^(dsc|dsc-esc)\.exe$/i.test(String(w.exe ?? '').split(/[\\/]/).pop())
+
 let pass = 0
 let fail = 0
 const ok = (m) => { console.log(`  ✓ ${m}`); pass++ }
@@ -101,7 +111,9 @@ console.log('── 3. `press_key` 的 chord 回显必须是按键，不是句�
 let hwnd = 0
 const lw = run(DSC, ['list_windows'])
 if (Array.isArray(lw.json?.windows)) {
-  const pick = lw.json.windows.find((w) => w.width > 300 && w.height > 300)
+  const pick = lw.json.windows.find(
+    (w) => w.width > 300 && w.height > 300 && w.exe && !isOurs(w),
+  )
   if (pick) hwnd = pick.hwnd
 }
 if (hwnd) {
@@ -162,7 +174,7 @@ console.log('── 5. 截图必须报告遮挡（缺陷 5 回归）──')
 const shot = join(tmp, 'shot.png')
 {
   const wins = (run(DSC, ['list_windows']).json?.windows ?? []).filter(
-    (w) => w.width > 300 && w.height > 300,
+    (w) => w.width > 300 && w.height > 300 && !isOurs(w),
   )
   const fg = wins.find((w) => w.foreground)
   const notFg = wins.filter((w) => !w.foreground)

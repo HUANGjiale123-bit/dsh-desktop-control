@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.8.1'
+const PLUGIN_VERSION = '2.9.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -679,6 +679,10 @@ function applyInner(ctx, config = {}) {
         properties: {
           filepath: { type: 'string', required: true },
           summary: { type: 'string', required: true },
+          shotId: {
+            type: 'string',
+            description: '这次截图的标识。传给 desktop_click 的 shotId 可以核对坐标是否仍然有效。',
+          },
           // image 的内部结构由 attachment 引用决定，这里刻意留空不约束。
           // 注意：**不允许**声明成 undefined —— 存在但为 undefined 的键
           // 会触发输出校验失败，所以要按"有就给、没有就不给"构造。
@@ -707,7 +711,19 @@ function applyInner(ctx, config = {}) {
       // ctx.attachments.saveImages() —— 这是 provider 唯一会真的序列化成
       // 图像的形状。用文字描述界面等于撒谎。
       const image = await imageBlockFor(filepath)
-      return image ? { filepath, summary: r.text, image } : { filepath, summary: r.text }
+
+      // 记录这张截图的"坐标出处"，让后续点击可以绑定到它。
+      const shotId = `shot-${args.hwnd}-${Date.now()}`
+      rememberShot(shotId, {
+        hwnd: args.hwnd,
+        x: r.originX,
+        y: r.originY,
+        w: r.width,
+        h: r.height,
+      })
+
+      const out = { filepath, summary: r.text, shotId }
+      return image ? { ...out, image } : out
     },
     presentCall: args => ({ card: 'generic', title: `截取窗口 ${args.hwnd}`, kind: 'read' }),
   })
@@ -741,6 +757,13 @@ function applyInner(ctx, config = {}) {
           'Y 坐标（物理像素）。含义取决于 space：' +
           'space="desktop" 时是桌面绝对 Y；space="window" 时是截图里的图内 Y。',
       },
+      shotId: {
+        type: 'string',
+        description:
+          '可选。你手上坐标来自哪张截图 —— 传 desktop_screenshot 返回的 shotId。' +
+          '插件会核对窗口是否被移动、改过大小、或太久之前拍的，' +
+          '不一致时明确警告。不传也能点，但就没人替你核对坐标是否过期了。',
+      },
       space: {
         type: 'string',
         enum: ['desktop', 'window'],
@@ -761,9 +784,26 @@ function applyInner(ctx, config = {}) {
       render: (_args, value) => [{ type: 'text', text: value.result }],
     },
     async execute(args) {
+      // 如果调用方说了坐标来自哪张截图，先核对它是否仍然有效。
+      //
+      // 这一步在**点击之前**做：窗口被移动/改过大小意味着布局可能变了，
+      // 那时最该做的是重新截图，而不是先点下去再解释为什么没点中。
+      let shotWarn = ''
+      if (args.shotId) {
+        const pre = await set.tools.listWindows()
+        const win = pre.isError
+          ? null
+          : (pre.windows ?? []).find((w) => String(w.hwnd) === String(args.hwnd))
+        const chk = checkShot(args.shotId, args.hwnd, win)
+        if (chk.reject) throw new Error(chk.reject)
+        shotWarn = chk.warn ?? ''
+      }
+
       const r = await set.tools.click(args)
       if (r.isError) throw new Error(r.text)
-      return { result: r.text }
+      return { result: shotWarn ? `${shotWarn}
+
+${r.text}` : r.text }
     },
     presentCall: args => ({
       card: 'generic',
@@ -983,6 +1023,75 @@ function applyInner(ctx, config = {}) {
     }, 3000)
     // 不要因为这个定时器把宿主进程吊住。
     _idleTimer.unref?.()
+  }
+
+  /**
+   * 最近几次截图的"坐标出处"记录：shotId → { hwnd, x, y, w, h, at }。
+   *
+   * ── 为什么需要它 ──
+   *
+   * 截图给的坐标只对**拍下那一刻的界面布局**成立。中间只要窗口被拖动、
+   * 改了大小、界面重新排布或滚动，原来的坐标就不再指向同一个按钮 ——
+   * 而点击会照常执行、照常报成功。
+   *
+   * 之前没有任何东西能把"这张图"和"这次点击"绑起来：调用方手里只有
+   * 两个数字，插件也不知道它们是从哪张图来的。第三方审查把这条列为
+   * "没有完整的截图坐标契约"，说得对。
+   *
+   * 现在截图会给一个 shotId，点击可以带上它。插件据此比对窗口矩形，
+   * 变了就**明确警告**（而不是猜）。只保留最近若干条，避免无限增长。
+   */
+  const SHOT_TTL_MS = 5 * 60 * 1000
+  const SHOT_MAX = 24
+  const recentShots = new Map()
+
+  function rememberShot(id, info) {
+    recentShots.set(id, { ...info, at: Date.now() })
+    // 超过上限时删最旧的（Map 保持插入顺序）
+    while (recentShots.size > SHOT_MAX) {
+      const oldest = recentShots.keys().next().value
+      recentShots.delete(oldest)
+    }
+  }
+
+  /**
+   * 校验"这次点击用的坐标是不是来自这张截图"。
+   *
+   * 返回一句警告（可能为空）。**只警告不拒绝**：窗口被移动但大小没变时，
+   * window 空间的坐标往往仍然有效；一拒绝就会把正常流程打断在猜测上。
+   * 但 hwnd 对不上是明确错误，那种情况要拒绝。
+   */
+  function checkShot(shotId, hwnd, win) {
+    const rec = recentShots.get(String(shotId))
+    if (!rec) {
+      return { warn: `⚠ 找不到截图 "${shotId}" 的记录（可能太旧已被清理）。无法核对坐标是否仍然有效。` }
+    }
+    if (String(rec.hwnd) !== String(hwnd)) {
+      return {
+        reject:
+          `失败：截图 "${shotId}" 是窗口 ${rec.hwnd} 的，而这次点击的目标是 ${hwnd}。` +
+          `两张不同的窗口坐标不能混用。`,
+      }
+    }
+    if (Date.now() - rec.at > SHOT_TTL_MS) {
+      return { warn: `⚠ 截图 "${shotId}" 已经是 ${Math.round((Date.now() - rec.at) / 60000)} 分钟前的，界面可能已经变了。` }
+    }
+    if (win && (win.width !== rec.w || win.height !== rec.h)) {
+      return {
+        warn:
+          `⚠ 截图 "${shotId}" 拍摄时窗口是 ${rec.w}x${rec.h}，现在是 ${win.width}x${win.height}。` +
+          `界面布局可能已经变了，坐标未必还指向同一个控件。建议重新截图。`,
+      }
+    }
+    if (win && (win.x !== rec.x || win.y !== rec.y)) {
+      return {
+        warn:
+          `⚠ 窗口从 (${rec.x},${rec.y}) 移到了 (${win.x},${win.y})。` +
+          `如果你用的是 space="window"（图内坐标），这没关系；` +
+          `如果是 space="desktop"（桌面绝对坐标），原点已经变了。`,
+      }
+    }
+    return { warn: '' }
   }
 
   /**

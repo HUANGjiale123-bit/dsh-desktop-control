@@ -189,7 +189,21 @@ else
   echo "  （跳过：找不到 node 或 dsc.exe）"
 fi
 
-head_ "14. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "14. 测试自身的过滤器（别把光带当成目标窗口）"
+# dsc-esc 的光带是全屏窗口，尺寸上完全符合"够大的窗口"。选中它必然被拒，
+# 而报出来的错会指向完全无关的地方。这个过滤器第一版写错了分隔符，
+# 看着在、实际没滤掉——所以单独验一次。
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-isourwindow.mjs >/dev/null 2>&1; then
+    ok "isOurs 同时认反斜杠与正斜杠，字段缺失不崩"
+  else
+    bad "过滤器判据不对 —— 单独跑 node tools/test-isourwindow.mjs"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "15. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

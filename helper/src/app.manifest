@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  dsc.exe / dsc-esc.exe 的应用程序清单：声明 Per-Monitor V2 的 DPI 感知。
+
+  ── 为什么需要这个文件 ──
+
+  代码里调用 SetProcessDPIAware() 只能拿到 **System DPI aware**，
+  这一点已由 ping 的实测输出证实（dpiAwareness=SYSTEM_AWARE）。
+
+  System aware 的问题是：它的坐标一律按**系统 DPI**理解。
+  在主屏、单屏、缩放固定的机器上这没问题；但一旦出现
+    · 多显示器且各自缩放不同
+    · 窗口被拖到另一块屏
+  同一个 API 返回的坐标就不再等于物理像素，而截图（CopyFromScreen）
+  抓的却是物理像素——两条坐标链会分叉，表现是"点偏"。
+
+  Per-Monitor V2 让坐标始终是物理像素，并且能感知窗口所在显示器的 DPI 变化。
+
+  ── 为什么两处都写 ──
+
+  dpiAware（2005 命名空间）是老 Windows 的写法，dpiAwareness（2016）
+  是新写法。两者都写，新系统读后者、老系统读前者，互为兜底。
+
+  ── 注意：清单比代码优先 ──
+
+  一旦清单声明了 DPI 感知级别，进程启动时系统就按它设置好了。
+  Program.cs 里那次 SetProcessDPIAware() 调用在本机实测仍返回 true，
+  但**它不再是决定因素**——真正生效的是清单。
+
+  所以判断 DPI 状态一律看 `dsc.exe ping` 里的 dpiAwareness（读回来的值），
+  不要去推断 SetProcessDPIAware 的返回值。实测结论：
+    · 加清单前：dpiAwareness = SYSTEM_AWARE
+    · 加清单后：dpiAwareness = PER_MONITOR_AWARE
+  两者都伴随 dpiInitOk=true，所以那个字段区分不了任何东西。
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <assemblyIdentity version="1.0.0.0" name="Dsc.Helper" />
+
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}" />
+    </application>
+  </compatibility>
+</assembly>

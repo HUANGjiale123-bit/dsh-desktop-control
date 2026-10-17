@@ -45,7 +45,14 @@ try {
     execFileSync('helper/bin/dsc.exe', ['list_windows'], { encoding: 'utf8', windowsHide: true }),
   )
 } catch { }
-const big = (raw?.windows ?? []).find((w) => w.width > 400 && w.height > 400 && w.exe)
+
+// 本插件自己的窗口（dsc-esc 的全屏光带、逃生条）不该被当成"要操作的目标"。
+// 它们的尺寸满足"够大的窗口"，但 dsc-esc 不在白名单里，选中它们必然被拒，
+// 而报出来的错会指向完全无关的地方。
+const isOurWindow = (w) => /^(dsc|dsc-esc)[.]exe$/i.test(String(w.exe ?? '').split(/[\/]/).pop())
+const big = (raw?.windows ?? []).find(
+  (w) => w.width > 400 && w.height > 400 && w.exe && !isOurWindow(w),
+)
 if (!big) {
   console.log('  ✗ 找不到可用于测试的窗口')
   process.exit(1)
