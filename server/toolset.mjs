@@ -215,8 +215,16 @@ export function createDesktopToolset(options = {}) {
    *
    * 白名单为空时一律拒绝操作，只允许观察。
    */
-  async function authorize(hwnd, toolName) {
-    const r = await runHelper(['list_windows'])
+  async function authorize(hwnd, toolName, opts = {}) {
+    // opts.windows 允许调用方把**已经列过一次**的结果传进来，省掉一次
+    // 子进程往返。实测每个 helper 进程约 110ms，而 click 路径上原本要
+    // 列两次窗口（一次做范围检查、一次在这里做授权），白付一个进程。
+    //
+    // 用显式传参而不是时间缓存：缓存会让人分不清"这份数据有多旧"，
+    // 而授权判断不该建立在猜测新鲜度的基础上。
+    const r = opts.windows
+      ? { ok: true, windows: opts.windows }
+      : await runHelper(['list_windows'])
     if (!r.ok) return { ok: false, message: failMessage(r) }
 
     const w = (r.windows ?? []).find((x) => String(x.hwnd) === String(hwnd))
@@ -891,10 +899,16 @@ export function createDesktopToolset(options = {}) {
         }
       }
 
-      const auth = await authorize(hwnd, 'click')
+      // 复用上面已经列过的窗口列表，别再起一个进程。
+      const auth = await authorize(hwnd, 'click', { windows: pre.ok ? pre.windows : undefined })
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['click', String(dx), String(dy), button ?? 'left'], 'configured')
+      // 把目标窗口一起传下去 —— 少了它，原生程序只能按"落点属于谁"判断，
+      // 目标被遮挡时会去点遮挡者。
+      const r = await runHelper(
+        ['click', String(dx), String(dy), button ?? 'left', '--hwnd', String(hwnd)],
+        'configured',
+      )
       if (!r.ok) return { isError: true, text: failMessage(r) }
 
       // ── 动作后的重新观察 ──
@@ -1010,11 +1024,20 @@ export function createDesktopToolset(options = {}) {
      * 只支持实现了这两个模式的控件；都不实现时明确报"控件不可设置"，
      * 不做 LegacyIAccessible 回退——偷偷换路写进去会让结论不可信。
      */
-    async setValue({ hwnd, index, value }) {
+    async setValue({ hwnd, index, value, descriptor }) {
       const auth = await authorize(hwnd, 'setValue')
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['set_value', String(hwnd), String(index), String(value)], auth.window)
+      // 描述符优先于序号：序号是遍历顺序，树一变就指向别的控件，
+      // 而"写进去了"的回读证明不了"写进了想要的那个"。
+      const selector = descriptor ? String(descriptor) : String(index ?? '')
+      if (!selector) {
+        return {
+          isError: true,
+          text: '失败：需要给 index（读树里的 [N]）或 descriptor（例如 role=Edit/name=搜索）。',
+        }
+      }
+      const r = await runHelper(['set_value', String(hwnd), selector, String(value)], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
 
       // 回读校验：helper 写入后会立刻读回值。verified=false 说明"调用成功但值没变"，

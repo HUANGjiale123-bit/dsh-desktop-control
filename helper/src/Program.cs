@@ -1382,30 +1382,70 @@ namespace Dsc
         {
             // 急停检查必须是第一件事——放在坐标计算之后就等于没有闸门。
             RequireNotHalted("click");
-            if (args.Length < 3) throw new ArgumentException("click 需要 x y 参数（桌面绝对物理像素）");
-            int x = int.Parse(args[1]);
-            int y = int.Parse(args[2]);
-            bool right = args.Length > 3 && args[3] == "right";
 
-            // click 是裸坐标点击，没有目标窗口参数——按"点击点落在哪个窗口上"校验，
-            // 用 WindowFromPoint 取该点处的窗口。这样点击才不会误伤白名单之外的程序。
+            // 解析：click <x> <y> [left|right] [--hwnd <窗口句柄>]
+            //
+            // --hwnd 是后加的，而且补的是一个**会点到别人身上**的缺口：
+            // 原先原生程序拿不到目标窗口，只能按"落点当前属于谁"去校验和激活。
+            // 于是目标 A 被已授权的 B 盖住时，它会激活并点击 B —— 调用方以为
+            // 点的是 A。这种错不会报错，只会让操作落到错误的窗口上。
+            IntPtr target = IntPtr.Zero;
+            List<string> pos = new List<string>();
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (args[i] == "--hwnd")
+                {
+                    if (i + 1 >= args.Length)
+                        throw new ArgumentException("--hwnd 后面需要窗口句柄");
+                    target = new IntPtr(long.Parse(args[++i]));
+                }
+                else pos.Add(args[i]);
+            }
+            if (pos.Count < 2) throw new ArgumentException("click 需要 x y 参数（桌面绝对物理像素）");
+            int x = int.Parse(pos[0]);
+            int y = int.Parse(pos[1]);
+            bool right = pos.Count > 2 && pos[2] == "right";
+
+            // 有目标窗口时先激活它。激活不只是为了注入能被接受，
+            // 也是为了**把目标提到前台，让"落点属于谁"这件事变得可判断**。
+            if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "click");
+                RequireActivated(target, "click");
+            }
+
             IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
             IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
             uint hitPid = 0;
             if (root != IntPtr.Zero) Native.GetWindowThreadProcessId(root, out hitPid);
+            string hitExe = BaseName(ProcessPath(hitPid));
 
             Console.Error.WriteLine("[click 诊断] 目标=(" + x + "," + y + ")" +
+                " 指定窗口=" + target +
                 " WindowFromPoint=" + hit + " root=" + root + " pid=" + hitPid +
-                " exe=\"" + BaseName(ProcessPath(hitPid)) + "\"" +
+                " exe=\"" + hitExe + "\"" +
                 " 前台=" + Native.GetForegroundWindow() +
                 " 白名单=[" + string.Join(",", Allowlist()) + "]");
 
             if (hit == IntPtr.Zero)
                 throw new InvalidOperationException("坐标 (" + x + "," + y + ") 处没有窗口，拒绝点击。");
-            RequireAllowedWindow(root, "click");
 
-            // 注入前必须激活：非前台状态下注入会被系统压制（实测）。
-            RequireActivated(root, "click");
+            if (target != IntPtr.Zero && root != target)
+            {
+                // 激活之后落点仍不属于目标 → 有东西盖着它。
+                //
+                // **这里必须拒绝，不能退回去点遮挡者**。这正是"点偏"的一种来源：
+                // 调用方给的是 A 的坐标，结果点了 B，而报告里写着成功。
+                throw new InvalidOperationException(
+                    "拒绝点击：坐标 (" + x + "," + y + ") 现在属于窗口 " + root.ToInt64() +
+                    "（" + (hitExe ?? "?") + "），不是指定的目标窗口 " + target.ToInt64() + "。\n" +
+                    "目标窗口可能被置顶窗口盖住，或坐标已经不在它身上。\n" +
+                    "先移开遮挡、或重新截图取坐标——不会替你去点那个盖住它的窗口。");
+            }
+
+            RequireAllowedWindow(root, "click");
+            // 没有指定目标时，注入前必须激活落点窗口（非前台状态下注入会被系统压制，实测）。
+            if (target == IntPtr.Zero) RequireActivated(root, "click");
 
             MoveCursorAbsolute(x, y);
             SendMouseButton(right, 1);
@@ -1435,6 +1475,7 @@ namespace Dsc
                 .Key("clickedX").Num(x).Key("clickedY").Num(y)
                 .Key("cursorAfter").Val(actual)
                 .Key("cursorLanded").Bool(landed)
+                .Key("targetHwnd").Num(target.ToInt64())
                 .Key("atExe").Val(atExe)
                 .Key("atHwnd").Num(rootAfter.ToInt64())
                 .Key("button").Val(right ? "right" : "left")
@@ -1648,11 +1689,25 @@ namespace Dsc
         private static int CmdSetValue(string[] args)
         {
             RequireNotHalted("set_value");
-            if (args.Length < 4) throw new ArgumentException("set_value 需要 hwnd index value");
+            if (args.Length < 4) throw new ArgumentException("set_value 需要 hwnd <index|描述符> value");
             IntPtr hwnd = new IntPtr(long.Parse(args[1]));
             RequireAllowedWindow(hwnd, "set_value");
-            int index = int.Parse(args[2]);
+            // 选择器既可以是读树给出的序号，也可以是描述符（role=/name=/aid=）。
+            //
+            // ── 为什么加描述符 ──
+            //
+            // 序号是**遍历顺序**，不是一个稳定的身份。树一变（加载出新节点、
+            // 折叠展开、异步插入），同一个序号就指向别的控件。而"写入后回读一致"
+            // 只能证明**写进了这个控件**，证明不了**写进了想要的那个**——
+            // 这是最坏的一种错：看起来成功，实际改错了东西。
+            //
+            // 描述符按 role/name/aid 重新定位，跨调用稳定得多。序号仍然支持
+            // （同一次读取后立刻用是可接受的），但描述符是更可靠的选择。
+            string selector = args[2];
             string value = args[3];
+            bool byDescriptor = selector.IndexOf('=') > 0;
+            int index = -1;
+            string label = "";
 
             AutomationElement root = AutomationElement.FromHandle(hwnd);
             if (root == null) throw new InvalidOperationException("无法从该窗口句柄取得无障碍元素");
@@ -1663,20 +1718,40 @@ namespace Dsc
             // 因此同样先激活（与 Codex 的"输入类方法自动激活"一致）。
             RequireActivated(hwnd, "set_value");
 
-            if (index < 0)
-                return FailJson("BadIndex", "element index must be >= 0, got " + index);
+            AutomationElement el = null;
+            if (byDescriptor)
+            {
+                Dictionary<string, string> want = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string part in selector.Split('/'))
+                {
+                    int eq = part.IndexOf('=');
+                    if (eq > 0) want[part.Substring(0, eq).Trim()] = part.Substring(eq + 1).Trim();
+                }
+                if (want.Count == 0)
+                    throw new ArgumentException("描述符为空，例如 role=Edit/name=搜索");
+                label = "元素 [" + selector + "]";
+                el = FindByDescriptor(root, want, 0, 4000);
+                if (el == null)
+                    return FailJson("NotFound", "未找到匹配元素：" + selector + "；先重读一次树确认它还在");
+            }
+            else
+            {
+                index = int.Parse(selector);
+                if (index < 0)
+                    return FailJson("BadIndex", "element index must be >= 0, got " + index);
+                label = label;
 
-            // 只为绑定这一个索引而抓快照：抓到 index+1 个即可，超出 index 的部分不需要。
-            Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
-            AutomationElement el;
-            if (!snap.Map.TryGetValue(index, out el))
-                return FailJson("StaleSnapshot",
-                    "element " + index + " is not present in window " + hwnd +
-                    " (" + snap.Total + " elements exist); re-read the tree");
+                // 只为绑定这一个索引而抓快照：抓到 index+1 个即可，超出 index 的部分不需要。
+                Snapshot snap = SnapshotOps.Capture(root, hwnd, index + 1, DefaultMaxDepth, DefaultMaxChildren);
+                if (!snap.Map.TryGetValue(index, out el))
+                    return FailJson("StaleSnapshot",
+                        label + " is not present in window " + hwnd +
+                        " (" + snap.Total + " elements exist); re-read the tree");
+            }
 
             if (SnapshotOps.SafeBool(delegate { return el.Current.IsPassword; }))
                 return FailJson("Refused",
-                    "element " + index + " is a password field; refusing to set its value");
+                    label + " is a password field; refusing to set its value");
 
             string role = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
 
@@ -1694,7 +1769,7 @@ namespace Dsc
                     ValuePattern vp = (ValuePattern)p;
                     if (vp.Current.IsReadOnly)
                         return FailJson("ReadOnly",
-                            "element " + index + " (" + role + ") is read-only; cannot set its value");
+                            label + " (" + role + ") is read-only; cannot set its value");
 
                     try { el.SetFocus(); } catch { }     // Codex 也是先聚焦
                     System.Threading.Thread.Sleep(40);
@@ -1732,13 +1807,13 @@ namespace Dsc
                     RangeValuePattern rv = (RangeValuePattern)p;
                     if (rv.Current.IsReadOnly)
                         return FailJson("ReadOnly",
-                            "element " + index + " (" + role + ") is read-only (range); cannot set its value");
+                            label + " (" + role + ") is read-only (range); cannot set its value");
 
                     double d;
                     if (!double.TryParse(value, System.Globalization.NumberStyles.Float,
                                          System.Globalization.CultureInfo.InvariantCulture, out d))
                         return FailJson("BadValue",
-                            "element " + index + " exposes RangeValuePattern; its value must be a number, got: " + value);
+                            label + " exposes RangeValuePattern; its value must be a number, got: " + value);
 
                     // 先聚焦再读区间：实测未聚焦时 Current.Minimum/Maximum 可能返回 0/0，
                     // 而控件真实范围是 0..100（NumericUpDown）。若不重读，任何值都会
@@ -1764,7 +1839,7 @@ namespace Dsc
 
                         if (min == 0 && max == 0)
                             return FailJson("RangeUnavailable",
-                                "element " + index + " exposes RangeValuePattern but reports an empty range [0, 0]; " +
+                                label + " exposes RangeValuePattern but reports an empty range [0, 0]; " +
                                 "the control likely does not publish its bounds to UIA. Refusing to guess.");
                     }
 

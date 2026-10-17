@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.8.0'
+const PLUGIN_VERSION = '2.8.1'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1049,13 +1049,24 @@ function applyInner(ctx, config = {}) {
       '适用对象是那些实现了这两个模式的控件（文本框、数字框等）；' +
       '两者都不实现的控件会被明确拒绝，不会偷偷换别的方式写入。' +
       '写入后会立刻回读值确认，回读不一致时报告失败而不是假定成功。' +
+      '**优先用 descriptor 而不是 index**：index 是遍历序号，界面一变就指向别的控件，' +
+      '而"写入成功"的回读证明不了写进了你想要的那个。' +
       '需要目标窗口在白名单内。' + allowNote,
     parameters: {
       hwnd: { ...HWND, description: '目标窗口句柄。' },
+      descriptor: {
+        type: 'string',
+        description:
+          '元素描述符，形如 role=Edit/name=搜索 或 role=Button/name=保存（也可用 aid=）。' +
+          '**推荐**：它按属性重新定位，跨调用稳定。' +
+          '与 index 二选一，同时给时以 descriptor 为准。',
+      },
       index: {
         type: 'number',
-        description: '元素索引，取自 desktop_read_window 输出中的 [N]。索引只对产生它的那次读取有效，界面变化后需重新读取。',
-        required: true,
+        description:
+          '元素索引，取自 desktop_read_window 输出中的 [N]。' +
+          '**注意**：索引是遍历顺序，只对产生它的那次读取有效；' +
+          '界面一变就可能指向别的控件，所以优先用 descriptor。',
       },
       value: { type: 'string', description: '要写入的值。元素实现 RangeValuePattern 时必须是数字。', required: true },
     },

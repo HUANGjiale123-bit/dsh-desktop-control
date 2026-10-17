@@ -131,6 +131,17 @@ namespace Dsc
         /// <summary>
         /// 已知不会再有子节点的类型。对这些类型不做 FindAll(Children)——
         /// 那次调用必然返回空，但每次都是一趟跨进程往返。
+        ///
+        /// ── 注意这两个类型**不在**列表里，这是刻意的 ──
+        ///
+        /// ComboBox 和 Header（以及 HeaderItem）可以有子元素：下拉框展开后的
+        /// 选项、表头的各个表头项都在它们下面。早期版本把它们当叶节点剪掉，
+        /// 读出来的树会缺内容，而且**缺得毫无提示** —— 表现为"这个应用的
+        /// 无障碍树很少"，很容易被误判成"该应用不支持无障碍"。
+        ///
+        /// 这是第三方审查指出的（它给的是控件类型的文档依据），我没有在真实
+        /// 应用上逐一复现缺失。按"宁可多遍历一层"的保守方向修：子节点数量
+        /// 仍受 maxChildrenPerNode 与总预算约束，不会失控。
         /// </summary>
         private static bool IsLeafType(AutomationElement el)
         {
@@ -145,15 +156,12 @@ namespace Dsc
                 case "ControlType.CheckBox":
                 case "ControlType.RadioButton":
                 case "ControlType.Hyperlink":
-                case "ControlType.ComboBox":
                 case "ControlType.Slider":
                 case "ControlType.ProgressBar":
                 case "ControlType.Separator":
                 case "ControlType.Thumb":
                 case "ControlType.ScrollBar":
                 case "ControlType.TitleBar":
-                case "ControlType.Header":
-                case "ControlType.HeaderItem":
                     return true;
                 default:
                     return false;
