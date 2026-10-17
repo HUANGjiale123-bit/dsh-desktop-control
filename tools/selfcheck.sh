@@ -165,7 +165,20 @@ else
   echo "  （跳过：找不到 node 或 dsc.exe）"
 fi
 
-head_ "12. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "12. 截图必须作为图像进入模型（审查报告第 5 条）"
+# 只返回路径时，模型要看界面得再调一次 read_image —— 每轮多一次往返，
+# 这正是"比 Codex 慢"的结构原因。图像必须走 attachments.saveImages()。
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-image-block.mjs >/dev/null 2>&1; then
+    ok "schema 有 image / render 带图像 / 真实 PNG 进 attachment / 缺服务时降级并警告"
+  else
+    bad "截图没有进入模型 —— 单独跑 node tools/test-image-block.mjs 看明细"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "13. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

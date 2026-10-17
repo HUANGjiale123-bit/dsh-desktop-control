@@ -816,6 +816,9 @@ export function createDesktopToolset(options = {}) {
         : ''
 
       return {
+        // filepath 单独给出来：上层要把它读成图像内容块交给模型。
+        // 原先只有文本，上层只能用正则从句子中间把路径抠出来，太脆。
+        filepath: r.filepath,
         text:
           warn +
           `窗口 ${hwnd} 截图已保存：${r.filepath}\n` +

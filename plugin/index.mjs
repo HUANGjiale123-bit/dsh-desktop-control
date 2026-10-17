@@ -18,7 +18,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // 工具定义用本地的实现，而不是 `@deepseek-ai/dsh-tools`。
@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.7.3'
+const PLUGIN_VERSION = '2.8.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -668,8 +668,8 @@ function applyInner(ctx, config = {}) {
   register({
     name: 'desktop_screenshot',
     description:
-      '截取一个窗口的画面并返回 PNG 文件路径与该窗口在桌面上的原点坐标。' +
-      '图内坐标加上原点即为桌面坐标——只有平移，没有缩放。' +
+      '截取一个窗口的画面，**直接把图像交给模型**（不是只给一个路径）。' +
+      '同时给出该窗口在桌面上的原点坐标：图内坐标加上原点即为桌面坐标，只有平移没有缩放。' +
       '**需要授权**：截图里就是界面内容本身，所以和读树一样要过授权。',
     parameters: { hwnd: HWND },
     output: {
@@ -679,15 +679,35 @@ function applyInner(ctx, config = {}) {
         properties: {
           filepath: { type: 'string', required: true },
           summary: { type: 'string', required: true },
+          // image 的内部结构由 attachment 引用决定，这里刻意留空不约束。
+          // 注意：**不允许**声明成 undefined —— 存在但为 undefined 的键
+          // 会触发输出校验失败，所以要按"有就给、没有就不给"构造。
+          image: {
+            type: 'object',
+            description: '图像内容块，携带截图本身。',
+          },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: value.summary }],
+      render: (_args, value) =>
+        value.image ? [value.image, { type: 'text', text: value.summary }] : [{ type: 'text', text: value.summary }],
     },
     async execute(args, exec) {
       const r = await set.tools.screenshot(args)
       if (r.isError) throw new Error(r.text)
-      const m = /截图已保存：(.+)/.exec(r.text)
-      return { filepath: m ? m[1].trim() : '', summary: r.text }
+      const filepath = r.filepath ?? ''
+
+      // ── 把 PNG 作为**真正的图像**送给模型 ──
+      //
+      // 这一步原来缺失，而且后果比看起来严重：工具只返回一条路径，
+      // 模型拿到的是一串字。要看界面就得**再调一次 read_image**，
+      // 于是每做一次"看 → 点"就多一次工具往返。
+      // 这就是"比 Codex 慢"的一个结构性原因：它一次调用里既做动作又给画面。
+      //
+      // 正确形状是 { type:'image', attachment: ref }，ref 来自
+      // ctx.attachments.saveImages() —— 这是 provider 唯一会真的序列化成
+      // 图像的形状。用文字描述界面等于撒谎。
+      const image = await imageBlockFor(filepath)
+      return image ? { filepath, summary: r.text, image } : { filepath, summary: r.text }
     },
     presentCall: args => ({ card: 'generic', title: `截取窗口 ${args.hwnd}`, kind: 'read' }),
   })
@@ -859,6 +879,43 @@ function applyInner(ctx, config = {}) {
    */
 
   const liveOverlays = new Map()   // key -> ChildProcess
+
+  /**
+   * 把一个 PNG 文件变成 provider 能真正序列化的图像内容块。
+   *
+   * ── 为什么必须有它 ──
+   *
+   * 工具只返回"截图保存在某路径"时，模型拿到的是**一串字**。要看界面
+   * 就得再调一次 read_image —— 于是每轮"看→点"多一次工具往返。
+   * 这就是比 Codex 慢的结构性原因之一：它在一次调用里既做动作又给画面。
+   *
+   * 唯一的正确形状是 `{ type:'image', attachment: ref }`，ref 来自
+   * `ctx.attachments.saveImages()`。别的形状 provider 都不会序列化成图像，
+   * 用文字描述界面等于撒谎。
+   *
+   * 失败时返回 undefined 而不是抛异常：截图本身已经存到磁盘了，
+   * 拿不到 attachment 是能力缺失，不该让整个工具调用失败。
+   */
+  async function imageBlockFor(pngPath) {
+    if (!pngPath) return undefined
+    try {
+      const attachments = ctx.get('attachments')
+      if (!attachments?.saveImages) {
+        ctx.logger?.warn?.(
+          '[desktop-control] 没有 attachments 服务，截图只能以路径形式给出（模型看不到图）',
+        )
+        return undefined
+      }
+      const bytes = new Uint8Array(readFileSync(pngPath))
+      const [ref] = await attachments.saveImages([
+        { data: bytes, mediaType: 'image/png', name: pngPath.split(/[\/]/).pop() },
+      ])
+      return ref ? { type: 'image', attachment: ref } : undefined
+    } catch (e) {
+      ctx.logger?.warn?.(`[desktop-control] 截图转 attachment 失败：${e?.message ?? e}`)
+      return undefined
+    }
+  }
 
   /**
    * 空闲多久之后自动收起**自动拉起**的指示层。

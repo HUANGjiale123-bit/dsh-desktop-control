@@ -30,7 +30,23 @@
 const ALLOWED_SPEC_KEYS = new Set(['type', 'description', 'required', 'enum'])
 
 /** 允许出现在输出 schema 里的顶层键。 */
-const ALLOWED_OUTPUT_KEYS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'enum'])
+const ALLOWED_OUTPUT_KEYS = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'enum',
+  // description 只是文档，不参与校验，官方 schema 里也允许。
+  //
+  // 原先这里没有它，于是给输出字段写一句说明会被自己的校验拒掉。
+  // 踩到它的经过：给 desktop_screenshot 的输出加 image 内容块，
+  // 想写清"这是带给模型的图像"，注册直接抛异常 —— 而这个异常发生在
+  // apply 里，表现是**整个插件激活失败、所有工具消失**，
+  // 从症状完全看不出是"某个字段多写了一句注释"。
+  // 不该让文档成为故障源。
+  'description',
+])
 
 function schemaError(message) {
   throw new Error(`defineTool: ${message}`)
