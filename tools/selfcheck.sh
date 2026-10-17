@@ -282,7 +282,20 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "21. 截图文件必须有保留上限（用户问出来的）"
+head_ "21. 错误必须带恢复建议（不是纯文字）"
+# Codex："先覆盖明确守卫和未知结果"。原先的错误是纯文字，
+# 读的人得自己猜该重观察还是该放弃。
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-error-advice.mjs >/dev/null 2>&1; then
+    ok "18 条建议 / 未知默认 reobserve / 手写错误也覆盖"
+  else
+    bad "错误没有恢复建议 —— 单独跑 node tools/test-error-advice.mjs"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "22. 截图文件必须有保留上限（用户问出来的）"
 # 用户原话："你每次截图用完后会删掉吗？不删掉的话会占内存吧？"
 # 实测：67 个文件 32 MB，从不删除。
 if [ -n "$NODE" ]; then
@@ -295,7 +308,7 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "22. 改变布局的动作必须让旧截图坐标失效"
+head_ "23. 改变布局的动作必须让旧截图坐标失效"
 # 滚轮滚动后，同一张截图上的坐标全部指向别处。不作废的话旧 shotId 会
 # 通过全部检查（窗口没移、没改大小、没过期），然后点到完全不同位置。
 if [ -n "$NODE" ]; then
@@ -308,7 +321,7 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "23. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "24. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

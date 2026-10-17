@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.16.0'
+const PLUGIN_VERSION = '2.17.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -830,12 +830,20 @@ function applyInner(ctx, config = {}) {
     return lines.join(String.fromCharCode(10))
   }
 
-  /** 从错误消息里猜一个短 code —— 只用于聚合统计，不是权威分类。 */
+  /**
+   * 从错误消息里取出短 code，用于聚合统计。
+   *
+   * 优先读 toolset 写下的 `失败：CODE` 和 `[retry=...]` —— 那两个是
+   * **工具自己声明的事实**，比在文本里猜关键词可靠得多。
+   * 只有在这两样都没有时（比如插件层的拒绝），才退回关键词匹配。
+   */
   function guessErrorCode(text) {
     const s = String(text ?? '')
+    const declared = s.match(/失败：([A-Za-z]+)/)
+    if (declared) return declared[1]
+    if (/没拿到执行权|另一个操作/.test(s)) return 'Busy'
     if (/急停|ESC 叫停|Halted/.test(s)) return 'Halted'
     if (/未授权|拒绝/.test(s)) return 'NotAuthorized'
-    if (/不存在或已关闭|找不到窗口/.test(s)) return 'StaleTarget'
     if (/找不到截图/.test(s)) return 'StaleObservation'
     if (/歧义|匹配到 \d+ 个/.test(s)) return 'AmbiguousTarget'
     if (/超时|timeout/i.test(s)) return 'Timeout'
@@ -969,7 +977,7 @@ function applyInner(ctx, config = {}) {
                   `  **这不是故障** —— 同一时刻只允许一个操作碰桌面，` +
                   `否则两个操作会互相踩到对方的光标和焦点。
 ` +
-                  `  现在该做的：等一下再试。如果反复出现，说明有操作卡住了，` +
+                  `  [retry=wait] 等一下再试。如果反复出现，说明有操作卡住了，` +
                   `用 desktop_diagnose({perf:true}) 看最近几次的耗时。`,
               )
             }
@@ -2250,6 +2258,7 @@ function applyInner(ctx, config = {}) {
             '  这不是故障 —— 是急停生效中。解除需要**用户本人**执行：\n' +
             '    dsc.exe stop --clear\n' +
             '  （或删掉闸门文件 ' + gateChecked() + '）\n' +
+            '  [retry=stop] 缓过来再问用户要不要继续。',
             '  **不要试图绕过**：绕过急停比停下来更糟。',
         )
       }

@@ -279,8 +279,79 @@ export function createDesktopToolset(options = {}) {
     })
   }
 
-  const failMessage = (r) =>
-    `失败：${r.error ?? 'Unknown'}${r.message ? ' — ' + r.message : ''}`
+  /* ───────────── 错误事实与恢复建议 ─────────────
+   *
+   * ── 为什么需要这张表 ──
+   *
+   * 原先的错误是纯文字（"失败：NotFound — ..."），读的人得自己判断
+   * 该重观察、该改描述符，还是该放弃。而 helper 层**判不出来**：
+   * 一个 NotFound 可能是窗口关了、元素没渲染（该等），也可能是描述符写错
+   * （该改）—— helper 不知道自己为什么被调用。
+   *
+   * 所以按"恢复动作是否确定"分两类（Codex 的建议）：
+   *   · 明确守卫：恢复动作是确定的，直接给 retry
+   *   · 其余（含未知）：统一给 reobserve —— 重新观察永远比硬试安全
+   *
+   * retry 的语义（写进文本，既给人读也能被解析）：
+   *   stop         停下，别重试，把情况告诉用户
+   *   reobserve    重新截图/读树再决定
+   *   wait         等一下再试
+   *   disambiguate 换一个更唯一的描述符
+   *   giveUp       这个方向不行，换方法
+   */
+  const ERROR_ADVICE = {
+    // ── 明确守卫 ──
+    Halted: { retry: 'stop', hint: '用户按了 ESC 叫停。不要重试，也不要自行解除。' },
+    HelperMissing: { retry: 'stop', hint: 'helper 程序不存在 —— 这是安装问题，重试不会变好。' },
+    Refused: {
+      retry: 'giveUp',
+      hint: '明确拒绝（白名单 / 坐标不在目标窗口 / 闸门之一）。看清 message 是哪一种，换方法。',
+    },
+    StaleSnapshot: { retry: 'reobserve', hint: '界面已经变了。重新截图或读树，再决定下一步。' },
+    AmbiguousTarget: {
+      retry: 'disambiguate',
+      hint: '描述符匹配到多个元素。加一个更唯一的条件，或改用坐标。',
+    },
+    BadValue: { retry: 'giveUp', hint: '给出的值不合法。改正后再试，重试同样的值结果不会变。' },
+    BadIndex: { retry: 'giveUp', hint: '元素索引已失效。改用描述符，或重新读树。' },
+    BadAction: { retry: 'giveUp', hint: '这个元素不支持该动作。换一种操作方式。' },
+    OutOfRange: { retry: 'giveUp', hint: '数值超出允许范围。' },
+    ActionNotAvailable: { retry: 'giveUp', hint: '该元素不支持这个动作。' },
+    NotSettable: { retry: 'giveUp', hint: '该元素不能设置值。' },
+    RangeUnavailable: { retry: 'giveUp', hint: '该元素没有范围值接口。' },
+    ReadOnly: { retry: 'giveUp', hint: '该元素是只读的。' },
+    Timeout: { retry: 'wait', hint: '超时。应用可能正忙，等一会再试。' },
+    Busy: { retry: 'wait', hint: '另一个操作正占着桌面。等一下再试。' },
+    StaleTarget: {
+      retry: 'reobserve',
+      hint: '目标窗口没了（关了，或句柄被复用）。重新列窗口，别用旧句柄。',
+    },
+    NotAuthorized: {
+      retry: 'stop',
+      hint: '用户没同意操作这个应用（或本次拒绝了）。不要重试 —— 再问一次只会更烦人。',
+    },
+    UnknownOutcome: {
+      retry: 'reobserve',
+      hint: '动作已经发出，但拿不到结果。**先看界面变成什么样了**，再决定要不要重做 —— 别直接重做，可能已经生效。',
+    },
+  }
+
+  /**
+   * 把 helper 的失败转成"事实 + 恢复建议"。
+   *
+   * 未知错误一律 reobserve：重新观察是唯一在所有情况下都不会更糟的动作。
+   */
+  const failMessage = (r) => {
+    const code = r?.error ?? 'Unknown'
+    const base = `失败：${code}${r?.message ? ' — ' + r.message : ''}`
+    const a = ERROR_ADVICE[code]
+    if (!a) {
+      return `${base}
+  [retry=reobserve] 我不确定这一类的恢复方式，**先重新观察**再决定。`
+    }
+    return `${base}
+  [retry=${a.retry}] ${a.hint}`
+  }
 
   /* ───────────── 安全层 ───────────── */
 
@@ -291,7 +362,21 @@ export function createDesktopToolset(options = {}) {
    * 前者挡住"窗口已关闭"，后者挡住"句柄被复用成别的进程"。
    *
    * 白名单为空时一律拒绝操作，只允许观察。
+
    */
+  /**
+   * 给**手写的**错误消息补上恢复建议。
+   *
+   * 为什么需要它：toolset 里有十来处 `return { ok: false, message: '...' }`
+   * 直接拼中文句子，完全不经过 failMessage —— 于是那些错误没有任何
+   * retry 提示。统一错误事实不能只统一 helper 那一条路。
+   */
+  const advice = (code, text) => {
+    const a = ERROR_ADVICE[code]
+    if (!a) return `${text}${String.fromCharCode(10)}  [retry=reobserve] 先重新观察再决定。`
+    return `${text}${String.fromCharCode(10)}  [retry=${a.retry}] ${a.hint}`
+  }
+
   async function authorize(hwnd, toolName, opts = {}) {
     // opts.windows 允许调用方把**已经列过一次**的结果传进来，省掉一次
     // 子进程往返。实测每个 helper 进程约 110ms，而 click 路径上原本要
@@ -308,7 +393,10 @@ export function createDesktopToolset(options = {}) {
     if (!w) {
       return {
         ok: false,
-        message: `失败：目标窗口 ${hwnd} 不存在或已关闭。先用 desktop_list_windows 重新确认。`,
+        message: advice(
+        'StaleTarget',
+        `失败：目标窗口 ${hwnd} 不存在或已关闭。先用 desktop_list_windows 重新确认。`,
+      ),
       }
     }
 
@@ -317,7 +405,10 @@ export function createDesktopToolset(options = {}) {
     if (!base) {
       return {
         ok: false,
-        message: `失败：无法确定窗口 ${hwnd} 所属的可执行文件，拒绝操作（无法校验白名单）。`,
+        message: advice(
+        'Refused',
+        `失败：无法确定窗口 ${hwnd} 所属的可执行文件，拒绝操作（无法校验白名单）。`,
+      ),
       }
     }
 
@@ -342,12 +433,14 @@ export function createDesktopToolset(options = {}) {
       // 没有授权通道（MCP 路径）：退回纯静态白名单，fail closed。
       return {
         ok: false,
-        message:
+        message: advice(
+          'NotAuthorized',
           (staticAllowlist.length === 0
             ? '失败：WhitelistEmpty — 应用白名单为空，且当前没有会话授权通道，拒绝执行任何操作。'
             : `失败：目标应用 "${base}" 不在白名单内。当前白名单：${staticAllowlist.join(', ')}`) +
-          '设置 allowedApps（逗号分隔的可执行文件名，例如 notepad.exe）后再试。' +
-          '观察类工具不受此限制。',
+            '设置 allowedApps（逗号分隔的可执行文件名，例如 notepad.exe）后再试。' +
+            '观察类工具不受此限制。',
+        ),
       }
     }
 
@@ -360,16 +453,18 @@ export function createDesktopToolset(options = {}) {
       // 钩子抛错 = 拒绝。授权通道出问题时必须 fail closed。
       return {
         ok: false,
-        message: `失败：会话授权检查出错，按拒绝处理 — ${e?.message ?? e}`,
+        message: advice('Refused', `失败：会话授权检查出错，按拒绝处理 — ${e?.message ?? e}`),
       }
     }
 
     if (!approved) {
       return {
         ok: false,
-        message:
+        message: advice(
+          'NotAuthorized',
           `失败：用户未授权操作 "${base}"，已拒绝。` +
-          `本次授权是会话级的——同意后仅对当前会话的这一个应用生效。`,
+            `本次授权是会话级的——同意后仅对当前会话的这一个应用生效。`,
+        ),
       }
     }
 
