@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.11.1'
+const PLUGIN_VERSION = '2.12.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1433,6 +1433,35 @@ function applyInner(ctx, config = {}) {
    * 共同点：**都不能靠返回值证明成功**。悬停有没有出菜单、拖动有没有真的
    * 移动了东西、滚轮滚了几屏 —— 只能重新观察。所以它们都接 observe。
    */
+
+  register({
+    name: 'desktop_whatis',
+    description:
+      '查询某个坐标下面是哪个 UI 元素 —— **坐标点击之前先问一句**。' +
+      '返回元素的名字、类型、矩形和中心点；如果那一点没有可交互元素会明确说出来，并给出附近最近的控件。' +
+      '为什么要有它：坐标往往是估出来的，而点错的表现只是"点了没反应"。' +
+      '拿到元素名字之后，应当改用 desktop_click_element 按名字去点 —— 那不受缩放、遮挡、窗口移动影响。' +
+      allowNote,
+    parameters: {
+      hwnd: { ...HWND, description: '目标窗口句柄（用于在窗口内找最近的控件）。' },
+      x: { type: 'integer', description: '桌面绝对 X。' },
+      y: { type: 'integer', description: '桌面绝对 Y。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_a, v) => [{ type: 'text', text: v.result }],
+    },
+    async execute(args) {
+      const r = await set.tools.whatis(args)
+      if (r.isError) throw new Error(r.text)
+      return { result: r.text }
+    },
+    presentCall: a => ({ card: 'generic', title: `查询 (${a.x}, ${a.y}) 处是什么`, kind: 'read' }),
+  })
 
   register({
     name: 'desktop_move',

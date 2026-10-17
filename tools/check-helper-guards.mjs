@@ -45,6 +45,7 @@ const POLICY = {
   CmdPressKey: 'both',
   CmdTree: 'both',
   CmdScreenshot: 'both',
+  CmdWhatIs: 'both',
   CmdMove: 'both',
   CmdDrag: 'both',
   CmdWheel: 'both',

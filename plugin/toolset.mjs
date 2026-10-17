@@ -1042,6 +1042,30 @@ export function createDesktopToolset(options = {}) {
         )
       }
 
+      // ── "这一点下面是什么元素"必须**以警告的形式**出现 ──
+      //
+      // helper 会带回 atElement（那一点的 UIA 元素）。如果那一点上没有
+      // 可交互元素，或者是个名字毫不相干的东西，就要说清楚 ——
+      // 因为坐标点错的表现是"点了但什么也没发生"，而调用方通常不会
+      // 去怀疑自己给的坐标。
+      if (r.atElement) {
+        try {
+          const el = typeof r.atElement === 'string' ? JSON.parse(r.atElement) : r.atElement
+          if (el && el.actionable === false) {
+            lines.push(
+              `  ⚠ 该坐标下没有可交互元素（读到的是一层 "${el.role ?? '?'}"` +
+                `${el.name ? ` 叫 "${el.name}"` : '，没有名字'}，矩形 ${el.w}x${el.h}）。` +
+                `很可能点在空白/背景上。` +
+                `**建议改用 desktop_click_element 按名字点**，或先 desktop_whatis 确认位置。`,
+            )
+          } else if (el && el.name) {
+            lines.push(`  该坐标下的元素：「${el.name}」（${el.role ?? '?'}）`)
+          }
+        } catch {
+          /* atElement 解析不了就不提，不影响点击结果 */
+        }
+      }
+
       if (r.atExe) {
         const target = String(auth.window?.exe ?? '').split(/[\\/]/).pop().toLowerCase()
         if (target && r.atExe.toLowerCase() !== target) {
@@ -1058,6 +1082,52 @@ export function createDesktopToolset(options = {}) {
         `  注意：以上只核实到"点击已发出且落在预期窗口"，` +
           `**不能**证明应用响应了。要确认效果请重读界面或截图。`,
       )
+      return { text: lines.join('\n') }
+    },
+
+    /**
+     * 查询某个坐标下面是哪个元素。**点之前先确认**。
+     *
+     * 这是为"坐标是估出来的"这种情况准备的：先问一句，拿到元素的
+     * 名字和矩形，就能改用 desktop_click_element 精确点，不必赌。
+     */
+    async whatis({ hwnd, x, y }) {
+      const auth = await authorize(hwnd, 'whatis')
+      if (!auth.ok) return { isError: true, text: auth.message }
+
+      const r = await runHelper(['whatis', String(x), String(y), '--hwnd', String(hwnd)], 'configured')
+      if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      const lines = [`坐标 (${x},${y}) 处：`]
+      if (r.fromPointError) {
+        lines.push(`  读不到 UIA 元素 —— ${r.fromPointError}`)
+        lines.push('  这通常是权限/环境限制，不代表那一点真的没有控件。')
+      } else if (!r.element || r.element === 'null') {
+        lines.push('  **没有 UIA 元素**（自绘界面、视频画面，或点在窗口外）')
+      } else {
+        let el = r.element
+        if (typeof el === 'string') { try { el = JSON.parse(el) } catch { el = null } }
+        if (el) {
+          lines.push(`  「${el.name ?? '（无名字）'}」 ${el.role ?? '?'}`)
+          lines.push(`  矩形：(${el.x},${el.y}) ${el.w}x${el.h}  中心：(${el.x + Math.floor(el.w / 2)},${el.y + Math.floor(el.h / 2)})`)
+          lines.push(
+            el.actionable
+              ? `  → 可交互。**建议用 desktop_click_element 传 name="${el.name}" 去点**，比坐标可靠。`
+              : `  → 不是可交互控件（多半是背景或文字）。`,
+          )
+        }
+      }
+
+      if (r.nearest) {
+        let n = r.nearest
+        if (typeof n === 'string') { try { n = JSON.parse(n) } catch { n = null } }
+        if (n && n.distance > 8) {
+          lines.push(
+            `  附近最近的控件：「${n.name}」（${n.role}）在 (${n.x},${n.y}) ${n.w}x${n.h}，` +
+              `中心距离 ${n.distance} 像素。`,
+          )
+        }
+      }
       return { text: lines.join('\n') }
     },
 

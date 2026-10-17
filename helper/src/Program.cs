@@ -219,6 +219,12 @@ namespace Dsc
 
         private void Sep() { if (_needComma) _sb.Append(','); _needComma = true; }
 
+        /// <summary>把字符串转义成合法的 JSON 字符串字面量（含引号）。</summary>
+        public static string Str(string v) { return Quote(v); }
+
+        /// <summary>原样插入一段已经是合法 JSON 的文本。</summary>
+        public Jw Raw(string json) { Sep(); _sb.Append(json ?? "null"); return this; }
+
         public Jw Key(string k) { Sep(); _sb.Append(Quote(k)).Append(':'); _needComma = false; return this; }
         public Jw Val(string s) { Sep(); _sb.Append(s == null ? "null" : Quote(s)); return this; }
         public Jw Num(long n) { Sep(); _sb.Append(n.ToString(System.Globalization.CultureInfo.InvariantCulture)); return this; }
@@ -759,6 +765,7 @@ namespace Dsc
                     case "move": return CmdMove(args);
                     case "drag": return CmdDrag(args);
                     case "wheel": return CmdWheel(args);
+                    case "whatis": return CmdWhatIs(args);
                     case "set_value": return CmdSetValue(args);
                     case "do_action": return CmdDoAction(args);
                     case "type": return CmdType(args);
@@ -1640,6 +1647,21 @@ namespace Dsc
             if (rootAfter != IntPtr.Zero) Native.GetWindowThreadProcessId(rootAfter, out pidAfter);
             string atExe = BaseName(ProcessPath(pidAfter));
 
+            // ── 点完之后，问一句"这一点下面是哪个元素" ──
+            //
+            // 这不是锦上添花：实测我自己会用目测估坐标而不读树，
+            // 于是把搜索框估低 30 像素点到了"下载客户端"、把标签页当成标题栏。
+            // 插件一直给了精确矩形，问题是"调用方要记得先读树"这种约束
+            // 和"助手要记得开指示层"是同一种病。
+            //
+            // 所以把检查塞进工具本身：每次坐标点击都顺带报告这一点是什么。
+            // FromPoint 失败时不阻断点击（降级为不报告），因为坐标点击
+            // 在某些环境仍然是有意义的最后手段。
+            string atElement = null;
+            string atElementError = null;
+            try { bool _a; atElement = DescribePoint(x, y, out _a); }
+            catch (Exception e2) { atElementError = e2.Message; }
+
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
                 .Key("clickedX").Num(x).Key("clickedY").Num(y)
@@ -1648,8 +1670,10 @@ namespace Dsc
                 .Key("targetHwnd").Num(target.ToInt64())
                 .Key("atExe").Val(atExe)
                 .Key("atHwnd").Num(rootAfter.ToInt64())
-                .Key("button").Val(clickButton).Key("count").Num(clickCount)
-             .End();
+                .Key("button").Val(clickButton).Key("count").Num(clickCount);
+            if (atElement != null) j.Key("atElement").Raw(atElement);
+            if (atElementError != null) j.Key("atElementError").Val(atElementError);
+            j.End();
             Console.WriteLine(j.ToString());
             return 0;
         }
@@ -2219,6 +2243,206 @@ namespace Dsc
                 .Key("cursorMoved").Bool(true)
                 .Key("button").Val(right ? "right" : "left")
              .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+
+        /// <summary>
+        /// 描述"屏幕某一点下面是哪个 UIA 元素"，用于点击防呆。
+        ///
+        /// 返回一个简短的 JSON 片段（供 Jw 拼进去），或者 null（读不到）。
+        /// 三个字段最有用：
+        ///   · name —— 元素的可见文字，人一看就知道点的是什么
+        ///   · role —— 控件类型（Button / Hyperlink / Text …）
+        ///   · rect —— 它的矩形，能直接拿去算中心，不必再估
+        /// </summary>
+        private static string DescribePoint(int x, int y, out bool actionable)
+        {
+            actionable = false;
+            try
+            {
+                System.Windows.Point pt = new System.Windows.Point(x, y);
+                AutomationElement el = AutomationElement.FromPoint(pt);
+                if (el == null) return null;
+
+                string name = SnapshotOps.SafeStr(delegate { return el.Current.Name; });
+                string role = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
+                string aid = SnapshotOps.SafeStr(delegate { return el.Current.AutomationId; });
+                System.Windows.Rect r;
+                try { r = el.Current.BoundingRectangle; } catch { return null; }
+                if (r.IsEmpty) return null;
+
+                // 有没有"能点的意思"：有名字的可交互类型才算。
+                // 只有窗口背景 / Pane 这类，说明调用方很可能点在空白处。
+                bool named = !string.IsNullOrEmpty(name);
+                bool interactive =
+                    role == "ControlType.Button" || role == "ControlType.Hyperlink" ||
+                    role == "ControlType.MenuItem" || role == "ControlType.TabItem" ||
+                    role == "ControlType.CheckBox" || role == "ControlType.RadioButton" ||
+                    role == "ControlType.ComboBox" || role == "ControlType.Edit" ||
+                    role == "ControlType.ListItem" || role == "ControlType.TreeItem";
+                actionable = named && interactive;
+
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"name\":").Append(name == null ? "null" : Jw.Str(name))
+                  .Append(",\"role\":").Append(role == null ? "null" : Jw.Str(role.Replace("ControlType.", "")))
+                  .Append(",\"aid\":").Append(aid == null ? "null" : Jw.Str(aid))
+                  .Append(",\"x\":").Append((int)r.X)
+                  .Append(",\"y\":").Append((int)r.Y)
+                  .Append(",\"w\":").Append((int)r.Width)
+                  .Append(",\"h\":").Append((int)r.Height)
+                  .Append(",\"actionable\":").Append(actionable ? "true" : "false")
+                  .Append("}");
+                return sb.ToString();
+            }
+            catch (Exception e)
+            {
+                // 把原因带出去，而不是静默返回 null。
+                // 静默 null 让我一开始以为"这些点上确实没有元素"，
+                // 而实际上可能是 FromPoint 整体不可用。
+                throw new InvalidOperationException(
+                    "AutomationElement.FromPoint 失败：" + e.GetType().Name + ": " + e.Message);
+            }
+        }
+
+        /// <summary>
+        /// 在窗口里找离给定点最近的"有名字的可交互元素"，用于告诉调用方
+        /// "你可能想点的是这个"。只在点到空白处时用，所以不必精确。
+        /// </summary>
+        private static string NearestActionable(IntPtr hwnd, int x, int y)
+        {
+            try
+            {
+                AutomationElement root = AutomationElement.FromHandle(hwnd);
+                if (root == null) return null;
+
+                AutomationElement best = null;
+                double bestDist = double.MaxValue;
+
+                // 只找有名字的可交互类型，限制数量，避免在大界面上跑太久
+                Condition cond = new PropertyCondition(AutomationElement.IsControlElementProperty, true);
+                AutomationElementCollection all = root.FindAll(TreeScope.Descendants, cond);
+                int scanned = 0;
+                foreach (AutomationElement el in all)
+                {
+                    if (++scanned > 800) break;
+                    string name = SnapshotOps.SafeStr(delegate { return el.Current.Name; });
+                    if (string.IsNullOrEmpty(name)) continue;
+                    string role = SnapshotOps.SafeStr(delegate { return el.Current.ControlType.ProgrammaticName; });
+                    if (role == null) continue;
+                    if (!(role == "ControlType.Button" || role == "ControlType.Hyperlink" ||
+                          role == "ControlType.MenuItem" || role == "ControlType.TabItem" ||
+                          role == "ControlType.CheckBox" || role == "ControlType.RadioButton" ||
+                          role == "ControlType.ComboBox" || role == "ControlType.Edit" ||
+                          role == "ControlType.ListItem")) continue;
+
+                    System.Windows.Rect r;
+                    try { r = el.Current.BoundingRectangle; } catch { continue; }
+                    if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) continue;
+
+                    double cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+                    double d = Math.Sqrt((cx - x) * (cx - x) + (cy - y) * (cy - y));
+                    if (d < bestDist) { bestDist = d; best = el; }
+                }
+                if (best == null) return null;
+
+                string bname = SnapshotOps.SafeStr(delegate { return best.Current.Name; });
+                string brole = SnapshotOps.SafeStr(delegate { return best.Current.ControlType.ProgrammaticName.Replace("ControlType.", ""); });
+                string baid = SnapshotOps.SafeStr(delegate { return best.Current.AutomationId; });
+                System.Windows.Rect br = best.Current.BoundingRectangle;
+
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"name\":").Append(Jw.Str(bname))
+                  .Append(",\"role\":").Append(Jw.Str(brole))
+                  .Append(",\"aid\":").Append(baid == null ? "null" : Jw.Str(baid))
+                  .Append(",\"x\":").Append((int)br.X)
+                  .Append(",\"y\":").Append((int)br.Y)
+                  .Append(",\"w\":").Append((int)br.Width)
+                  .Append(",\"h\":").Append((int)br.Height)
+                  .Append(",\"distance\":").Append((int)bestDist)
+                  .Append("}");
+                return sb.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// whatis —— 查询某个坐标下面是哪个元素。用法：whatis &lt;x&gt; &lt;y&gt; [--hwnd H]
+        ///
+        /// 这是给"点之前先确认"用的：拿到元素名字和矩形，就能用描述符去点，
+        /// 不必再靠估的坐标。
+        /// </summary>
+        private static int CmdWhatIs(string[] args)
+        {
+            // 它返回的是**界面内容**（元素名字、位置），所以和 tree / screenshot
+            // 同一级别：急停时要停，白名单外的应用不读。
+            // 守卫检查脚本把这条抓出来过 —— 我加命令时漏了。
+            RequireNotHalted("whatis");
+
+            List<string> pos = new List<string>();
+            IntPtr target = ParseOptionalHwnd(args, pos);
+            if (pos.Count < 2) throw new ArgumentException("whatis 需要 x y");
+            int x = int.Parse(pos[0]);
+            int y = int.Parse(pos[1]);
+
+            // 没有给窗口就用坐标处的窗口来校验白名单
+            if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "whatis");
+            }
+            else
+            {
+                IntPtr h = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+                IntPtr rt = h == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(h, Native.GA_ROOT);
+                if (rt != IntPtr.Zero) RequireAllowedWindow(rt, "whatis");
+            }
+
+            bool actionable = false;
+            string el = null;
+            string fromPointError = null;
+            try
+            {
+                el = DescribePoint(x, y, out actionable);
+            }
+            catch (Exception e)
+            {
+                fromPointError = e.Message;
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true).Key("x").Num(x).Key("y").Num(y);
+            if (fromPointError != null)
+            {
+                j.Key("element").Val("null")
+                 .Key("fromPointError").Val(fromPointError)
+                 .Key("note").Val("AutomationElement.FromPoint 在这个环境里不可用（见 fromPointError）。");
+            }
+            else if (el == null)
+            {
+                j.Key("element").Val("null")
+                 .Key("note").Val("这一点上读不到 UIA 元素（可能是自绘界面、视频画面，或完全在窗口外）");
+            }
+            else
+            {
+                j.Key("element").Raw(el);
+                j.Key("actionable").Bool(actionable);
+                j.Key("note").Val(actionable
+                    ? "这一点上有可交互元素。**建议改用 desktop_click_element 传它的 name/role**，不要靠坐标。"
+                    : "这一点上没有可交互元素（多半是背景/文字）。可直接用返回里的矩形算中心，或换一个位置。");
+            }
+
+            // 有目标窗口时，顺便给最近的元素，方便纠正偏差
+            if (target != IntPtr.Zero)
+            {
+                string near = NearestActionable(target, x, y);
+                j.Key("nearest").Val(near == null ? "null" : near);
+            }
+
+            j.End();
             Console.WriteLine(j.ToString());
             return 0;
         }
