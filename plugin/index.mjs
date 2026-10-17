@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.13.4'
+const PLUGIN_VERSION = '2.14.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -627,6 +627,19 @@ function applyInner(ctx, config = {}) {
           return await definition.execute(args, exec)
         } finally {
           _busy--
+          // ── 旧截图作废：统一在这里做 ──
+          //
+          // 原先散落在 wheel / drag / type 三个工具里，而 click、
+          // press_key、set_value、do_action、move、hold **一个都没有**。
+          // 实测踩到过：点一下网易云，界面从首页变成了全屏播放页，
+          // 而那张旧截图仍然"有效" —— 再点一次就会落到别的地方。
+          //
+          // 放在 finally 是有意的：**尝试过副作用就算**，哪怕报 unknown。
+          // 判断"这个动作有没有真的改变界面"是做不到的，所以保守作废。
+          if (MUTATING_TOOLS.has(definition.name)) {
+            const h = args && typeof args === 'object' ? args.hwnd : undefined
+            invalidateShotsFor(h)
+          }
           // 结束时刷新锚点：这样"空闲"从**操作完成**开始算，
           // 而不是从它开始算 —— 否则一个跑了 30 秒的输入，
           // 刚结束就被判定为空闲超时。
@@ -774,7 +787,11 @@ function applyInner(ctx, config = {}) {
           summary: { type: 'string', required: true },
           shotId: {
             type: 'string',
-            description: '这次截图的标识。传给 desktop_click 的 shotId 可以核对坐标是否仍然有效。',
+            description:
+              '这次截图的标识。传给 desktop_click 时，它会核对**这张观察是否还对得上**：' +
+              '窗口没移动、没改大小、登记时间不太久。' +
+              '注意这不等于"画面没变过"—— 内容可能被别的进程或用户改掉，那查不出来。' +
+              '所以它证明的是"这是一张已登记的历史观察"，不是"现在还是这个样子"。',
           },
           // image 的内部结构由 attachment 引用决定，这里刻意留空不约束。
           // 注意：**不允许**声明成 undefined —— 存在但为 undefined 的键
@@ -820,7 +837,10 @@ function applyInner(ctx, config = {}) {
         Number.isFinite(geom.x) && Number.isFinite(geom.y) &&
         Number.isFinite(geom.w) && Number.isFinite(geom.h) &&
         geom.w > 0 && geom.h > 0
-      rememberShot(shotId, { hwnd: args.hwnd, ...(geomOk ? geom : {}), geomOk })
+      // evidence 说明这张观察**靠什么作数**。
+      // geometry_only = 只核对了窗口几何，没做任何像素比较。
+      // 这是诚实的下限，也是目前唯一能给的等级。
+      rememberShot(shotId, { hwnd: args.hwnd, ...(geomOk ? geom : {}), geomOk, evidence: 'geometry_only' })
 
       // shotId 必须出现在**模型能看到的地方**。
       //
@@ -1011,8 +1031,6 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.type(args)
       if (r.isError) throw new Error(r.text)
-      // 输入可能触发表单校验、列表刷新、自动补全 —— 布局跟着变
-      invalidateShotsFor(args.hwnd)
       return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: args => ({ card: 'generic', title: `输入文本`, kind: 'other', rawInput: args }),
@@ -1144,7 +1162,7 @@ function applyInner(ctx, config = {}) {
       const geomOk =
         Number.isFinite(g.x) && Number.isFinite(g.y) &&
         Number.isFinite(g.w) && Number.isFinite(g.h) && g.w > 0 && g.h > 0
-      rememberShot(shotId, { hwnd, ...(geomOk ? g : {}), geomOk })
+      rememberShot(shotId, { hwnd, ...(geomOk ? g : {}), geomOk, evidence: 'geometry_only' })
 
       const image = await imageBlockFor(shot.filepath)
       const tail =
@@ -1313,7 +1331,9 @@ function applyInner(ctx, config = {}) {
   function invalidateShotsFor(hwnd) {
     let n = 0
     for (const [id, rec] of recentShots) {
-      if (String(rec.hwnd) === String(hwnd)) {
+      // hwnd 为空 = 全部作废。用于那些说不清影响了哪个窗口的操作
+      // （launch_app、indicate 之类）。
+      if (hwnd === undefined || hwnd === null || String(rec.hwnd) === String(hwnd)) {
         recentShots.delete(id)
         n++
       }
@@ -1652,8 +1672,6 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.drag(args)
       if (r.isError) throw new Error(r.text)
-      // 拖动可能重排（拖动列表项、拖滚动条）
-      invalidateShotsFor(args.hwnd)
       return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: a => ({
@@ -1752,8 +1770,6 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.wheel(args)
       if (r.isError) throw new Error(r.text)
-      // 内容滚动了 —— 这张截图上所有坐标立即失效
-      invalidateShotsFor(args.hwnd)
       return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: a => ({ card: 'generic', title: `滚轮 ${a.notches} 格`, kind: 'other' }),

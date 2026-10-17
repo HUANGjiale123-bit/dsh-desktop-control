@@ -140,21 +140,47 @@ console.log('── 3. 新截图不受影响（作废的是旧的，不是全部
 try { rmSync(tmp, { recursive: true, force: true }) } catch {}
 
 console.log()
-console.log('── 4. 静态核对：三个动作确实调用了作废函数 ──')
+console.log('── 4. 作废必须统一在执行器，而且覆盖全部变更性工具 ──')
 
+// 这节原先检查"三个动作调用了作废"，而它们其实是手写的三处 ——
+// 恰恰是问题本身：click / press_key / set_value / do_action / move / hold
+// 一个都没有作废。现在统一到 register 的 finally 里，这里改成检查那份名单。
 {
   const src = readFileSync('plugin/index.mjs', 'utf8')
   if (/function invalidateShotsFor/.test(src)) ok('invalidateShotsFor 存在')
   else bad('没有 invalidateShotsFor')
 
-  for (const [name, pat] of [
-    ['desktop_wheel', /set\.tools\.wheel[\s\S]{0,400}?invalidateShotsFor/],
-    ['desktop_drag', /set\.tools\.drag[\s\S]{0,400}?invalidateShotsFor/],
-    ['desktop_type', /set\.tools\.type[\s\S]{0,400}?invalidateShotsFor/],
-  ]) {
-    if (pat.test(src)) ok(`${name} 在执行后调用了作废`)
-    else bad(`${name} 没有调用作废 —— 布局变了但旧坐标仍然有效`)
+  // 必须是**统一在 wrapper**，不是散在各工具
+  if (/finally\s*\{[\s\S]{0,600}?MUTATING_TOOLS\.has\(definition\.name\)[\s\S]{0,200}?invalidateShotsFor/.test(src)) {
+    ok('作废统一在 register 的 finally 里')
+  } else {
+    bad('作废没有统一在注册器 —— 迟早又漏掉某个工具')
   }
+
+  // 提取 MUTATING_TOOLS 名单
+  const m = src.match(/const MUTATING_TOOLS = new Set\(\[([\s\S]*?)\]\)/)
+  const listed = new Set((m?.[1] ?? '').match(/'[a-z_]+'/g)?.map((x) => x.slice(1, -1)) ?? [])
+
+  // 每个变更性工具都必须在名单里
+  const mustHave = [
+    'desktop_click', 'desktop_click_element', 'desktop_drag', 'desktop_type',
+    'desktop_press_key', 'desktop_set_value', 'desktop_do_action',
+    'desktop_wheel', 'desktop_move', 'desktop_hold', 'desktop_launch_app',
+  ]
+  const missing = mustHave.filter((t) => !listed.has(t))
+  if (missing.length === 0) ok(`名单覆盖全部 ${mustHave.length} 个变更性工具`)
+  else bad(`名单缺：${missing.join(', ')}`)
+
+  // 只读工具不该在名单里
+  const mustNot = ['desktop_screenshot', 'desktop_read_window', 'desktop_list_windows', 'desktop_whatis', 'desktop_diagnose']
+  const wrong = mustNot.filter((t) => listed.has(t))
+  if (wrong.length === 0) ok('只读工具不在变更名单里')
+  else bad(`只读工具被当成变更性：${wrong.join(', ')}`)
+
+  // 不允许残留的手写作废（那正是要消灭的东西）
+  const handWritten = (src.match(/invalidateShotsFor\(args\.hwnd\)/g) ?? []).length
+  if (handWritten === 0) ok('没有残留的手写作废调用')
+  else bad(`还有 ${handWritten} 处手写作废 —— 应该全部交给执行器`)
 }
 
 console.log()

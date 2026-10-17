@@ -10,7 +10,7 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir, stat, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -103,6 +103,62 @@ export function createDesktopToolset(options = {}) {
     options.shotDir ??
     process.env.DSC_SHOT_DIR ??
     join(tmpdir(), 'dsh-desktop-control-shots')
+
+  /**
+   * 截图文件的保留策略。
+   *
+   * ── 为什么需要 ──
+   *
+   * 每张截图都落一个 PNG，之前**从不删除**。实测一天下来：
+   * 67 个文件 32 MB，而这是一个每天都会被用到的插件。
+   * 一年就是几十 GB，而且没人会想起来清。
+   *
+   * 保留最近 SHOT_KEEP 张，同时删掉超过 SHOT_MAX_AGE_MS 的。
+   * 刚拍的那张永远不删（调用方马上要读它）。
+   */
+  const SHOT_KEEP = 40
+  const SHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000
+
+  async function pruneShots(currentPath) {
+    try {
+      const names = await readdir(shotDir)
+      const shots = []
+      for (const n of names) {
+        if (!n.toLowerCase().endsWith('.png')) continue
+        const full = join(shotDir, n)
+        try {
+          const st = await stat(full)
+          shots.push({ path: full, mtime: st.mtimeMs })
+        } catch {
+          /* 刚好被别的进程删了，跳过 */
+        }
+      }
+      // 新的在前
+      shots.sort((a, b) => b.mtime - a.mtime)
+
+      const now = Date.now()
+      const doomed = []
+      shots.forEach((s, idx) => {
+        if (s.path === currentPath) return // 刚拍的不删
+        if (idx >= SHOT_KEEP || now - s.mtime > SHOT_MAX_AGE_MS) doomed.push(s.path)
+      })
+
+      let removed = 0
+      for (const f of doomed) {
+        try {
+          await unlink(f)
+          removed++
+        } catch {
+          /* 删不掉也无所谓，下次再试 */
+        }
+      }
+      return removed
+    } catch {
+      // 清理是**尽力而为**：目录读不到、权限不足都不该影响截图本身。
+      return 0
+    }
+  }
+
 
   /* ───────────── dsc.exe 调用 ───────────── */
 
@@ -837,6 +893,8 @@ export function createDesktopToolset(options = {}) {
       await mkdir(shotDir, { recursive: true })
       const path = join(shotDir, `win-${hwnd}-${Date.now()}.png`)
       const r = await runHelper(['screenshot', String(hwnd), path], auth.window)
+      // 截图落盘之后再清理旧的。失败不影响本次结果。
+      await pruneShots(path)
       if (!r.ok) return { isError: true, text: failMessage(r) }
 
       // ── 被遮挡时必须先说，而且说在最前面 ──
