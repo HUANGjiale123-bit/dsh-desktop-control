@@ -139,7 +139,20 @@ else
   echo "  （跳过：找不到 node 或 helper 源码）"
 fi
 
-head_ "10. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "10. 应用名解析（不许把事做到别人身上）"
+# 模糊匹配自动启动 → "微信"被解析成"企业微信"并启动；
+# 清单指向卸载程序 → 照它启动会去卸载软件。两条都是静默的危险行为。
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-apps.mjs >/dev/null 2>&1; then
+    ok "精确匹配可用 / 模糊匹配不自动启动 / 无卸载程序条目"
+  else
+    bad "应用解析有问题 —— 单独跑 node tools/test-apps.mjs 看明细"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "11. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

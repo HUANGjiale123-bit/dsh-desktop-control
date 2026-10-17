@@ -372,6 +372,28 @@ export function createDesktopToolset(options = {}) {
     return { ok: true }
   }
 
+  /**
+   * 取某个 exe（按文件名）当前拥有的窗口句柄列表。
+   *
+   * 用来做"动作后的重新观察"：启动一个应用之后，判据不是 pid 还在不在，
+   * 而是**它的窗口出现了没有**。实测 QQ音乐 就是 pid 立刻消失、
+   * 由升级器重新拉起另一个进程，所以按 pid 判断必然误报。
+   *
+   * 返回 null 表示"查不到"（helper 出错），调用方要能与"确实没有窗口"
+   * 区分开 —— 把查询失败当成"没启动"会造成假的失败结论。
+   */
+  async function windowsOf(appBase) {
+    try {
+      const r = await runHelper(['list_windows'])
+      if (!r.ok) return null
+      return (r.windows ?? [])
+        .filter((w) => (w.exe ?? '').split(/[\\/]/).pop().toLowerCase() === appBase)
+        .map((w) => w.hwnd)
+    } catch {
+      return null
+    }
+  }
+
   const tools = {
     /**
      * 列出已安装的应用。
@@ -464,6 +486,22 @@ export function createDesktopToolset(options = {}) {
         const cands = (resolved.candidates ?? [])
           .map((c) => `  ${c.name}\n      ${c.exe}`)
           .join('\n')
+
+        // 名字只是"相近"、并不精确 —— **不替你猜**。
+        //
+        // 这里原来允许"模糊唯一命中就启动"，代价是实测踩到的：
+        // 清单里没有"微信"（Store 版没有传统卸载项），只有"企业微信"，
+        // 于是 `launch_app 微信` 直接把企业微信启动了，还报告成功。
+        // 想开微信结果开了企业微信，可能发错人。
+        if (resolved.reason === 'NotExact') {
+          return {
+            isError: true,
+            text:
+              `没有叫「${wanted}」的应用。清单里有这些名字相近的：\n${cands}\n\n` +
+              `请确认要用哪一个，然后用**它登记的准确名字**再调一次。\n` +
+              `不会自动替你猜——启动错应用是会把事情做到别人身上的操作。`,
+          }
+        }
         if (resolved.reason === 'Ambiguous') {
           return {
             isError: true,
@@ -478,7 +516,9 @@ export function createDesktopToolset(options = {}) {
             `失败：清单里没有任何应用匹配「${wanted}」。\n` +
             `请用 desktop_list_apps 查看准确的名字——` +
             `清单里的名字是安装时登记的显示名，未必和俗称一致` +
-            `（例如中文系统里的记事本登记为 "Notepad"）。`,
+            `（例如中文系统里的记事本登记为 "Notepad"）。\n` +
+            `**另外**：Store/MSIX 应用如果没登记卸载项，可能根本不在清单里；` +
+            `这种情况请直接传 .exe 完整路径，或手动启动它。`,
         }
       }
 
@@ -534,6 +574,15 @@ export function createDesktopToolset(options = {}) {
       // 来不及在返回前拿到失败时，至少让它不再崩：错误写进日志，
       // 调用方随后用 desktop_list_windows 看不到窗口就能发现没起来。
       let spawnError = null
+      // ── 启动前先记下这个应用已有的窗口 ──
+      //
+      // 没有基线就无法区分"我们真的把它启动了"和"它本来就在跑、只是被激活了"。
+      // 单实例应用（QQ、微信这类）第二次启动通常只是转发给已有实例然后自己退出，
+      // 那时报"已启动"是错的。
+      //
+      // appBase 在授权那一步已经算过了（按可执行文件名授权），这里直接复用。
+      const before = await windowsOf(appBase)
+
       let pid = 0
       try {
         const child = spawn(app.exe, [], {
@@ -590,12 +639,44 @@ export function createDesktopToolset(options = {}) {
         }
       }
 
+      // ── 动作后的重新观察：等窗口出现，而不是相信 pid ──
+      //
+      // 这不是锦上添花，是修一个实测出来的谎报：
+      // 第三方拿去启动 QQ音乐，返回"已启动，进程 pid:31336"，
+      // 几秒后那个 pid **已经不存在**——QQMusic.exe 自己退了，
+      // 由升级器 QQMusicUp.exe 重新拉起另一个 pid。
+      // 报告字面上没错，但对使用者毫无意义，而且正是
+      // "工具调用成功 ≠ 任务完成"的典型。
+      //
+      // 所以判据改成**环境状态**：这个应用的窗口出现没出现。
+      // 按 exe 名查（不是按 pid），所以"起来又退、被另一个进程拉起"
+      // 这种情况也能正确判定。
+      //
+      // 最多等约 3.5 秒。启动快的（记事本）第一次就能看到，不会等满。
+      let appeared = []
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 700))
+        const now = await windowsOf(appBase)
+        if (now === null) break            // 查不到就别硬等
+        const fresh = now.filter((h) => !(before ?? []).includes(h))
+        if (fresh.length > 0) { appeared = fresh; break }
+      }
+
+      const verifiedLine = appeared.length
+        ? `  窗口已出现：hwnd=${appeared.join(', ')}（已核实）`
+        : before && before.length
+          ? `  ⚠ 没看到**新**窗口。该应用启动前就有窗口（hwnd=${before.join(', ')}），` +
+            `本次可能只是激活了已有实例，而不是新启动。`
+          : `  ⚠ 3 秒内没看到它的窗口。这不代表失败 —— 有些程序启动慢、` +
+            `或被升级器/启动器接手（QQ音乐就会这样）。` +
+            `请用 desktop_list_windows 确认，别假定已经启动。`
+
       return {
         text:
-          `已启动「${app.name}」：\n` +
+          `已请求启动「${app.name}」：\n` +
           `  可执行文件：${app.exe}\n` +
-          `  进程 pid：${pid}\n` +
-          `\n应用可能还需要几秒才出现窗口，之后用 desktop_list_windows 找它。` +
+          `  进程 pid：${pid}（仅代表我们拉起的那个进程，可能随后退出）\n` +
+          verifiedLine +
           `\n本会话内已授权操作该应用。`,
       }
     },

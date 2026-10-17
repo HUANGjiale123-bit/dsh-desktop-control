@@ -246,7 +246,9 @@ export function searchApps(query, max = 8) {
 /**
  * 把用户给的名字解析成一个确定的可执行文件。
  *
- * 返回 `{ ok: true, app }` 或 `{ ok: false, reason: 'NoMatch' | 'Ambiguous', candidates }`。
+ * 返回 `{ ok: true, app }` 或 `{ ok: false, reason: 'NoMatch' | 'NotExact', candidates }`。
+ *
+ * **模糊匹配不自动启动**——原因见第 ④ 段的注释。
  *
  * 只接受两种目标：清单里的名字，或明确的 .exe 完整路径。**不接受任意命令行**——
  * 否则这个接口等同于"以用户权限执行任意程序"。
@@ -271,9 +273,26 @@ export function resolveApp(query) {
   const qFile = /\.exe$/i.test(q) ? q.toLowerCase() : q.toLowerCase() + '.exe'
   for (const a of all) if (basename(a.exe).toLowerCase() === qFile) return { ok: true, app: a }
 
-  // ④ 唯一命中才算
+  // ④ 模糊匹配**只给候选，绝不自动启动**。
+  //
+  // 这里原来写的是"唯一命中就算"——看着合理，实际很危险。
+  // 实测：清单里没有"微信"（Store 版没有传统卸载项），只有"企业微信"，
+  // 于是 `resolveApp('微信')` 唯一命中"企业微信"，**直接把它启动了**，
+  // 还报告成功。想开微信结果开了企业微信，可能发错人。
+  //
+  // 而"唯一命中"这个条件本身不提供任何安全保证——命中数少不等于命中得对。
+  //
+  // 所以规则改成：**浏览可以模糊，执行必须精确**。
+  //   · list_apps 的搜索仍然模糊（那是给人挑的）
+  //   · 启动只接受名字相等或 exe 名相等
+  //   · 模糊命中一律返回候选，由调用方确认后用准确名字再启动
   const hits = all.filter((a) => a.name.toLowerCase().includes(q.toLowerCase()))
-  if (hits.length === 1) return { ok: true, app: hits[0] }
   if (hits.length === 0) return { ok: false, reason: 'NoMatch', candidates: [] }
-  return { ok: false, reason: 'Ambiguous', candidates: hits.slice(0, 8) }
+  return {
+    ok: false,
+    // 与"多个候选"分开：一种是"你说的名字不存在，倒有这些相近的"，
+    // 一种是"你的名字匹配到好几个"。前者的重点是"没有精确的那个"。
+    reason: 'NotExact',
+    candidates: hits.slice(0, 8),
+  }
 }
