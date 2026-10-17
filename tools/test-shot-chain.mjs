@@ -54,8 +54,16 @@ const { execFileSync } = await import('node:child_process')
 const raw = JSON.parse(
   execFileSync('helper/bin/dsc.exe', ['list_windows'], { encoding: 'utf8', windowsHide: true }),
 )
-const ours = (w) => /^(dsc|dsc-esc)\.exe$/i.test(String(w.exe ?? '').split(/[\\/]/).pop())
-const win = raw.windows.find((w) => w.width > 300 && w.height > 300 && w.exe && !ours(w))
+const ours = (w) =>
+  // 排除两类窗口：
+  //   · 本插件自己的（dsc / dsc-esc 的光带、逃生条）
+  //   · TextInputHost 这类输入法候选窗 —— 它会在某些时刻成为"前台"，
+  //     但它是覆盖全屏的透明层，点它等于点在别人的界面上
+  /^(dsc|dsc-esc|TextInputHost)\.exe$/i.test(String(w.exe ?? '').split(/[\\/]/).pop())
+// 优先前台窗口：目标被别的窗口盖住时，点击会（正确地）被拒绝，
+// 而那与 shotId 校验无关，会把这条测试报成失败。
+const usable = (w) => w.width > 300 && w.height > 300 && w.exe && !ours(w)
+const win = raw.windows.find((w) => w.foreground && usable(w)) ?? raw.windows.find(usable)
 if (!win) {
   console.log('  ✗ 找不到可用窗口')
   process.exit(1)
@@ -130,12 +138,13 @@ if (!shotId) {
     bad(`输出里出现 undefined：${msg.split('\n')[0].slice(0, 90)}`)
   } else if (/拍摄时窗口是 undefined/.test(msg)) {
     bad('仍然误报几何变化 —— 记录没拿到有效几何')
-  } else if (/尺寸变了|布局|重新截图/.test(msg) && !/未在采样点/.test(msg)) {
-    // 真实点击在沙箱里会因 SetCursorPos 失败，那是另一回事；
-    // 这里只关心有没有出现"几何变了"的误报
+  } else if (/拍摄时窗口是|窗口尺寸变了|布局几乎肯定也变了/.test(msg)) {
+    // 只认**几何**相关的措辞。上一版把 /重新截图/ 当判据，而
+    // "落点属于别的窗口"那条消息里也有"请重新截图" —— 于是一个与
+    // shotId 无关的拒绝被误报成几何问题。
     bad(`出现了几何相关拒绝：${msg.split('\n')[0].slice(0, 90)}`)
   } else {
-    ok('没有误报几何变化')
+    ok('没有误报几何变化（其它拒绝原因与 shotId 无关）')
   }
 }
 

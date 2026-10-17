@@ -53,8 +53,13 @@ for (const b of blocks) {
     // 用 Function 求值这些字面量；HWND 等常量需要提供
     const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
     const BUTTON = { type: 'string', description: '鼠标键，默认 left。', enum: ['left', 'right'] }
-    const fn = new Function('HWND', 'BUTTON', `return (${body})`)
-    const params = fn(HWND, BUTTON)
+    // 顶层常量桩：parameters 块里会引用它们，而这里是**单独提取编译**，
+    // 作用域里没有模块顶层。每加一个这样的常量就要在这里补一个桩 ——
+    // 忘了会以"OBSERVE is not defined"的形式炸掉，看着像语法问题。
+    const OBSERVE = { type: 'boolean', description: '动作后是否返回新画面。' }
+    const SETTLE_MS = { type: 'integer', description: '动作后等待毫秒数。' }
+    const fn = new Function('HWND', 'BUTTON', 'OBSERVE', 'SETTLE_MS', `return (${body})`)
+    const params = fn(HWND, BUTTON, OBSERVE, SETTLE_MS)
     const schema = compileParameters(params, `tool${compiled}`)
     if (schema.type !== 'object' || typeof schema.properties !== 'object') {
       bad(`第 ${compiled + 1} 处编译结果形状不对`)

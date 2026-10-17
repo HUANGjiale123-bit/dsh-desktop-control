@@ -160,6 +160,52 @@ console.log('── 4. 没有 attachments 服务时要降级，不能崩 ──'
 }
 
 console.log()
+console.log('── 5. 动作工具必须默认把新画面带回来（省一次模型往返）──')
+
+{
+  // 这是"慢"的结构性原因：一次"看→点"如果分两次工具调用，
+  // 中间隔着一次完整模型往返。动作结果和新画面一起回来才能省掉它。
+  //
+  // 注意：这里只验静态契约。真机上的点击需要激活窗口，沙箱做不到 ——
+  // 那部分由 tools/test-target.mjs 在插件环境里验。
+  for (const name of ['desktop_click', 'desktop_click_element', 'desktop_press_key']) {
+    const t = registered.find((x) => x.name === name)
+    if (!t) { bad(`找不到工具 ${name}`); continue }
+
+    const props = t.output?.schema?.properties ?? {}
+    if (props.image) ok(`${name} 的输出 schema 允许 image`)
+    else bad(`${name} 的输出 schema 没有 image —— 动作后无法带图回来`)
+
+    // defineTool 返回的 parameters 是**编译后的 JSON Schema**，参数在 properties 下
+    const params = t.parameters?.properties ?? {}
+    if (params.observe) ok(`${name} 有 observe 参数`)
+    else bad(`${name} 没有 observe 参数`)
+
+    if (params.settleMs) ok(`${name} 有 settleMs 参数`)
+    else bad(`${name} 没有 settleMs 参数`)
+
+    // render 必须把 image 放进去，而不是只输出文本
+    const fakeImg = { type: 'image', attachment: { id: 'a' } }
+    const rendered = t.output.render({}, { result: 'R', image: fakeImg })
+    if (rendered.some((b) => b.type === 'image')) ok(`${name} 的 render 会输出图像块`)
+    else bad(`${name} 的 render 丢了图像块`)
+    const noImg = t.output.render({}, { result: 'R' })
+    if (noImg.every((b) => b.type === 'text')) ok(`${name} 无图时退化为纯文本`)
+    else bad(`${name} 无图时仍产生非文本块`)
+  }
+
+  // observe 的默认值必须是"开"：默认 false 的话模型永远得记得传，
+  // 那就又回到"依赖调用方配合"的老问题。
+  const click = registered.find((x) => x.name === 'desktop_click')
+  const obs = click?.parameters?.properties?.observe
+  if (obs && /默认 \*\*true\*\*/.test(obs.description ?? '')) {
+    ok('observe 的说明里写明了默认 true')
+  } else {
+    bad('observe 没有说明默认值 —— 调用方会不知道要不要传')
+  }
+}
+
+console.log()
 console.log('══════════════════════════════')
 console.log(fail === 0 ? `  全部通过（${pass} 项）` : `  ${pass} 项通过，${fail} 项失败  ← 先修`)
 console.log('══════════════════════════════')

@@ -55,11 +55,27 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.9.5'
+const PLUGIN_VERSION = '2.10.0'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
 const BUTTON = { type: 'string', enum: ['left', 'right'], description: '鼠标键，默认 left。' }
+
+/** 动作后是否顺手把新画面带回来（默认开，和 Codex 的动作工具一致）。 */
+const OBSERVE = {
+  type: 'boolean',
+  description:
+    '动作执行完是否自动截图并把图像一起返回，默认 **true**。' +
+    '默认开是有原因的：一次"看→点"如果分成两次工具调用，中间隔着一次完整的模型往返（约 40 秒）。' +
+    '动作结果和新画面一起回来，模型下一轮直接就能判断下一步。' +
+    '确定不需要看结果时传 false 省时间和 token。',
+}
+
+/** 动作后等多久再截图（毫秒，默认 220）。界面重绘/动画没完成时立刻截图会拍到中间态。 */
+const SETTLE_MS = {
+  type: 'integer',
+  description: '动作后等待多久再截图，毫秒，默认 220。界面响应慢的应用可以调大（上限 5000）。',
+}
 
 export function apply(ctx, config = {}) {
   /* ── 防重复应用 ──
@@ -597,9 +613,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const r = await set.tools.listApps(args)
@@ -624,9 +646,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const r = await set.tools.launchApp(args)
@@ -821,14 +849,22 @@ function applyInner(ctx, config = {}) {
           '故意不把这个设成默认：静默改变坐标含义比让人多写一个参数危险。',
       },
       button: BUTTON,
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       // 如果调用方说了坐标来自哪张截图，先核对它是否仍然有效。
@@ -846,7 +882,7 @@ function applyInner(ctx, config = {}) {
 
       const r = await set.tools.click({ ...args, expectedGeom })
       if (r.isError) throw new Error(r.text)
-      return { result: r.text }
+      return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: args => ({
       card: 'generic',
@@ -868,19 +904,28 @@ function applyInner(ctx, config = {}) {
       hwnd: { ...HWND, description: '目标窗口句柄。' },
       descriptor: { type: 'string', description: '元素描述符，例如 role=Button/name=保存。' },
       button: BUTTON,
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const r = await set.tools.clickElement(args)
       if (r.isError) throw new Error(r.text)
-      return { result: r.text }
+      // 动作后直接把新画面带回来，省掉一整次模型往返
+      return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: args => ({
       card: 'generic',
@@ -909,9 +954,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const r = await set.tools.type(args)
@@ -930,19 +981,27 @@ function applyInner(ctx, config = {}) {
     parameters: {
       hwnd: { ...HWND, description: '目标窗口句柄，用于白名单与存活校验。' },
       chord: { type: 'string', description: '组合键，例如 Ctrl+S 或 Enter。' },
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const r = await set.tools.pressKey(args)
       if (r.isError) throw new Error(r.text)
-      return { result: r.text }
+      return observeAfter(args.hwnd, r.text, args.observe, args.settleMs)
     },
     presentCall: args => ({ card: 'generic', title: `按键 ${args.chord}`, kind: 'other' }),
   })
@@ -979,6 +1038,63 @@ function applyInner(ctx, config = {}) {
    * 失败时返回 undefined 而不是抛异常：截图本身已经存到磁盘了，
    * 拿不到 attachment 是能力缺失，不该让整个工具调用失败。
    */
+  /**
+   * 动作之后**顺手把新画面带回来**。
+   *
+   * ── 这是这套工具里最值钱的一条改动 ──
+   *
+   * 之前一次"看 → 点"要两轮工具调用：
+   *   desktop_screenshot → 我看到图
+   *   desktop_click      → 我只拿到一句话
+   * 每轮之间隔着一次完整的模型往返（实测约 40 秒）。
+   * 而 helper 本身只要 100 毫秒 —— **慢的从来不是执行，是往返次数**。
+   *
+   * Codex 的动作工具就在返回值里带新截图，所以它一次调用顶这里两次。
+   * 现在这里也这么做：动作执行完 → 等界面稳定一点 → 截图 → image 块。
+   *
+   * ── 默认开 ──
+   *
+   * 默认 observe=true，因为"做完动作看看发生了什么"几乎总是需要的。
+   * 需要省 token 或确定不用看时传 observe:false 关掉。
+   *
+   * ── 为什么先等一下 ──
+   *
+   * 点击返回时界面不一定已经重绘（动画、加载、防抖）。立刻截图经常拍到
+   * 中间态，于是"点完看起来没反应"。这里等一小段，让常见的过渡完成。
+   * 这不是条件等待 —— 真正的条件等待需要知道期望看到什么，成本高，
+   * 留给需要时单独传 expect。
+   */
+  // 注意名字：顶层的 SETTLE_MS 是**参数描述对象**，这里的是默认毫秒数。
+  // 上一版两个都叫 SETTLE_MS，内层遮蔽外层 —— 在它定义之前引用就踩 TDZ，
+  // 报 "Cannot access 'SETTLE_MS' before initialization"，而报错位置
+  // 在几百行之外，看着完全不像变量撞名。
+  const DEFAULT_SETTLE_MS = 220
+
+  async function observeAfter(hwnd, text, observe, settleMs) {
+    if (observe === false) return { result: text }
+
+    try {
+      const wait = Number.isFinite(settleMs) ? Math.max(0, Math.min(settleMs, 5000)) : DEFAULT_SETTLE_MS
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+
+      const shot = await set.tools.screenshot({ hwnd })
+      if (shot.isError) {
+        return {
+          result: text + `\n\n（动作已执行，但自动截图失败：${shot.text.split('\n')[0]}）`,
+        }
+      }
+      const image = await imageBlockFor(shot.filepath)
+      const tail =
+        `\n\n── 动作后的画面 ──\n` +
+        `截图 ID：${shot.shotId ?? '?'}` +
+        `（传给 desktop_click 的 shotId 可核对坐标是否过期）\n` +
+        shot.text
+      return image ? { result: text + tail, image } : { result: text + tail }
+    } catch (e) {
+      return { result: text + `\n\n（动作已执行，自动观察出错：${e?.message ?? e}）` }
+    }
+  }
+
   async function imageBlockFor(pngPath) {
     if (!pngPath) return undefined
     try {
@@ -1260,9 +1376,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const r = await set.tools.setValue(args)
@@ -1304,9 +1426,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const r = await set.tools.doAction(args)
@@ -1339,9 +1467,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute(args) {
       const label = args.label ?? '已激活'
@@ -1402,9 +1536,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute() {
       // ① 收掉本插件拉起的浮层
@@ -1512,9 +1652,15 @@ function applyInner(ctx, config = {}) {
       schema: {
         type: 'object',
         additionalProperties: false,
-        properties: { result: { type: 'string', required: true } },
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
       },
-      render: (_args, value) => [{ type: 'text', text: value.result }],
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
     },
     async execute() {
       const g = await debugGatePath()
