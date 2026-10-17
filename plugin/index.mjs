@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.13.3'
+const PLUGIN_VERSION = '2.13.4'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -590,12 +590,39 @@ function applyInner(ctx, config = {}) {
   // 忙碌期间一律不收，操作结束再重新起算。
   let _busy = 0
 
+  // ── 哪些工具会**改变**用户看到的东西 ──
+  //
+  // 这份名单决定"要不要主动拉起指示层"。只读工具（列窗口、读树、截图、
+  // whatis、诊断）只续命、不主动拉 —— 否则它们用得太频繁，蓝条会一直闪。
+  //
+  // 但变更性工具**必须**主动拉起。原先只靠 onAuthorized 拉起，
+  // 而那只在"第一次授权"时触发：蓝条一旦因空闲被收起，
+  // 之后无论做多少次点击都不会再出现 —— 用户看到的就是"掉了一次"。
+  const MUTATING_TOOLS = new Set([
+    'desktop_click',
+    'desktop_click_element',
+    'desktop_drag',
+    'desktop_type',
+    'desktop_press_key',
+    'desktop_set_value',
+    'desktop_do_action',
+    'desktop_hold',
+    'desktop_release',
+    'desktop_wheel',
+    'desktop_move',
+    'desktop_launch_app',
+    'desktop_indicate',
+  ])
+
   const register = (definition) => {
     registered.push(definition.name)
     const wrapped = Object.assign({}, definition, {
       async execute(args, exec) {
         _busy++
-        touchActivity()
+        // 变更性操作：确保用户看得见（拉起或续命）。
+        // 只读操作：只续命，不主动拉起。
+        if (MUTATING_TOOLS.has(definition.name)) ensureIndicator()
+        else touchActivity()
         try {
           return await definition.execute(args, exec)
         } finally {

@@ -172,7 +172,35 @@ if (!diagnose) {
 }
 
 console.log()
-console.log('── 5. 测试自身的完整性 ──')
+console.log('── 5. 变更性操作必须自己拉起指示层（不能只靠首次授权） ──')
+
+// 用户报的"computer use 掉了一次"：launch 时蓝条起来了，然后我思考/跑别的
+// 命令超过空闲阈值，蓝条被收起；之后每次点击都已授权、不触发 onAuthorized，
+// 于是**再也拉不回来**。
+{
+  const src = readFileSync('plugin/index.mjs', 'utf8')
+  if (/MUTATING_TOOLS/.test(src)) ok('有变更性工具名单')
+  else bad('没有 MUTATING_TOOLS 名单 —— 拉起只能靠首次授权')
+
+  if (/MUTATING_TOOLS\.has\(definition\.name\)\)\s*ensureIndicator\(\)/.test(src)) {
+    ok('变更性工具会调 ensureIndicator()')
+  } else {
+    bad('变更性工具没有主动拉起 —— 蓝条收起后不会再出现')
+  }
+  for (const t of ['desktop_click', 'desktop_drag', 'desktop_type', 'desktop_wheel', 'desktop_hold']) {
+    if (src.includes(`'${t}'`)) ok(`名单含 ${t}`)
+    else bad(`名单缺 ${t}`)
+  }
+  // 只读工具不该在名单里（否则截图一多蓝条就闪）
+  for (const t of ['desktop_screenshot', 'desktop_read_window', 'desktop_whatis']) {
+    const inSet = new RegExp(`'${t}',`).test(src.slice(src.indexOf('MUTATING_TOOLS'), src.indexOf('const register =')))
+    if (inSet) bad(`${t} 是只读工具，不该进变更名单`)
+    else ok(`${t} 不在变更名单里（只续命不拉起）`)
+  }
+}
+
+console.log()
+console.log('── 6. 测试自身的完整性 ──')
 
 {
   const src = readFileSync('plugin/index.mjs', 'utf8')
