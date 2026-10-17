@@ -65,6 +65,30 @@ node -e "const p=require('./package.json');const inDeps=!!p.dependencies?.['dsh-
 **为什么插件自己不能提示这件事**：插件没被登记就根本不会被加载，
 它的任何代码都不会执行 —— 所以这个提醒只能放在文档里，或者由外部命令给出。
 
+### 指示层多久自动收起
+
+自动拉起的指示层（光带 + 逃生条）在**最后一次操作后 8 秒**自动收起，不写闸门。
+
+要改这个时长，在 profile 的 `cordis.patch.yml` 里加配置：
+
+```yaml
+- id: desktop-control
+  package: dsh-desktop-control
+  config:
+    idleHideMs: 30000      # 毫秒；0 表示永不自动收起
+```
+
+- 设大一点（例如 30000）：连续操作时不会闪，代价是停手后它还会挂一会儿。
+- 设 0：永不自动收 —— 但 `dsc-esc` 自己还有个 5 分钟兜底上限。
+  真要长时间常驻请用 `desktop_indicate`，那条路径完全不设超时。
+
+**为什么默认这么短**：实测助手一轮推理约 40 秒，所以任何低于 40 秒的值
+都会在两轮操作之间消失再出现。既然闪无可避免，就选"停手后很快就没了"
+这半边体验 —— 挂着的"正在被控制"才是更烦的那个。
+
+要"做完立刻收"，最准的信号是助手在收尾时主动调 `desktop_off`；
+超时只是保底。
+
 ### 卸载
 
 `pnpm remove dsh-desktop-control` **只会清依赖，不会清 `bundles`**，
@@ -90,7 +114,8 @@ pnpm remove dsh-desktop-control
 插件自带的 `cordis.patch.yml` 会处理好，但如果手写条目，四个服务都要列：
 
 ```yaml
-inject: ["tools", "approval", "agents", "workspaceRegistry"]
+inject: ["tools", "approval", "agents", "workspaceRegistry", "attachments"]
+# attachments 是把截图像素交给模型用的 —— 少了它模型只能拿到路径。
 ```
 
 重启后 `desktop_diagnose` 可用就说明装上了。它会把版本、程序位置、

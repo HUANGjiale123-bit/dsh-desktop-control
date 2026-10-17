@@ -55,7 +55,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.9.1'
+const PLUGIN_VERSION = '2.9.2'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -969,14 +969,29 @@ ${r.text}` : r.text }
    * 用户的反馈原话是"完成命令后不会自动退出，体验很不好"。所以判据该是
    * **距上一次操作过了多久**，而不是这个指示层开了多久。
    *
-   * 20 秒：够覆盖两步操作之间的思考间隙，又不至于让一条命令做完之后
-   * 屏幕上还顶着一条已经没有意义的"正在被控制"。
+   * ── 取值：8 秒（可配置）──
+   *
+   * 最初取 20 秒，理由是"够覆盖两步操作之间的思考间隙"。**那个理由不成立**：
+   * 实测一轮推理约 40 秒，所以 20 秒必然在两轮之间消失再出现——既然一定会闪，
+   * 挂 20 秒只是让"我停手了它还在说正在被控制"多持续 12 秒。
+   * 用户直接说"20 秒会不会太久了"，是对的。
+   *
+   * 所以取 8 秒：停手后很快就没了，这是更重要的那半边体验。
+   * 代价是连续操作时会闪，但这本来就是无法避免的——除非助手在收尾时
+   * 主动调 desktop_off（那才是真正准确的信号，超时只是保底）。
+   *
+   * 可以用 profile 配置改：dsh-desktop-control 的 idleHideMs。
+   * 设成 0 表示**永不自动收**（需要常驻时用）。
    *
    * 另外两条边界都是刻意的：
    *   · 手动调 desktop_indicate 是用户明确要求常驻，**不受**这个空闲检查管。
    *   · 收起只是杀进程、**不写闸门** —— "不再显示"和"停止"是两件事。
    */
-  const IDLE_HIDE_MS = 20000
+  const IDLE_HIDE_MS = (() => {
+    const v = Number(config.idleHideMs)
+    if (Number.isFinite(v) && v >= 0) return v
+    return 8000
+  })()
 
   /**
    * 兜底上限，交给 dsc-esc 自己的 --timeout。
@@ -1000,6 +1015,8 @@ ${r.text}` : r.text }
    */
   function touchActivity() {
     _lastOpAt = Date.now()
+    // 0 = 永不自动收（需要常驻时用）。不启定时器比启一个空转的更清楚。
+    if (IDLE_HIDE_MS === 0) return
     if (_idleTimer) return
     _idleTimer = setInterval(() => {
       const cur = liveOverlays.get('escape')
