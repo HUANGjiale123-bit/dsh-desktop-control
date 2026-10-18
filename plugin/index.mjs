@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.11'
+const PLUGIN_VERSION = '2.18.12'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1922,17 +1922,6 @@ function applyInner(ctx, config = {}) {
    *
    * 读文件即可 —— 不存在、或内容表示"未拉下"都算没拉。
    * 这里**只读**，绝不写；写闸门是 ESC 监听器和 halt 的事。
-   */
-  /**
-   * 最近一次**用户发消息**的时刻。
-   *
-   * 为什么要它：外部复核指出"60 秒只证明时间过去了，不能证明旧任务停了"。
-   * 单纯等时间既不准确（用户可能只是去倒水）也不合用户直觉
-   * （"我说完这句话它就该好了"）。
-   *
-   * 宿主有 `agent/inbox/inserted` 事件（"One message entered the live inbox"，
-   * scope 过滤到对应 agent）—— 那就是**可信的任务租期入口**：
-   * 用户发消息 = 新任务开始 = 旧任务的急停租期结束。
    */
   function haltTtlSeconds() {
     const sv = process.env.DSC_HALT_TTL_SECONDS
