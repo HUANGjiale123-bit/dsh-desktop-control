@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.7'
+const PLUGIN_VERSION = '2.18.8'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -2490,6 +2490,63 @@ function applyInner(ctx, config = {}) {
       }
     },
     presentCall: () => ({ card: 'generic', title: '显示 computer use 状态指示', kind: 'read' }),
+  })
+
+  register({
+    name: 'desktop_resume',
+    description:
+      '解除急停，让桌面操作可以继续。' +
+      '**只在用户明确让你继续刚才那件事时调用** —— 例如"接着做吧"、"继续"、"好了你继续"。' +
+      '用户只是**提问、评论、或者说了别的事**时，不要调用：他按下 ESC 之后说的那句话，' +
+      '很可能只是对话，不是授权你恢复操作。' +
+      '不确定就问一句，别自己决定。' +
+      '急停本来也会在 60 秒后自动解除，这个工具只是让它立刻恢复。',
+    parameters: {
+      reason: {
+        type: 'string',
+        description: '用户说了什么让你判断可以继续（原话片段最好）。会写进日志。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_a, v) => [{ type: 'text', text: v.result }],
+    },
+    async execute(args) {
+      const gp = gate()
+      if (!existsSync(gp)) {
+        return {
+          result:
+            '当前没有急停 —— 不需要解除。\n' +
+            '  （如果刚才那件事还没做完，直接继续就行。）',
+        }
+      }
+      // 有**别的**操作在跑时不解除：中途松闸等于给在途动作放行。
+      // 注意是 > 1：wrapper 已经把自己算进去了（_busy++ 在 execute 开头）。
+      if (_busy > 1) {
+        throw new Error(
+          '还有操作正在执行，暂时不能解除急停。\n' +
+            '  [retry=wait] 等它结束再试。',
+        )
+      }
+      try {
+        rmSync(gp, { force: true })
+      } catch (e) {
+        throw new Error(`解除失败（删不掉闸门文件）：${e?.message ?? e}`)
+      }
+      const why = args && args.reason ? `（依据：${args.reason}）` : ''
+      ctx.logger?.info?.(`[desktop-control] 用户要求继续，已解除急停 ${why}`)
+      return {
+        result:
+          `已解除急停${why}。桌面操作可以继续了。\n` +
+          '  ⚠ 这是**你的判断** —— 如果用户其实没让你继续，他随时可以再按 ESC。\n' +
+          '  变更性操作会重新拉起指示层。',
+      }
+    },
+    presentCall: () => ({ card: 'generic', title: '解除急停', kind: 'other' }),
   })
 
   register({
