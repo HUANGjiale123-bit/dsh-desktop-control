@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.6'
+const PLUGIN_VERSION = '2.18.7'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1913,16 +1913,15 @@ function applyInner(ctx, config = {}) {
    * 这里**只读**，绝不写；写闸门是 ESC 监听器和 halt 的事。
    */
   /**
-   * 急停的自动恢复时间（**秒**）。0 = 永不自动恢复。
+   * 最近一次**用户发消息**的时刻。
    *
-   * 必须和 helper 的 HaltTtlSeconds() **完全一致** —— 否则会出现
-   * "插件认为已恢复、helper 还在拦"这种最难查的分裂状态。
-   * 两边都读 DSC_HALT_TTL_SECONDS，默认都是 60；且都兼容
-   * DSC_HALT_TTL_MINUTES（设了就换算成秒）。
+   * 为什么要它：外部复核指出"60 秒只证明时间过去了，不能证明旧任务停了"。
+   * 单纯等时间既不准确（用户可能只是去倒水）也不合用户直觉
+   * （"我说完这句话它就该好了"）。
    *
-   * 为什么 60 秒而不是 10 分钟：用户原话是"有时候只是临时看到你做错了，
-   * 想和你说一下，只要任务中止后，你没继续在干活就可以解除了"。
-   * ESC 是**打断**，不是**锁** —— 说完了就该好。
+   * 宿主有 `agent/inbox/inserted` 事件（"One message entered the live inbox"，
+   * scope 过滤到对应 agent）—— 那就是**可信的任务租期入口**：
+   * 用户发消息 = 新任务开始 = 旧任务的急停租期结束。
    */
   function haltTtlSeconds() {
     const sv = process.env.DSC_HALT_TTL_SECONDS
@@ -1952,10 +1951,12 @@ function applyInner(ctx, config = {}) {
       const gp = gate()
       if (!existsSync(gp)) return false
 
+      const gateAt = statSync(gp).mtimeMs
+
       const ttl = haltTtlSeconds()
       if (ttl === 0) return true
 
-      const ageSec = (Date.now() - statSync(gp).mtimeMs) / 1000
+      const ageSec = (Date.now() - gateAt) / 1000
       // 时钟倒退时按"刚拉下"处理：宁可多停一会儿，也不要误放行
       if (ageSec < 0) return true
       return ageSec < ttl
