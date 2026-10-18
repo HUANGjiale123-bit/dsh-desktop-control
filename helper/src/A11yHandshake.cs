@@ -121,6 +121,9 @@ namespace Dsc
             }
             if (budgetMs <= 0 || budgetMs > 5000) budgetMs = 800;
 
+            // 每次运行都要重置：上一轮的 "已响应" 状态泄漏到这一轮，
+            // 会让第二次探测永远不响应事件。
+            _responded = false;
             _collected = new Collected();
             IntPtr hook = IntPtr.Zero;
             try
