@@ -79,10 +79,13 @@ echo "编译 dsc.exe ..."
     -r:"$FW/WPF/UIAutomationClient.dll" \
     -r:"$FW/WPF/UIAutomationTypes.dll" \
     -r:"$FW/WPF/WindowsBase.dll" \
+    -r:"$FW/Accessibility.dll" \
     'src\Program.cs' \
     'src\Snapshot.cs' \
     'src\Activate.cs' \
-    'src\Launcher.cs'
+    'src\Launcher.cs' \
+    'src\Msaa.cs' \
+    'src\Probe.cs'
 
 echo
 echo "完成: bin/dsc.exe ($(stat -c%s bin/dsc.exe) bytes)"

@@ -51,6 +51,13 @@ namespace Dsc
 
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
+        /// <summary>
+        /// 枚举子窗口。找 Chromium 的内容宿主（Chrome_RenderWidgetHostHWND）
+        /// 必须用它 —— 顶层窗口只给外壳。
+        /// </summary>
+        [DllImport("user32.dll")]
+        public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
         [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
 
@@ -840,6 +847,7 @@ namespace Dsc
                     case "list_apps": return CmdListApps(args);
                     case "resolve_app": return CmdResolveApp(args);
                     case "launch": return CmdLaunch(args);
+                    case "a11y_probe": return CmdA11yProbe(args);
                     default: return CmdHelp();
                 }
             }
@@ -1262,6 +1270,72 @@ namespace Dsc
             j.Obj().Key("ok").Bool(true).Key("exe").Val(exe).Key("name").Val(displayName).End();
             Console.WriteLine(j.ToString());
             return 0;
+        }
+
+        /* a11y_probe <hwnd>
+         *
+         * **只读**能力探测：这个窗口到底能不能拿到元素、走哪条通道。
+         *
+         * 外部复核要求"返回空树、查询失败、初始化未完成和预算截断必须是
+         * 不同结果"。Probe.Run 把这几种分开报（coverage 字段 + notes），
+         * 而不是统一返回空数组让人猜。
+         *
+         * 它不执行任何输入动作，也不改目标设置。
+         */
+        private static int CmdA11yProbe(string[] args)
+        {
+            RequireNotHalted("a11y_probe");
+            IntPtr hwnd = ParseHwnd(args, "a11y_probe");
+            RequireAllowedWindow(hwnd, "a11y_probe");
+
+            Dictionary<string, object> probe;
+            try
+            {
+                probe = Probe.Run(hwnd);
+            }
+            catch (Exception e)
+            {
+                return FailJson("ProbeFailed", e.GetType().Name + ": " + e.Message);
+            }
+            probe["ok"] = true;
+            Console.WriteLine(ToJson(probe));
+            return 0;
+        }
+
+        /** 把 Probe.Run 的嵌套字典/列表转成 JSON。Jw 没有通用转换，这里补一个。 */
+        private static string ToJson(object v)
+        {
+            if (v == null) return "null";
+            if (v is bool) return ((bool)v) ? "true" : "false";
+            if (v is int || v is long) return Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture);
+            if (v is string)
+            {
+                Jw sj = new Jw();
+                return sj.Val((string)v).ToString();
+            }
+            Dictionary<string, object> d = v as Dictionary<string, object>;
+            if (d != null)
+            {
+                Jw j = new Jw();
+                j.Obj();
+                foreach (KeyValuePair<string, object> kv in d)
+                {
+                    j.Key(kv.Key);
+                    j.Raw(ToJson(kv.Value));
+                }
+                j.End();
+                return j.ToString();
+            }
+            System.Collections.IEnumerable list = v as System.Collections.IEnumerable;
+            if (list != null)
+            {
+                Jw j = new Jw();
+                j.Arr();
+                foreach (object item in list) j.Raw(ToJson(item));
+                j.EndArr();
+                return j.ToString();
+            }
+            return "null";
         }
 
         private static int CmdLaunch(string[] args)
