@@ -1768,6 +1768,8 @@ export function createDesktopToolset(options = {}) {
     get grants() {
       return grants()
     },
+    /** 当前会话的 key（诊断用它区分"我"和"别人"）。 */
+    currentSessionKey,
     // 会话结束时调用它：撤销授权 + 拒绝后续写入
     revokeSession,
     isSessionDisposed,

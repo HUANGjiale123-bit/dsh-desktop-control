@@ -108,6 +108,44 @@ console.log('── 1. 授权按会话分 ──')
   else bad('B 撤销把 A 的授权也清了 —— 撤销范围太大')
 
   console.log()
+  console.log('── 2b. 诊断要能分清「我」和「别人」──')
+
+  {
+    // 踩过的坑：诊断里用 set.currentSessionKey 判断"其它会话"，
+    // 但 toolset 根本没导出它 → typeof 是 undefined → 拿 null 比较
+    // → 所有会话都不等于 null → 把本会话也数成"别人"。
+    //
+    // 这里用**新的** toolset，不继承上一节的会话状态
+    // （上一节结束时 current 是 session-B，而且 B 已被撤销）。
+    let cur2 = 'session-A'
+    const set3 = tmod.createDesktopToolset({
+      helperPath: 'helper/bin/dsc.exe',
+      allowedApps: '',
+      getGatePath: () => join(tmp, 'halt'),
+      getSessionKey: () => cur2,
+      requestApproval: async () => 'allowed-once',
+    })
+
+    if (typeof set3.currentSessionKey === 'function') ok('currentSessionKey 已导出')
+    else bad('currentSessionKey 没导出 —— 诊断会把本会话算成"别人"')
+
+    set3.grants.set('a.exe', 'session')
+    cur2 = 'session-B'
+    set3.grants.set('b.exe', 'session')
+    cur2 = 'session-A'
+
+    const mine = [...set3.grants.keys()]
+    const all = [...set3.allGrantsBySession.keys()]
+    const others = all.filter((k) => k !== set3.currentSessionKey())
+
+    if (mine.length === 1 && mine[0] === 'a.exe') ok('本会话只看到自己的 a.exe')
+    else bad(`本会话看到的授权不对：${mine.join(',') || '（空）'}`)
+
+    if (others.length === 1) ok('其它会话数 = 1（没把本会话算进去）')
+    else bad(`其它会话数 = ${others.length}，应该是 1`)
+  }
+
+  console.log()
   console.log('── 3. 静态白名单仍然共享 ──')
 
   const set2 = tmod.createDesktopToolset({
