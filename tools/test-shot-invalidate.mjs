@@ -151,10 +151,13 @@ console.log('── 4. 作废必须统一在执行器，而且覆盖全部变更
   else bad('没有 invalidateShotsFor')
 
   // 必须是**统一在 wrapper**，不是散在各工具
-  if (/finally\s*\{[\s\S]{0,600}?MUTATING_TOOLS\.has\(definition\.name\)[\s\S]{0,200}?invalidateShotsFor/.test(src)) {
-    ok('作废统一在 register 的 finally 里')
+  // 作废的位置变了：不再是"按 hwnd 无差别删"，而是"记下动作前的快照、
+  // 只在 finally 里删那些"。原因见外部复核：无差别删会把 observeAfter
+  // 刚登记的新截图一起删掉，让返回给模型的 shotId 立刻失效。
+  if (src.includes('snapshotShotIds(hwndKey)') && src.includes('forgetShotIds(staleShots)')) {
+    ok('作废统一在 register 的 finally 里，且只删动作前的快照')
   } else {
-    bad('作废没有统一在注册器 —— 迟早又漏掉某个工具')
+    bad('作废没有统一在注册器，或者仍在无差别清空（会删掉刚返回的新截图）')
   }
 
   // 提取 MUTATING_TOOLS 名单

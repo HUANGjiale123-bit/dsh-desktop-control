@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.3'
+const PLUGIN_VERSION = '2.18.4'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -936,14 +936,14 @@ function applyInner(ctx, config = {}) {
     registered.push(definition.name)
     const wrapped = Object.assign({}, definition, {
       async execute(args, exec) {
+        // ── 外层 finally 必须覆盖**等锁** ──
+        //
+        // 原先 _busy++ 在 939 行，等锁在 966 行，而 throw Busy 在 try 之外 ——
+        // 等锁超时就不会执行 _busy-- 和 rememberTrace。后果：
+        //   · 忙计数泄漏 → 指示层再也不会自动收起
+        //   · 失败的调用没有 trace → 竞争数据被藏起来
+        // 外部复核实测到了这一点。
         _busy++
-        // 变更性操作：确保用户看得见（拉起或续命）。
-        // 只读操作：只续命，不主动拉起。
-        if (MUTATING_TOOLS.has(definition.name)) ensureIndicator()
-        else touchActivity()
-
-        // 一次工具调用 = 一个 trace。用 ALS 带着走，
-        // 并发的两次调用不会互相污染对方的 span 列表。
         const trace = {
           id: 'tr-' + Math.random().toString(36).slice(2, 8),
           tool: definition.name,
@@ -952,68 +952,70 @@ function applyInner(ctx, config = {}) {
           outcome: 'ok',
           errorCode: null,
         }
-
-        // ★ 用 als.run 包住整个工具执行。
-        //
-        // 不这么做的话 span() 拿不到上下文，所有计时都会丢 —— 而更糟的是
-        // 用全局变量的那种写法在并发下会把 A 的耗时记到 B 头上。
         const startedAt = performance.now()
-        return als.run({ trace }, async () => {
-          // ── 先取执行权，再碰桌面 ──
-          //
-          // 这一次等待单独记一个 span：它既不是操作耗时（我们在等，
-          // 什么都没做），也不是授权等待（那是在等人）。
-          let lease = { ok: true, waitedMs: 0 }
-          if (!NO_LEASE_TOOLS.has(definition.name)) {
-            lease = await span('lease', () => acquireLease(definition.name))
-            if (!lease.ok) {
-              trace.outcome = 'rejected'
-              trace.errorCode = 'Busy'
-              const sec = (lease.heldForMs / 1000).toFixed(1)
-              throw new Error(
-                `没拿到执行权：另一个操作（${lease.holder}）已经占用 ${sec} 秒，` +
-                  `等了 ${(lease.waitedMs / 1000).toFixed(1)} 秒仍然没释放。
+
+        // ── 记下"动作开始前"的截图 ──
+        //
+        // 原先 finally 里按 hwnd 无差别作废，会把 observeAfter 刚登记的新截图
+        // 一起删掉 —— 于是返回给模型的 shotId 立刻失效，下一次用它就被拒。
+        // 这直接抵消了"动作后观察"要省下的那一轮。
+        //
+        // 所以只删**动作开始前就存在**的那些；动作后新登记的保留。
+        const hwndKey = args && typeof args === 'object' ? args.hwnd : undefined
+        const staleShots = MUTATING_TOOLS.has(definition.name) ? snapshotShotIds(hwndKey) : null
+        let leaseHeld = false
+
+        try {
+          // 变更性操作：确保用户看得见（拉起或续命）。
+          // 只读操作：只续命，不主动拉起。
+          if (MUTATING_TOOLS.has(definition.name)) ensureIndicator()
+          else touchActivity()
+
+          return await als.run({ trace }, async () => {
+            try {
+              // ── 先取执行权，再碰桌面 ──
+              let lease = { ok: true, waitedMs: 0 }
+              if (!NO_LEASE_TOOLS.has(definition.name)) {
+                lease = await span('lease', () => acquireLease(definition.name))
+                if (!lease.ok) {
+                  trace.outcome = 'rejected'
+                  trace.errorCode = 'Busy'
+                  const sec = (lease.heldForMs / 1000).toFixed(1)
+                  throw new Error(
+                    `没拿到执行权：另一个操作（${lease.holder}）已经占用 ${sec} 秒，` +
+                      `等了 ${(lease.waitedMs / 1000).toFixed(1)} 秒仍然没释放。
 ` +
-                  `  **这不是故障** —— 同一时刻只允许一个操作碰桌面，` +
-                  `否则两个操作会互相踩到对方的光标和焦点。
+                      `  **这不是故障** —— 同一时刻只允许一个操作碰桌面，` +
+                      `否则两个操作会互相踩到对方的光标和焦点。
 ` +
-                  `  [retry=wait] 等一下再试。如果反复出现，说明有操作卡住了，` +
-                  `用 desktop_diagnose({perf:true}) 看最近几次的耗时。`,
-              )
+                      `  [retry=wait] 等一下再试。如果反复出现，说明有操作卡住了，` +
+                      `用 desktop_diagnose({perf:true}) 看最近几次的耗时。`,
+                  )
+                }
+                leaseHeld = true   // 只有真的拿到才标记
+              }
+
+              return await definition.execute(args, exec)
+            } catch (e) {
+              trace.outcome = 'error'
+              trace.errorCode = guessErrorCode(e?.message)
+              throw e
+            } finally {
+              trace.total = Math.round((performance.now() - startedAt) * 10) / 10
+              // 只作废动作**前**的截图；observeAfter 新登记的保留
+              if (staleShots) forgetShotIds(staleShots)
+              // 结束时刷新锚点：这样"空闲"从**操作完成**开始算。
+              touchActivity()
+              // ★ 只释放自己拿到的锁。
+              //   无条件 releaseLease 会误释放别人的 —— 那比卡住更糟。
+              if (leaseHeld) releaseLease()
             }
-          }
-          try {
-            return await definition.execute(args, exec)
-          } catch (e) {
-            trace.outcome = 'error'
-            trace.errorCode = guessErrorCode(e?.message)
-            throw e
-          } finally {
-            trace.total = Math.round((performance.now() - startedAt) * 10) / 10
-            _busy--
-            // ── 旧截图作废：统一在这里做 ──
-            //
-            // 原先散落在 wheel / drag / type 三个工具里，而 click、
-            // press_key、set_value、do_action、move、hold **一个都没有**。
-            // 实测踩到过：点一下网易云，界面从首页变成了全屏播放页，
-            // 而那张旧截图仍然"有效" —— 再点一次就会落到别的地方。
-            //
-            // 放在 finally 是有意的：**尝试过副作用就算**，哪怕报 unknown。
-            // 判断"这个动作有没有真的改变界面"是做不到的，所以保守作废。
-            if (MUTATING_TOOLS.has(definition.name)) {
-              const h = args && typeof args === 'object' ? args.hwnd : undefined
-              invalidateShotsFor(h)
-            }
-            // 结束时刷新锚点：这样"空闲"从**操作完成**开始算，
-            // 而不是从它开始算 —— 否则一个跑了 30 秒的输入，
-            // 刚结束就被判定为空闲超时。
-            touchActivity()
-            // 释放执行权：放在 finally 里，异常也释放。
-            // 如果这里漏了，整个插件会永久卡在"有人占用"上。
-            if (!NO_LEASE_TOOLS.has(definition.name)) releaseLease()
-            rememberTrace(trace)
-          }
-        })
+          })
+        } finally {
+          // 等锁超时、als.run 抛错，都会走到这里
+          _busy--
+          rememberTrace(trace)
+        }
       },
     })
     return ctx.tools.register(defineTool(wrapped))
@@ -1697,6 +1699,32 @@ function applyInner(ctx, config = {}) {
    * （窗口没移、没改大小、没过期），然后把点击送到一个完全不同的位置。
    * 校验通过了但结论是错的，这比没有校验更危险。
    */
+  /**
+   * 记下当前窗口已有的 shotId —— 也就是"动作开始前的旧观察"。
+   *
+   * 为什么需要它：原来的 finally 按 hwnd 无差别作废，会把 observeAfter
+   * 刚登记的新截图也删掉。而那个 shotId 正是返回给模型、让它下次复用的。
+   * 删掉之后，用新 ID 的第一次点击就报"找不到截图"—— 动作后观察省下的
+   * 那一轮又白花了，还多一次困惑。
+   *
+   * 外部复核复现了这一点，它发生在"失效统一"和"动作后观察"两个功能的交界处，
+   * 单看任何一个都发现不了。
+   */
+  function snapshotShotIds(hwnd) {
+    const ids = []
+    for (const [id, rec] of recentShots) {
+      if (hwnd === undefined || hwnd === null || String(rec.hwnd) === String(hwnd)) ids.push(id)
+    }
+    return ids
+  }
+
+  /** 只作废列表里的那些（动作前的旧观察）。动作后新登记的保留。 */
+  function forgetShotIds(ids) {
+    let n = 0
+    for (const id of ids) if (recentShots.delete(id)) n++
+    return n
+  }
+
   function invalidateShotsFor(hwnd) {
     let n = 0
     for (const [id, rec] of recentShots) {

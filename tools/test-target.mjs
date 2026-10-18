@@ -149,7 +149,9 @@ const before = events().length
     ok('同名按钮报 AmbiguousTarget 并拒绝')
   } else if (code === 'InvalidOperationException' && /多个元素/.test(msg)) {
     skip('还报着旧码 InvalidOperationException —— 说明跑的是旧 helper')
-  } else if ((code === 'AmbiguousTarget' || code === 'InvalidOperationException') && /激活/.test(msg)) {
+  } else if (/激活/.test(msg)) {
+    // 激活发生**在**唯一性检查之前，所以沙箱里根本走不到那一步。
+    // 这不是行为错误，是环境限制 —— 明确 skip 而不是 bad。
     skip('被激活限制拦下（沙箱无法把窗口提到前台），唯一性检查在此环境下测不到')
   } else {
     bad(`同名按钮的行为不对：error=${JSON.stringify(code)} msg=${msg.slice(0, 70)}`)

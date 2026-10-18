@@ -100,9 +100,9 @@ console.log('── 2. set_value 必须接受描述符，而不是只认遍历�
       bad('描述符被当成数字解析了 —— 说明没支持描述符模式')
     } else if (r.json.error === 'NotFound') {
       ok('描述符被正确识别，并精确报 NotFound')
-    } else if (r.json.error === 'InvalidOperationException' && /激活/.test(r.json.message ?? '')) {
-      // 沙箱里激活不了窗口，这属于环境限制；关键是**错误码精确**，
-      // 而不是把任何异常都当成功。
+    } else if ((r.json.error === 'Refused' || r.json.error === 'InvalidOperationException') && /激活/.test(r.json.message ?? '')) {
+      // 沙箱里激活不了窗口，这属于环境限制；关键是**错误码精确**。
+      // （激活失败现在归为 Refused —— 环境限制，重试不会变好。）
       ok('描述符被正确识别（环境无法激活窗口，错误信息明确）')
     } else {
       bad(`描述符模式的错误码不符预期：${JSON.stringify(r.json.error)} ${String(r.json.message ?? '').slice(0, 60)}`)
@@ -118,7 +118,9 @@ console.log('── 2. set_value 必须接受描述符，而不是只认遍历�
   } else if (r2.json.error === 'StaleSnapshot') {
     if (/99999/.test(r2.json.message ?? '')) ok('序号越界报 StaleSnapshot，且消息带得上序号')
     else bad(`StaleSnapshot 的消息里没有序号：${String(r2.json.message ?? '').slice(0, 60)}`)
-  } else if (r2.json.error === 'InvalidOperationException' && /激活/.test(r2.json.message ?? '')) {
+  } else if ((r2.json.error === 'Refused' || r2.json.error === 'InvalidOperationException') && /激活/.test(r2.json.message ?? '')) {
+    // 激活失败发生在"解析序号"之前，所以这里测不到越界行为。
+    // 错误码归为 Refused（环境限制，重试无用）。
     ok('序号模式被激活限制拦下（环境问题，不是解析问题）')
   } else {
     bad(`序号模式行为异常：${JSON.stringify(r2.json.error)}`)
