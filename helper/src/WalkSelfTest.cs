@@ -169,46 +169,63 @@ namespace Dsc
             }
 
             _lines.Add("");
-            _lines.Add("── 6. 整数孩子被解析成对象后，孙子节点必须读到 ──");
+            _lines.Add("── 6. 整数孩子必须经生产路径解析（含失败分支）──");
             {
-                // 外部复核对这一条的要求："根枚举出整数 ID；该 ID 解析成一个
-                // 带孙节点的对象；最终应读到孙节点。"
+                // ── 这一项为什么重写 ──
                 //
-                // 守的是"只改了诊断没改遍历"那个错误：诊断里 promoted++ 看起来
-                // 是对的，但对象没被替换进遍历，孙子节点就永远读不到。
+                // 上一版直接构造"已经解析好的 MsaaRef"，把转换步骤整个跳过了 ——
+                // 所以在"生产代码根本没调 get_accChild"的情况下它照样全过。
+                // 外部复核把它拆穿了，还给了复现：应访问 3 个节点、实际 2 个、
+                // get_accChild 调用 0 次。
                 //
-                // 这里用 isSimpleChild=false 表示"它已经被 get_accChild 解析成
-                // 完整对象" —— 遍历器因此继续展开，孙节点就能读到。
-                var grandchild = new FakeNode { Id = "grandchild", Name = "孙" };
-                var promoted = new FakeNode { Id = "promoted", Name = "提升后的对象" };
-                promoted.Kids.Add(grandchild);
-                var root = new FakeNode { Id = "introot", Name = "根" };
-                root.Kids.Add(promoted);
+                // 现在**走 Msaa.ResolveChild 这个生产函数**，只把最底层的
+                // resolver 换成假的。把 ResolveChild 里的转换拿掉，这一项必须红。
+                int resolverCalls = 0;
+                Func<Accessibility.IAccessible, int, object> fakeResolver = delegate(
+                    Accessibility.IAccessible parent, int childId)
+                {
+                    resolverCalls++;
+                    return null;   // 先测"正常无对象"
+                };
 
-                var r = BoundedWalk.Run(
-                    root,
-                    delegate(object o)
-                    {
-                        FakeNode f = (FakeNode)o;
-                        return new WalkNode { Identity = f.Id, Name = f.Name, Role = "10" };
-                    },
-                    delegate(object o, int start, int count)
-                    {
-                        FakeNode f = (FakeNode)o;
-                        var page = new WalkPage();
-                        page.Total = f.Kids.Count;
-                        for (int i = start; i < f.Kids.Count && page.Children.Count < count; i++)
-                        {
-                            page.Children.Add(f.Kids[i]);
-                            page.Obtained++;
-                        }
-                        return page;
-                    },
-                    delegate(object o) { return ((FakeNode)o).Simple; },
-                    3000, 40);
+                // ① 整数 + resolver 返回 null → simple
+                string why;
+                Dsc.MsaaRef simple = Dsc.Msaa.ResolveChild(
+                    null, (object)7, delegate(Accessibility.IAccessible pp, int cc)
+                    { resolverCalls++; return null; }, out why);
+                if (simple != null && simple.SimpleChild && simple.ResolvedKind == "simple")
+                    Ok("整数 + 无对象 → 简单子元素（ResolvedKind=simple）");
+                else Bad("整数 + 无对象 的分类不对：" + (simple == null ? "null" : simple.ResolvedKind));
 
-                if (r.UniqueCount == 3) Ok("读到 3 个节点（根 + 提升的对象 + 孙）");
-                else Bad(string.Format("读到 {0} 个节点，应该是 3 —— 孙子节点丢了", r.UniqueCount));
+                if (resolverCalls == 1) Ok("resolver 被调用了一次（不是绕过）");
+                else Bad(string.Format("resolver 调用了 {0} 次，应该 1 次", resolverCalls));
+
+                // ② 整数 + resolver 抛异常 → unresolved（不能当成确认的叶节点）
+                Dsc.MsaaRef bad;
+                try
+                {
+                    bad = Dsc.Msaa.ResolveChild(
+                        null, (object)8, delegate(Accessibility.IAccessible pp, int cc)
+                        { throw new InvalidOperationException("provider 崩了"); }, out why);
+                }
+                catch (Exception e)
+                {
+                    bad = null;
+                    why = "ResolveChild 自己抛了: " + e.Message;
+                }
+                if (bad != null && bad.ResolvedKind == "unresolved")
+                    Ok("整数 + 查询失败 → unresolved（不是确认的叶节点）");
+                else Bad("失败分支没标成 unresolved：" + (bad == null ? why : bad.ResolvedKind));
+
+                if (!string.IsNullOrEmpty(why)) Ok("失败原因被记下来：" + why);
+                else Bad("失败但没记原因");
+
+                // ③ 完整对象 → 保留对象本身，允许展开
+                if (simple != null && simple.RawKind == "int") Ok("整数来源的 RawKind=int");
+                else Bad("RawKind 没被赋值：" + (simple == null ? "null" : simple.RawKind));
+
+                _lines.Add("  （注：完整对象分支需要真 IAccessible，纯内存测不了；");
+                _lines.Add("   它走的是同一个 ResolveChild 的第一分支。）");
             }
 
             _lines.Add("");

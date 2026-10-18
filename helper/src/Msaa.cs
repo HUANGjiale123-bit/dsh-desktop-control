@@ -46,11 +46,19 @@ namespace Dsc
         public int ChildId;          // CHILDID_SELF = 0，或 provider 返回的真实 childId
         public bool SimpleChild;
         public int Depth;
-        /** 原始表示：object / int。 */
+        /** 原始表示：object / int。**必须在解析时赋值**，不能留默认。 */
         public string RawKind = "object";
-        /** 解析结果：object / simple / unresolved。 */
+        /** 解析结果：object / simple / unresolved。**必须在解析时赋值**。 */
         public string ResolvedKind = "object";
     }
+
+    /// <summary>
+    /// 调用 get_accChild 的抽象。
+    ///
+    /// 抽出来的唯一理由是**让测试能替换最底层那一层**，而不是在测试里直接
+    /// 构造"已经解析好"的结果 —— 那样会绕过整个转换步骤，测了个寂寞。
+    /// </summary>
+    internal delegate object ChildResolver(IAccessible parent, int childId);
 
     internal static class Msaa
     {
@@ -213,6 +221,108 @@ namespace Dsc
         /// 把下标当 childId 传回父对象会读到别的元素，而且不会报错。
         /// </summary>
         /// <summary>
+        /// 把一个原始孩子值解析成 MsaaRef。
+        ///
+        /// ── 这个函数存在的理由 ──
+        ///
+        /// 上一轮我声称"整数孩子会经 get_accChild 解析成完整对象"，但生产代码
+        /// 里 `if (values[i] is int)` 分支直接 `SimpleChild = true` 就返回了 ——
+        /// 一次 get_accChild 都没调用。测试也没发现，因为测试直接构造了
+        /// "已经解析好"的 MsaaRef，把缺失的那一步跳过了。
+        ///
+        /// 所以解析逻辑集中到这里，**生产路径和测试走同一个函数**，
+        /// 测试只替换 resolver（最底层那一次 provider 调用）。
+        ///
+        /// 四种情况必须分开（微软契约）：
+        ///   · 完整对象             → Owner=它自己，ChildId=SELF，可展开
+        ///   · 整数 + resolver 给回对象 → 同上，RawKind=int
+        ///   · 整数 + 正常无对象      → Owner=父，真实 childId，叶节点
+        ///   · 整数 + 查询失败        → Owner=父，标记 unresolved，**不是**确认的叶节点
+        /// </summary>
+        internal static MsaaRef ResolveChild(
+            IAccessible parent, object rawValue, ChildResolver resolver, out string failReason)
+        {
+            failReason = null;
+
+            IAccessible full = rawValue as IAccessible;
+            if (full != null)
+            {
+                return new MsaaRef
+                {
+                    Owner = full,
+                    ChildId = CHILDID_SELF,
+                    SimpleChild = false,
+                    RawKind = "object",
+                    ResolvedKind = "object",
+                };
+            }
+
+            if (rawValue is int)
+            {
+                int childId = (int)rawValue;
+                if (resolver != null)
+                {
+                    try
+                    {
+                        object resolved = resolver(parent, childId);
+                        IAccessible acc = resolved as IAccessible;
+                        if (acc != null)
+                        {
+                            return new MsaaRef
+                            {
+                                Owner = acc,
+                                ChildId = CHILDID_SELF,
+                                SimpleChild = false,
+                                RawKind = "int",
+                                ResolvedKind = "object",
+                            };
+                        }
+                        // 正常返回、但没有独立对象 → 这是真的简单子元素
+                        return new MsaaRef
+                        {
+                            Owner = parent,
+                            ChildId = childId,
+                            SimpleChild = true,
+                            RawKind = "int",
+                            ResolvedKind = "simple",
+                        };
+                    }
+                    catch (Exception e)
+                    {
+                        // 失败和"正常无对象"必须分开：前者是未知，后者是叶子
+                        failReason = "get_accChild:" + e.GetType().Name;
+                        return new MsaaRef
+                        {
+                            Owner = parent,
+                            ChildId = childId,
+                            SimpleChild = true,
+                            RawKind = "int",
+                            ResolvedKind = "unresolved",
+                        };
+                    }
+                }
+                // 没给 resolver：保守当成简单子元素，但**标明是没解析过的**
+                return new MsaaRef
+                {
+                    Owner = parent,
+                    ChildId = childId,
+                    SimpleChild = true,
+                    RawKind = "int",
+                    ResolvedKind = "unresolved",
+                };
+            }
+
+            failReason = "unknown_type";
+            return null;
+        }
+
+        /// <summary>默认 resolver：真的调 get_accChild。</summary>
+        internal static object DefaultResolver(IAccessible parent, int childId)
+        {
+            return parent.get_accChild(childId);
+        }
+
+        /// <summary>
         /// 一次枚举的完整结果。
         ///
         /// ── 为什么不能只返回列表 ──
@@ -284,25 +394,25 @@ namespace Dsc
 
             for (int i = 0; i < obtained; i++)
             {
-                IAccessible full = values[i] as IAccessible;
-                if (full != null)
+                // ── 所有孩子都走同一个解析函数 ──
+                //
+                // 包括"已经是完整对象"的那种：它也要经过 ResolveChild 才会
+                // 被赋上 RawKind/ResolvedKind。上一版把完整对象单独 add 掉，
+                // 于是它们的这两个字段永远是默认值，诊断统计拿到的是假数据。
+                string why;
+                MsaaRef resolved = ResolveChild(parent, values[i], DefaultResolver, out why);
+                if (resolved != null)
                 {
-                    result.Add(new MsaaRef { Owner = full, ChildId = CHILDID_SELF });
-                    continue;
+                    result.Add(resolved);
                 }
-                if (values[i] is int)
+                else
                 {
-                    result.Add(new MsaaRef
-                    {
-                        Owner = parent,
-                        ChildId = (int)values[i],
-                        SimpleChild = true,
-                    });
-                    continue;
+                    // 未知类型不能静默跳过 —— 那会让"树不完整"看起来像"树就这么大"。
+                    errors.Add("未知的 MSAA 子元素类型: " +
+                        (values[i] == null ? "null" : values[i].GetType().Name));
                 }
-                // 混入未知类型时不能静默跳过 —— 那会让"树不完整"看起来像"树就这么大"。
-                errors.Add("未知的 MSAA 子元素类型: " +
-                    (values[i] == null ? "null" : values[i].GetType().Name));
+                if (!string.IsNullOrEmpty(why))
+                    r.FailReason = r.FailReason ?? why;
             }
             return r;
         }
