@@ -224,8 +224,81 @@ namespace Dsc
                 if (simple != null && simple.RawKind == "int") Ok("整数来源的 RawKind=int");
                 else Bad("RawKind 没被赋值：" + (simple == null ? "null" : simple.RawKind));
 
-                _lines.Add("  （注：完整对象分支需要真 IAccessible，纯内存测不了；");
-                _lines.Add("   它走的是同一个 ResolveChild 的第一分支。）");
+                // ④ **成功返回对象** —— 这是上一版漏掉的那条
+                //
+                // 外部复核用变异实验证明：把 `if (acc != null)` 改成恒不进入，
+                // 我的测试仍然全过。所以这条必须真的走进去。
+                // FakeAccessible 实现了 IAccessible，可以当替身用。
+                var fake = new Dsc.FakeAccessible("假对象");
+                Dsc.MsaaRef gotObj = Dsc.Msaa.ResolveChild(
+                    null, (object)9, delegate(Accessibility.IAccessible pp, int cc)
+                    { return fake; }, out why);
+                if (gotObj != null && !gotObj.SimpleChild)
+                    Ok("整数 + resolver 返回对象 → 可展开（SimpleChild=false）");
+                else Bad("成功返回对象被当成了叶节点：" +
+                    (gotObj == null ? "null" : gotObj.ResolvedKind));
+
+                if (gotObj != null && ReferenceEquals(gotObj.Owner, fake))
+                    Ok("Owner 被替换成 resolver 返回的那个对象");
+                else Bad("Owner 没被替换 —— 返回对象被丢掉了");
+
+                if (gotObj != null && gotObj.ChildId == 0)
+                    Ok("ChildId = CHILDID_SELF(0)");
+                else Bad("ChildId 不是 SELF：" + (gotObj == null ? "null" : gotObj.ChildId.ToString()));
+
+                if (gotObj != null && gotObj.ResolvedKind == "object")
+                    Ok("ResolvedKind=object");
+                else Bad("ResolvedKind 不对：" + (gotObj == null ? "null" : gotObj.ResolvedKind));
+
+                // ⑤ resolver 返回非 IAccessible 的东西 → unresolved，不是 simple
+                Dsc.MsaaRef weird = Dsc.Msaa.ResolveChild(
+                    null, (object)10, delegate(Accessibility.IAccessible pp, int cc)
+                    { return "一个字符串"; }, out why);
+                if (weird != null && weird.ResolvedKind == "unresolved")
+                    Ok("非 IAccessible 返回 → unresolved（不混进 simple）");
+                else Bad("非 IAccessible 返回被归成了：" +
+                    (weird == null ? "null" : weird.ResolvedKind));
+            }
+
+            _lines.Add("");
+            _lines.Add("── 7. 枚举失败必须一路传到遍历汇总 ──");
+            {
+                // 外部复核："最后要从**生产枚举一路测到遍历汇总**，
+                // 确保未解析分支不会被报成完整成功。只断言局部 why 有值不够。"
+                //
+                // 旧缺口很具体：Msaa 设了 FailReason 却没设 Failed，而 Probe 只在
+                // er.Failed 为 true 时才往 WalkPage 传原因 —— 于是顶层报
+                // TraversalComplete=true / TruncatedBy=null / errors=[]。
+                var failed = new Dsc.Msaa.EnumResult();
+                failed.Failed = true;
+                failed.FailReason = "get_accChild:InvalidOperationException";
+                var page = failed.ToWalkPage();
+                if (!string.IsNullOrEmpty(page.FailReason))
+                    Ok("枚举失败 → WalkPage.FailReason 有值：" + page.FailReason);
+                else
+                    Bad("枚举失败被吞了 —— WalkPage.FailReason 为空");
+
+                // 走一遍真正的遍历器：失败页应该让 TraversalComplete=false
+                var root = new FakeNode { Id = "failroot" };
+                root.Kids.Add(new FakeNode { Id = "k1" });
+                var wr = BoundedWalk.Run(
+                    root,
+                    delegate(object o)
+                    {
+                        FakeNode f = (FakeNode)o;
+                        return new WalkNode { Identity = f.Id, Name = f.Name, Role = "10" };
+                    },
+                    delegate(object o, int st, int ct) { return failed.ToWalkPage(); },
+                    delegate(object o) { return ((FakeNode)o).Simple; },
+                    3000, 40);
+                if (!wr.TraversalComplete)
+                    Ok("遍历器把失败报成 TraversalComplete=false");
+                else
+                    Bad("失败页被当成正常结束（TraversalComplete=true）—— 这正是旧 bug");
+                if (!string.IsNullOrEmpty(wr.TruncatedBy))
+                    Ok("截断原因是：" + wr.TruncatedBy);
+                else
+                    Bad("截断原因是空的 —— 失败没表现出来");
             }
 
             _lines.Add("");

@@ -149,20 +149,13 @@ namespace Dsc
                 delegate(object o, int startOff, int count)
                 {
                     MsaaRef r = (MsaaRef)o;
-                    var page = new WalkPage();
-                    // ★ 枚举失败必须**传进 WalkPage**。
+                    // 转换逻辑收在 Msaa.EnumResult.ToWalkPage 里 —— 那里可以测。
                     //
-                    // 旧实现只把成功时的孩子复制过去，失败时 page 是空白的 ——
-                    // 遍历器看到 Obtained=0 就当成"这一页空了 = 枚举结束"，
-                    // 于是把失败报成 TraversalComplete=true。
-                    // 外部复核用纯内存复现验证过这个契约。
+                    // 这里曾是一段手写复制，而且只设 FailReason 不设 Failed，
+                    // 于是遍历器把枚举失败当成"这一页空了 = 枚举结束"，
+                    // 顶层报 TraversalComplete=true、无错误。外部复核的变异实验证实过。
                     var er = Msaa.ChildrenBatch(r.Owner, startOff, count, errors);
-                    page.Obtained = er.Obtained;
-                    page.Total = -1;
-                    if (er.Failed) page.FailReason = er.FailReason;
-                    if (er.Children != null)
-                        foreach (var k in er.Children) page.Children.Add(k);
-                    return page;
+                    return er.ToWalkPage();
                 },
                 delegate(object o) { return ((MsaaRef)o).SimpleChild; },
                 maxNodes,

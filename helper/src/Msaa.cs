@@ -277,7 +277,21 @@ namespace Dsc
                                 ResolvedKind = "object",
                             };
                         }
-                        // 正常返回、但没有独立对象 → 这是真的简单子元素
+                        if (resolved != null)
+                        {
+                            // 返回了东西，但**不是 IAccessible** —— 这不能当成
+                            // "正常无独立对象"。它是个无法解释的返回，必须记下来。
+                            failReason = "get_accChild:unexpected_type:" + resolved.GetType().Name;
+                            return new MsaaRef
+                            {
+                                Owner = parent,
+                                ChildId = childId,
+                                SimpleChild = true,
+                                RawKind = "int",
+                                ResolvedKind = "unresolved",
+                            };
+                        }
+                        // 正常返回 null → 这是真的简单子元素（父提供属性）
                         return new MsaaRef
                         {
                             Owner = parent,
@@ -342,6 +356,33 @@ namespace Dsc
             public int Hr;                 // AccessibleChildren 的原始返回值
             public bool Failed;            // 真正的失败（hr < 0 或非法数量）
             public string FailReason;      // 人看的失败原因，非空即失败
+
+            /// <summary>
+            /// 转成遍历器要的 WalkPage。
+            ///
+            /// 抽出来是为了**可测**：外部复核指出失败原因虽然存在，但上层看不到 ——
+            /// 旧代码在 Probe 的匿名委托里手动复制字段，而且只设 FailReason
+            /// 不设 Failed，于是遍历器把失败当成"这一页空了 = 枚举结束"。
+            ///
+            /// 这里只有一条不变式：**Failed 或 FailReason 非空，就必须让
+            /// WalkPage.FailReason 非空**。测它比测匿名委托容易。
+            /// </summary>
+            internal WalkPage ToWalkPage()
+            {
+                var page = new WalkPage();
+                page.Obtained = Obtained;
+                page.Total = -1;
+                if (Children != null)
+                    foreach (var c in Children) page.Children.Add(c);
+                string why = FailReason;
+                if (string.IsNullOrEmpty(why) && Failed) why = "enum_failed";
+                if (!string.IsNullOrEmpty(why))
+                {
+                    page.FailReason = why;
+                    page.Obtained = 0;   // 失败页不能装作"拿到了 0 个就是结束"
+                }
+                return page;
+            }
         }
 
         internal static EnumResult ChildrenBatch(
@@ -412,7 +453,15 @@ namespace Dsc
                         (values[i] == null ? "null" : values[i].GetType().Name));
                 }
                 if (!string.IsNullOrEmpty(why))
+                {
+                    // ★ 只设原因不设 Failed，上层根本看不到 ——
+                    // Probe 只在 er.Failed 为 true 时才往 WalkPage 传原因。
+                    // 外部复核的变异实验证实了这个缺口：
+                    //   ResolvedKind=unresolved, FailReason 有值，Failed=false
+                    //   → 顶层 TraversalComplete=true、TruncatedBy=null、errors=[]
+                    r.Failed = true;
                     r.FailReason = r.FailReason ?? why;
+                }
             }
             return r;
         }

@@ -88,6 +88,7 @@ echo "编译 dsc.exe ..."
     'src\A11yHandshake.cs' \
     'src\BoundedWalk.cs' \
     'src\PointQuery.cs' \
+    'src\FakeAccessible.cs' \
     'src\WalkSelfTest.cs' \
     'src\Probe.cs'
 
