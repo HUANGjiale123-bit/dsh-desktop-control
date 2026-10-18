@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.8'
+const PLUGIN_VERSION = '2.18.9'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1662,9 +1662,17 @@ function applyInner(ctx, config = {}) {
    * 挂 20 秒只是让"我停手了它还在说正在被控制"多持续 12 秒。
    * 用户直接说"20 秒会不会太久了"，是对的。
    *
-   * 所以取 8 秒：停手后很快就没了，这是更重要的那半边体验。
-   * 代价是连续操作时会闪，但这本来就是无法避免的——除非助手在收尾时
-   * 主动调 desktop_off（那才是真正准确的信号，超时只是保底）。
+   * ── 上面那段是错的，用户实测报了出来 ──
+   *
+   * 原来取 8 秒，理由是"停手后很快就没了"。但**每次操作之间都要等模型
+   * 推一轮**（40 秒），所以 8 秒必然落在两次操作中间：指示层每次都收掉，
+   * 下次操作又拉起来。用户看到的不是"很快就没了"，而是**它反复退出**。
+   *
+   * 那个"无法避免"的判断也不成立 —— 它只在"这些操作是连着做的"前提下
+   * 才是代价，而实际上每一步之间都隔着一次模型推理。
+   *
+   * 所以改成 90 秒：覆盖两轮推理，操作期间不闪。
+   * 真正的收尾信号是助手主动调 desktop_off，超时只是保底。
    *
    * 可以用 profile 配置改：dsh-desktop-control 的 idleHideMs。
    * 设成 0 表示**永不自动收**（需要常驻时用）。
@@ -1676,7 +1684,7 @@ function applyInner(ctx, config = {}) {
   const IDLE_HIDE_MS = (() => {
     const v = Number(config.idleHideMs)
     if (Number.isFinite(v) && v >= 0) return v
-    return 8000
+    return 90000
   })()
 
   /**
