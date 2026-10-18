@@ -106,6 +106,24 @@ namespace Dsc
             }
         }
 
+        [DllImport("UIAutomationCore.dll")]
+        private static extern bool UiaHasServerSideProvider(IntPtr hwnd);
+
+        /// <summary>
+        /// 这个窗口有没有**服务端 UIA 实现**。
+        ///
+        /// 外部复核建议的诊断：它能区分"应用自己实现了 UIA provider"和
+        /// "系统用 MSAA 转换层代理"。后者在 FrameworkId 上显示为 Win32。
+        ///
+        /// 注意：它只回答"有没有服务端实现"，**不保证有网页内容**，
+        /// 也不能单独作为排除 MSAA 的依据。
+        /// </summary>
+        internal static bool HasServerSideProvider(IntPtr hwnd)
+        {
+            try { return UiaHasServerSideProvider(hwnd); }
+            catch (Exception) { return false; }
+        }
+
         /// <summary>读一个节点的名字/角色/状态/默认动作/矩形。</summary>
         internal static Dictionary<string, object> ReadNode(MsaaRef node, List<string> errors)
         {

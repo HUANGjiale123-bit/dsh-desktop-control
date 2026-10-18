@@ -848,6 +848,7 @@ namespace Dsc
                     case "resolve_app": return CmdResolveApp(args);
                     case "launch": return CmdLaunch(args);
                     case "a11y_probe": return CmdA11yProbe(args);
+                    case "selftest_walk": return WalkSelfTest.Run();
                     default: return CmdHelp();
                 }
             }

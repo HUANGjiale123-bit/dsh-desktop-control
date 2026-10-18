@@ -52,52 +52,99 @@ namespace Dsc
         }
 
         /// <summary>
-        /// 有界遍历：返回节点、有效矩形数、截断原因。
+        /// <summary>
+        /// 有界遍历（薄适配层）。
         ///
-        /// DFS 而不是 BFS —— 实测 BFS 拿到 400 个节点只有 3 个矩形，
-        /// 因为 Chromium 的树"深而窄"，预算全花在无名容器上。
+        /// 真正的逻辑在 BoundedWalk.cs —— 它不碰 COM，所以能被 WalkSelfTest
+        /// 用假数据检验。这里只负责把 IAccessible 包装成 BoundedWalk 要的
+        /// 四个委托，并**如实保留**截断原因。
+        ///
+        /// 旧版本把遍历逻辑直接写在这里、和 COM 缠在一起，结果没法测 ——
+        /// 外部复核用纯内存复现抓到三个确定的错误：
+        ///   · 简单子元素的 Owner 是父对象，却无条件枚举它的孩子 → 重复递归
+        ///   · 永远只取 start=0 的前 64 个孩子 → 第 65 个以后消失且不报截断
+        ///   · 没有身份去重 → 环会膨胀
         /// </summary>
-        private static void WalkBounded(
-            IAccessibleShim root, List<string> errors,
-            out List<ProbeNode> nodes, out int rectCount, out string truncReason)
+        private static WalkResult WalkBounded(
+            IAccessibleShim root, List<string> errors, int maxNodes)
         {
-            nodes = new List<ProbeNode>();
-            rectCount = 0;
-            truncReason = null;
+            var identities = new Dictionary<object, string>();
+            int counter = 0;
 
-            var stack = new Stack<MsaaRef>();
-            stack.Push(new MsaaRef { Owner = root.Accessible, ChildId = 0, Depth = 0 });
-
-            const int MaxNodes = 3000;
-            const int MaxDepth = 40;
-
-            while (stack.Count > 0)
+            // 给每个节点一个稳定身份。简单子元素 = "父身份#childId"，
+            // 完整对象 = 分配一个序号（同一对象在本次遍历里复用同一个序号）。
+            // **不能按 Name + Rect 去重** —— 不同按钮可能同名，
+            // 也可能暂时拥有相同矩形。
+            Func<object, string> identity = delegate(object o)
             {
-                if (nodes.Count >= MaxNodes) { truncReason = "node_budget"; break; }
-                MsaaRef cur = stack.Pop();
-                if (cur.Depth > MaxDepth) { truncReason = truncReason ?? "depth_budget"; continue; }
+                MsaaRef r = o as MsaaRef;
+                if (r == null) return "x" + (counter++);
+                if (r.SimpleChild)
+                    return IdentityOf(r.Owner, identities, ref counter) + "#" + r.ChildId;
+                return IdentityOf(r.Owner, identities, ref counter);
+            };
 
-                var d = Msaa.ReadNode(cur, errors);
-                var n = new ProbeNode
+            return BoundedWalk.Run(
+                new MsaaRef { Owner = root.Accessible, ChildId = 0, Depth = 0 },
+                delegate(object o)
                 {
-                    Name = d["name"] as string ?? "",
-                    Role = d["role"] as string ?? "",
-                    Rect = d["rect"] as int[],
-                    HasDefaultAction = !string.IsNullOrEmpty(d["defaultAction"] as string ?? ""),
-                    Depth = cur.Depth,
-                };
-                if (n.Rect != null) rectCount++;
-                nodes.Add(n);
-
-                int obtained;
-                var kids = Msaa.ChildrenBatch(cur.Owner, 0, 64, out obtained, errors);
-                for (int ci = kids.Count - 1; ci >= 0; ci--)
+                    MsaaRef r = (MsaaRef)o;
+                    var d = Msaa.ReadNode(r, errors);
+                    return new WalkNode
+                    {
+                        Identity = identity(o),
+                        Name = d["name"] as string ?? "",
+                        Role = d["role"] as string ?? "",
+                        Rect = d["rect"] as int[],
+                        HasDefaultAction = !string.IsNullOrEmpty(d["defaultAction"] as string ?? ""),
+                    };
+                },
+                delegate(object o, int startOff, int count)
                 {
-                    kids[ci].Depth = cur.Depth + 1;
-                    stack.Push(kids[ci]);
-                }
-            }
+                    MsaaRef r = (MsaaRef)o;
+                    var page = new WalkPage();
+                    int obtained;
+                    var kids = Msaa.ChildrenBatch(r.Owner, startOff, count, out obtained, errors);
+                    page.Obtained = obtained;
+                    page.Total = -1;
+                    foreach (var k in kids) page.Children.Add(k);
+                    return page;
+                },
+                delegate(object o) { return ((MsaaRef)o).SimpleChild; },
+                maxNodes,
+                40);
         }
+
+        /** WalkResult → 旧的 ProbeNode 列表（下游代码还在用这个类型）。 */
+        private static List<ProbeNode> ToProbeNodes(WalkResult wr)
+        {
+            var list = new List<ProbeNode>();
+            for (int i = 0; i < wr.Nodes.Count; i++)
+            {
+                list.Add(new ProbeNode
+                {
+                    Name = wr.Nodes[i].Name,
+                    Role = wr.Nodes[i].Role,
+                    Rect = wr.Nodes[i].Rect,
+                    HasDefaultAction = wr.Nodes[i].HasDefaultAction,
+                    Depth = wr.Depths[i],
+                });
+            }
+            return list;
+        }
+
+        /// <summary>给一个 IAccessible 分配稳定身份（本次遍历内）。</summary>
+        private static string IdentityOf(
+            Accessibility.IAccessible obj, Dictionary<object, string> map, ref int counter)
+        {
+            if (obj == null) return "null";
+            string id;
+            if (map.TryGetValue(obj, out id)) return id;
+            id = "o" + (counter++);
+            map[obj] = id;
+            return id;
+        }
+
 
         /* 找出真正的「内容 HWND」。
          *
@@ -165,10 +212,10 @@ namespace Dsc
             int beforeMsaa = 0, beforeRect = 0;
             if (hsRoot != null && hsHr >= 0)
             {
-                List<ProbeNode> bn; int brc; string btr;
-                WalkBounded(new IAccessibleShim(hsRoot), new List<string>(), out bn, out brc, out btr);
-                beforeMsaa = bn.Count;
-                beforeRect = brc;
+                WalkResult bw = WalkBounded(
+                    new IAccessibleShim(hsRoot), new List<string>(), 800);
+                beforeMsaa = bw.UniqueCount;
+                beforeRect = bw.RectCount;
             }
             handshake["msaaBefore"] = beforeMsaa;
             handshake["rectBefore"] = beforeRect;
@@ -223,6 +270,15 @@ namespace Dsc
 
                 var rec = new Dictionary<string, object>();
                 rec["hwnd"] = cand.ToInt64();
+                {
+                    var csb2 = new System.Text.StringBuilder(256);
+                    Native.GetClassNameW(cand, csb2, csb2.Capacity);
+                    rec["className"] = csb2.ToString();
+                    uint cpid;
+                    Native.GetWindowThreadProcessId(cand, out cpid);
+                    rec["pid"] = (int)cpid;
+                    rec["uiaServerProvider"] = Msaa.HasServerSideProvider(cand);
+                }
                 rec["hr"] = "0x" + (h & 0xFFFFFFFF).ToString("X8");
                 if (r == null || h < 0)
                 {
@@ -232,14 +288,20 @@ namespace Dsc
                     continue;
                 }
 
-                List<ProbeNode> ns;
-                int rc;
-                string trunc;
-                WalkBounded(r, errors, out ns, out rc, out trunc);
+                WalkResult wr = WalkBounded(r, errors, 3000);
+                List<ProbeNode> ns = ToProbeNodes(wr);
+                int rc = wr.RectCount;
+                string trunc = wr.TruncatedBy;
 
                 rec["nodeCount"] = ns.Count;
                 rec["rectCount"] = rc;
                 rec["truncatedBy"] = trunc;
+                rec["traversalComplete"] = wr.TraversalComplete;
+                rec["duplicateEdges"] = wr.DuplicateEdges;
+                // ★ 这两个不是一回事：
+                //   traversalComplete = 当次可达范围走完了
+                //   contentStatus    = 有没有摸到"像内容"的东西
+                rec["contentStatus"] = rc > 0 ? "has_rects" : "shell_only";
                 tried.Add(rec);
 
                 // 评分：**有矩形的数量**才算数。节点多但全是容器没有意义。
@@ -419,21 +481,104 @@ namespace Dsc
                 try { rootClass = el.Current.ClassName ?? ""; } catch { }
 
                 // 三次查询，间隔递增：120ms / 600ms / 1500ms
-                int[] waits = new int[] { 120, 600, 1500 };
+                //
+                // ★ 每轮**重新取得根**，不是复用第一轮的 el。
+                //
+                // 外部复核指出：旧的退出条件 `if (n > 0) break` 让"读到 2 个
+                // 外壳节点"就退出了 —— 我文档里写的"三轮重查"实际只查了一轮。
+                // 而 n>0 根本不是成功的标准，外壳也有节点。
+                //
+                // 现在固定跑完三轮，每轮记：根的名字/类名/节点数/有矩形数。
+                // 这三组数字放在一起才有诊断价值 —— 只看一个总数看不出树在长。
+                int[] waits = new int[] { 0, 600, 1500 };
                 var rawWalker = TreeWalker.RawViewWalker;
+                var rounds = new List<Dictionary<string, object>>();
                 for (int round = 0; round < waits.Length; round++)
                 {
-                    if (round > 0) Thread.Sleep(waits[round]);
-                    int n;
+                    if (waits[round] > 0) Thread.Sleep(waits[round]);
+                    var rd = new Dictionary<string, object>();
+                    rd["atMs"] = waits[round];
                     try
                     {
-                        var found = el.FindAll(TreeScope.Descendants, Condition.TrueCondition);
-                        n = found == null ? 0 : found.Count;
+                        var root2 = AutomationElement.FromHandle(hwnd);
+                        if (root2 == null)
+                        {
+                            rd["error"] = "FromHandle null";
+                            rounds.Add(rd);
+                            counts.Add(0);
+                            continue;
+                        }
+                        try { rd["rootName"] = root2.Current.Name ?? ""; } catch { rd["rootName"] = ""; }
+                        try { rd["rootClass"] = root2.Current.ClassName ?? ""; } catch { rd["rootClass"] = ""; }
+                        // 托管 AutomationElement 没有 ProviderDescription ——
+                        // 那个属性只存在于原生的 IUIAutomationElement
+                        // （get_CurrentProviderDescription）。要拿到它得写完整的
+                        // COM 声明，这一版先缺着，用 FrameworkId 代替。
+                        // 这是已知缺口，不是"拿不到就说明没问题"。
+                        rd["provider"] = "(unavailable: managed API has no ProviderDescription)";
+                        try { rd["framework"] = root2.Current.FrameworkId ?? ""; } catch { rd["framework"] = ""; }
+                        try { rd["processId"] = root2.Current.ProcessId; } catch { rd["processId"] = 0; }
+                        try { rd["nativeHwnd"] = root2.Current.NativeWindowHandle; } catch { rd["nativeHwnd"] = 0; }
+
+                        // ── 先读"内容属性"，这一步是触发 Chromium 提升模式的关键 ──
+                        //
+                        // 外部复核的原话：Chromium 按**实际 API 使用**提升无障碍
+                        // 模式 —— 读窗口名只给 kNativeAPIs；**读网页内容属性才给
+                        // kAXModeBasic**。
+                        //
+                        // 而实测两个目标的 framework 都是 Win32（系统代理），
+                        // 说明 Chromium 自己的 provider 根本没挂上。所以这里先
+                        // 主动读一轮内容属性，看它会不会因此建树。
+                        int contentElems = 0, controlElems = 0, pattCount = 0;
+                        try
+                        {
+                            var desc = root2.FindAll(TreeScope.Descendants, Condition.TrueCondition);
+                            int lim = desc == null ? 0 : Math.Min(desc.Count, 60);
+                            for (int i = 0; i < lim; i++)
+                            {
+                                try { if (desc[i].Current.IsContentElement) contentElems++; } catch { }
+                                try { if (desc[i].Current.IsControlElement) controlElems++; } catch { }
+                                try
+                                {
+                                    var pats = desc[i].GetSupportedPatterns();
+                                    if (pats != null && pats.Length > 0) pattCount++;
+                                }
+                                catch { }
+                            }
+                        }
+                        catch (Exception e) { rd["contentProbeError"] = e.Message; }
+                        rd["contentElements"] = contentElems;
+                        rd["controlElements"] = controlElems;
+                        rd["nodeWithPatterns"] = pattCount;
+
+                        var found = root2.FindAll(TreeScope.Descendants, Condition.TrueCondition);
+                        int n = found == null ? 0 : found.Count;
+                        int withRect = 0;
+                        if (found != null)
+                        {
+                            for (int i = 0; i < found.Count && i < 400; i++)
+                            {
+                                try
+                                {
+                                    var r = found[i].Current.BoundingRectangle;
+                                    if (r.Width > 0 && r.Height > 0) withRect++;
+                                }
+                                catch { }
+                            }
+                        }
+                        rd["nodeCount"] = n;
+                        rd["withRect"] = withRect;
+                        counts.Add(n);
                     }
-                    catch (Exception e) { errors.Add("UIA 第" + (round + 1) + "次: " + e.Message); n = 0; }
-                    counts.Add(n);
-                    if (n > 0) break;
+                    catch (Exception e)
+                    {
+                        rd["error"] = e.Message;
+                        counts.Add(0);
+                        errors.Add("UIA 第" + (round + 1) + "轮: " + e.Message);
+                    }
+                    rounds.Add(rd);
                 }
+                info["rounds"] = rounds;
 
                 // ── TreeWalker 递归（对比 FindAll）──
                 //
