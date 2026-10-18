@@ -320,7 +320,18 @@ export function createDesktopToolset(options = {}) {
     NotSettable: { retry: 'giveUp', hint: '该元素不能设置值。' },
     RangeUnavailable: { retry: 'giveUp', hint: '该元素没有范围值接口。' },
     ReadOnly: { retry: 'giveUp', hint: '该元素是只读的。' },
-    Timeout: { retry: 'wait', hint: '超时。应用可能正忙，等一会再试。' },
+    Timeout: {
+      // 从 wait 改成 reobserve。
+      //
+      // helper 超时**不等于动作没发生**：可能输入已经发出去一半、点击已经
+      // 落下去，只是后续的 UIA 读取或进程退出卡住了。原来的"等一会再试"
+      // 可能让调用方把同一个输入发两遍、把同一个按钮点两次。
+      // 外部复核指出了这一点。
+      retry: 'reobserve',
+      hint:
+        '超时了 —— 但**动作可能已经发出**（输入了一半、点了一下、拖到一半）。做才' +
+        '先看界面变成什么样了，再决定要不要重做；不要直接重放原动作。',
+    },
     Busy: { retry: 'wait', hint: '另一个操作正占着桌面。等一下再试。' },
     NotFound: {
       retry: 'reobserve',

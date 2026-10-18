@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.4'
+const PLUGIN_VERSION = '2.18.5'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -903,10 +903,23 @@ function applyInner(ctx, config = {}) {
 
   const LEASE_WAIT_MS = 8000
 
-  /** 等待执行权。返回 { ok, waitedMs, holder } */
-  async function acquireLease(tool) {
+  /**
+   * 等待执行权。返回 { ok, waitedMs, holder } 或 { ok:false, cancelled:true }。
+   *
+   * ── 为什么要支持取消 ──
+   *
+   * 外部复核发现：B 在排队时被取消（exec.signal 触发），A 释放后 B **仍然
+   * 派发了点击**。宿主在工具派发前查取消，但**工具已经进入、正在插件内排队**
+   * 时的取消没人管 —— 宿主会等已开始的工具结束，不会替我们撤销鼠标输入。
+   *
+   * 所以等待循环每一轮都要看 signal；拿到锁之后还要再看一次（见 execute）。
+   */
+  async function acquireLease(tool, signal) {
     const start = performance.now()
     while (_lease) {
+      if (signal && signal.aborted) {
+        return { ok: false, cancelled: true, waitedMs: Math.round(performance.now() - start) }
+      }
       if (performance.now() - start > LEASE_WAIT_MS) {
         return {
           ok: false,
@@ -917,7 +930,11 @@ function applyInner(ctx, config = {}) {
       }
       await new Promise((r) => setTimeout(r, 40))
     }
-    _lease = { tool, at: performance.now() }
+    // 拿到锁的最后一道检查：等待期间可能刚被取消
+    if (signal && signal.aborted) {
+      return { ok: false, cancelled: true, waitedMs: Math.round(performance.now() - start) }
+    }
+    _lease = { tool, at: performance.now(), pinned: false }
     return { ok: true, waitedMs: Math.round(performance.now() - start) }
   }
 
@@ -925,11 +942,33 @@ function applyInner(ctx, config = {}) {
     _lease = null
   }
 
+  /**
+   * 把当前执行权**钉住**，不在本次调用结束时释放。
+   *
+   * 为什么需要：hold 是唯一个"动作完成了但物理状态还在"的操作 ——
+   * 按键真的按着，而 helper 进程已经退出。此时如果照常释放执行权，
+   * 另一个会话的 move/click 就能接进来，在真实桌面上变成一次拖动。
+   *
+   * 外部复核指出了这一点：hold 返回后 lease=null，而未 release。
+   * 钉住之后，直到 desktop_release 之前，任何需要执行权的操作都会被 Busy 拒绝。
+   */
+  function pinLease() {
+    if (_lease) _lease.pinned = true
+  }
+
+  /** 当前是否有一个被钉住的执行权（hold 期间）。 */
+  function isLeasePinned() {
+    return !!(_lease && _lease.pinned)
+  }
+
   /** 这些工具不碰桌面，不需要执行权（也拿不到就等，没意义）。 */
   const NO_LEASE_TOOLS = new Set([
     'desktop_list_apps',
     'desktop_off',
     'desktop_revoke_grants',
+    // release 不拿执行权：它是**恢复动作**。
+    // 外部复核指出它原本要等 8 秒才能执行 —— 而按住期间正是最需要立刻松开的时候。
+    'desktop_release',
   ])
 
   const register = (definition) => {
@@ -961,6 +1000,9 @@ function applyInner(ctx, config = {}) {
         // 这直接抵消了"动作后观察"要省下的那一轮。
         //
         // 所以只删**动作开始前就存在**的那些；动作后新登记的保留。
+        // 宿主的取消信号。工具**已经进入**之后才取消的情况由我们自己处理：
+        // 宿主会等已开始的工具结束，不会替我们撤销已经发出的鼠标输入。
+        const signal = exec && exec.signal ? exec.signal : null
         const hwndKey = args && typeof args === 'object' ? args.hwnd : undefined
         const staleShots = MUTATING_TOOLS.has(definition.name) ? snapshotShotIds(hwndKey) : null
         let leaseHeld = false
@@ -976,23 +1018,40 @@ function applyInner(ctx, config = {}) {
               // ── 先取执行权，再碰桌面 ──
               let lease = { ok: true, waitedMs: 0 }
               if (!NO_LEASE_TOOLS.has(definition.name)) {
-                lease = await span('lease', () => acquireLease(definition.name))
+                lease = await span('lease', () => acquireLease(definition.name, signal))
+                if (!lease.ok && lease.cancelled) {
+                  trace.outcome = 'cancelled'
+                  trace.errorCode = 'Cancelled'
+                  throw new Error(
+                    '这次调用在排队等待执行权时被取消了，**没有碰任何窗口**。' +
+                      '  [retry=stop] 调用方已经放弃这次操作，不要自动重试。',
+                  )
+                }
                 if (!lease.ok) {
                   trace.outcome = 'rejected'
                   trace.errorCode = 'Busy'
                   const sec = (lease.heldForMs / 1000).toFixed(1)
                   throw new Error(
                     `没拿到执行权：另一个操作（${lease.holder}）已经占用 ${sec} 秒，` +
-                      `等了 ${(lease.waitedMs / 1000).toFixed(1)} 秒仍然没释放。
-` +
+                      `等了 ${(lease.waitedMs / 1000).toFixed(1)} 秒仍然没释放。` +
                       `  **这不是故障** —— 同一时刻只允许一个操作碰桌面，` +
-                      `否则两个操作会互相踩到对方的光标和焦点。
-` +
+                      `否则两个操作会互相踩到对方的光标和焦点。` +
                       `  [retry=wait] 等一下再试。如果反复出现，说明有操作卡住了，` +
                       `用 desktop_diagnose({perf:true}) 看最近几次的耗时。`,
                   )
                 }
                 leaseHeld = true   // 只有真的拿到才标记
+              }
+
+              // 拿到锁之后、真正碰桌面前，再查最后一次取消。
+              // 等待期间用户可能已经按了停止。
+              if (signal && signal.aborted) {
+                trace.outcome = 'cancelled'
+                trace.errorCode = 'Cancelled'
+                throw new Error(
+                  '拿到执行权后发现这次调用已被取消，**没有执行任何输入**。' +
+                    '  [retry=stop] 调用方已经放弃这次操作。',
+                )
               }
 
               return await definition.execute(args, exec)
@@ -1008,7 +1067,9 @@ function applyInner(ctx, config = {}) {
               touchActivity()
               // ★ 只释放自己拿到的锁。
               //   无条件 releaseLease 会误释放别人的 —— 那比卡住更糟。
-              if (leaseHeld) releaseLease()
+              // 钉住的执行权（hold 期间）**不释放** —— 物理按键还按着。
+              // 它会在 desktop_release 里被释放。
+              if (leaseHeld && !isLeasePinned()) releaseLease()
             }
           })
         } finally {
@@ -1805,8 +1866,7 @@ function applyInner(ctx, config = {}) {
     if (rec.geomOk !== true) {
       return {
         reject:
-          `失败：截图 "${shotId}" 没有记录到有效的窗口几何，无法核对坐标是否过期。
-` +
+          `失败：截图 "${shotId}" 没有记录到有效的窗口几何，无法核对坐标是否过期。` +
           `这通常意味着截图的返回里缺了 origin/尺寸字段。请重新截一张图。`,
       }
     }
@@ -2182,6 +2242,9 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.hold(args)
       if (r.isError) throw new Error(r.text)
+      // ── 钉住执行权：按键真的按着，别的会话不能接进来 ──
+      pinLease()
+
       // ── 留下"有键按着"的记录 ──
       //
       // helper 是短进程，按下之后它就退出了，而按键状态留在系统里。
@@ -2227,12 +2290,13 @@ function applyInner(ctx, config = {}) {
     async execute(args) {
       const r = await set.tools.release(args)
       if (r.isError) throw new Error(r.text)
-      // 松开成功 —— 记录可以清了
+      // 松开成功 —— 记录可以清了，钉住的执行权也可以放了
       try {
         rmSync(pressedPath(), { force: true })
       } catch {
         /* 清不掉下次启动还会再松一次，无害 */
       }
+      if (isLeasePinned()) releaseLease()
       return { result: r.text }
     },
     presentCall: () => ({ card: 'generic', title: '松开鼠标键', kind: 'other' }),
