@@ -92,8 +92,42 @@ export function createDesktopToolset(options = {}) {
   const requestApproval =
     typeof options.requestApproval === 'function' ? options.requestApproval : null
 
-  /** 本进程内已被会话授权放行的应用。键是应用名，值是授权来源说明。 */
-  const grants = new Map()
+  /* ═══════════ 按会话分的授权 ═══════════
+   *
+   * ── 原来错在哪 ──
+   *
+   * grants 是一个全局 Map。会话 A 授权 notepad 之后，会话 B **直接就能用** ——
+   * 而"仅对当前会话有效"是我们在授权弹窗里对用户的承诺。
+   *
+   * index 那边虽然有一份 sessionGrants，但它只决定"要不要弹窗"，
+   * 真正的准入判断在**这里**。所以那份同步不了这个泄漏。
+   *
+   * ── 现在的结构 ──
+   *
+   *   grantsBySession: sessionKey -> Map<应用名, 授权来源>
+   *
+   * sessionKey 由调用方通过 options.getSessionKey() 提供。
+   * 拿不到时退化成 '__default__'（单会话模式，行为与以前一致）。
+   * 静态 allowedApps 仍是**共享**的显式预授权 —— 那是配置，不是会话行为。
+   */
+  const grantsBySession = new Map()
+  const DEFAULT_SESSION = '__default__'
+
+  function currentSessionKey() {
+    try {
+      const k = typeof options.getSessionKey === 'function' ? options.getSessionKey() : null
+      return k ? String(k) : DEFAULT_SESSION
+    } catch {
+      return DEFAULT_SESSION
+    }
+  }
+
+  /** 当前会话的授权表（按需创建）。 */
+  function grants() {
+    const k = currentSessionKey()
+    if (!grantsBySession.has(k)) grantsBySession.set(k, new Map())
+    return grantsBySession.get(k)
+  }
 
   /**
    * 当前生效的白名单 = 静态配置 ∪ 本会话已授权的。
@@ -102,7 +136,7 @@ export function createDesktopToolset(options = {}) {
    * 为空而拒绝"的矛盾（这个坑本项目踩过，见 docs/当前状态.md）。
    */
   function effectiveAllowlist() {
-    return [...staticAllowlist, ...grants.keys()]
+    return [...staticAllowlist, ...grants().keys()]
   }
 
   /** 对外暴露的名单仍是数组（静态 ∪ 已授权），供日志与展示使用。 */
@@ -446,7 +480,7 @@ export function createDesktopToolset(options = {}) {
     }
 
     // ② 本会话已授权：同一个应用不重复问。
-    if (grants.has(base)) {
+    if (grants().has(base)) {
       await afterAuthorize(toolName, base)
       return { ok: true, window: w, via: 'session' }
     }
@@ -495,7 +529,7 @@ export function createDesktopToolset(options = {}) {
       }
     }
 
-    grants.set(base, 'session')
+    grants().set(base, 'session')
     await afterAuthorize(toolName, base)
     return { ok: true, window: w, via: 'session-new' }
   }
@@ -548,7 +582,7 @@ export function createDesktopToolset(options = {}) {
       await afterAuthorize(toolName, appBase)
       return { ok: true }
     }
-    if (grants.has(appBase)) {
+    if (grants().has(appBase)) {
       await afterAuthorize(toolName, appBase)
       return { ok: true }
     }
@@ -576,7 +610,7 @@ export function createDesktopToolset(options = {}) {
       }
     }
 
-    grants.set(appBase, 'session')
+    grants().set(appBase, 'session')
     await afterAuthorize(toolName, appBase)
     return { ok: true }
   }
@@ -949,7 +983,7 @@ export function createDesktopToolset(options = {}) {
         ].filter(Boolean).join('  '))
 
       const eff = effectiveAllowlist()
-      const grantRows = [...grants.keys()]
+      const grantRows = [...grants().keys()]
 
       // 文案必须反映**真实**的准入规则，否则用户会按错的模型操作。
       // 早期版本写"白名单为空——只能观察"，那在只有静态白名单时是对的；
@@ -1671,11 +1705,18 @@ export function createDesktopToolset(options = {}) {
     /** 当前生效名单 = 静态 ∪ 本会话已授权。展示与日志用这个。 */
     effectiveAllowlist,
     /** 本会话已授权的应用（应用名 → 授权来源）。 */
-    grants,
+    // 诊断只看**当前会话**的授权，不是全进程的 —— 否则会显示别人的
+    get grants() {
+      return grants()
+    },
+    // 全进程的所有会话（只用于统计"有几个会话授权过"）
+    get allGrantsBySession() {
+      return grantsBySession
+    },
     /** 撤销本会话的全部授权（会话结束、或用户主动收回时调用）。 */
     revokeGrants() {
-      const n = grants.size
-      grants.clear()
+      const n = grants().size
+      grants().clear()
       return n
     },
     shotDir,

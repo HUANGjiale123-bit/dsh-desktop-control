@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.5'
+const PLUGIN_VERSION = '2.18.6'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -623,6 +623,20 @@ function applyInner(ctx, config = {}) {
     // 把 span 注进 toolset：它自己**不维护**当前 trace（那会在并发下串号），
     // 只负责在自己认为值得计时的边界上调用这个函数。
     span,
+    // ── 会话身份 ──
+    //
+    // 从 ALS 里取（execute 时塞进去的 exec.agent）。取不到时返回 null，
+    // toolset 会退化成单会话模式 —— 那是测试/独立运行的路径。
+    //
+    // 必须按**会话**分授权：我们在弹窗里承诺了"仅对当前会话有效"。
+    getSessionKey: () => {
+      const st = als.getStore()
+      const a = st && st.agent
+      if (!a) return null
+      // agent.id 与 agent.session.id 在宿主里是相等的；用 session.id 更直观
+      const sid = (a.session && a.session.id) || a.id
+      return sid ? String(sid) : null
+    },
     requestApproval,
     // 变更性操作放行后自动确保指示层在跑——把"看得见"绑到 computer use
     // 状态本身，而不是绑到"助手记得开提示"。
@@ -2651,7 +2665,13 @@ function applyInner(ctx, config = {}) {
       lines.push('')
       lines.push('== 准入 ==')
       lines.push('  静态白名单: ' + (set.allowlist.length ? set.allowlist.join(', ') : '（空）'))
-      lines.push('  会话已授权: ' + ([...set.grants.keys()].join(', ') || '（无）'))
+      {
+        const g = [...set.grants.keys()]
+        const all = set.allGrantsBySession
+        const others = all ? [...all.keys()].filter((k) => k !== (typeof set.currentSessionKey === 'function' ? set.currentSessionKey() : null)).length : 0
+        lines.push('  本会话已授权: ' + (g.join(', ') || '（无）'))
+        if (others > 0) lines.push('  其它会话授权: ' + others + ' 个会话（互相隔离，不能借用）')
+      }
       lines.push('  生效名单  : ' + (set.effectiveAllowlist().join(', ') || '（空）'))
       lines.push('')
       // 判据要说清楚：`stage === 'probe-only'` 且没有 error 时，闸门是好的 ——
