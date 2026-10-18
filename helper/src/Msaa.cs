@@ -46,6 +46,10 @@ namespace Dsc
         public int ChildId;          // CHILDID_SELF = 0，或 provider 返回的真实 childId
         public bool SimpleChild;
         public int Depth;
+        /** 原始表示：object / int。 */
+        public string RawKind = "object";
+        /** 解析结果：object / simple / unresolved。 */
+        public string ResolvedKind = "object";
     }
 
     internal static class Msaa

@@ -169,6 +169,49 @@ namespace Dsc
             }
 
             _lines.Add("");
+            _lines.Add("── 6. 整数孩子被解析成对象后，孙子节点必须读到 ──");
+            {
+                // 外部复核对这一条的要求："根枚举出整数 ID；该 ID 解析成一个
+                // 带孙节点的对象；最终应读到孙节点。"
+                //
+                // 守的是"只改了诊断没改遍历"那个错误：诊断里 promoted++ 看起来
+                // 是对的，但对象没被替换进遍历，孙子节点就永远读不到。
+                //
+                // 这里用 isSimpleChild=false 表示"它已经被 get_accChild 解析成
+                // 完整对象" —— 遍历器因此继续展开，孙节点就能读到。
+                var grandchild = new FakeNode { Id = "grandchild", Name = "孙" };
+                var promoted = new FakeNode { Id = "promoted", Name = "提升后的对象" };
+                promoted.Kids.Add(grandchild);
+                var root = new FakeNode { Id = "introot", Name = "根" };
+                root.Kids.Add(promoted);
+
+                var r = BoundedWalk.Run(
+                    root,
+                    delegate(object o)
+                    {
+                        FakeNode f = (FakeNode)o;
+                        return new WalkNode { Identity = f.Id, Name = f.Name, Role = "10" };
+                    },
+                    delegate(object o, int start, int count)
+                    {
+                        FakeNode f = (FakeNode)o;
+                        var page = new WalkPage();
+                        page.Total = f.Kids.Count;
+                        for (int i = start; i < f.Kids.Count && page.Children.Count < count; i++)
+                        {
+                            page.Children.Add(f.Kids[i]);
+                            page.Obtained++;
+                        }
+                        return page;
+                    },
+                    delegate(object o) { return ((FakeNode)o).Simple; },
+                    3000, 40);
+
+                if (r.UniqueCount == 3) Ok("读到 3 个节点（根 + 提升的对象 + 孙）");
+                else Bad(string.Format("读到 {0} 个节点，应该是 3 —— 孙子节点丢了", r.UniqueCount));
+            }
+
+            _lines.Add("");
             Console.WriteLine(string.Join("\n", _lines.ToArray()));
             Console.WriteLine();
             Console.WriteLine("══════════════════════════════");

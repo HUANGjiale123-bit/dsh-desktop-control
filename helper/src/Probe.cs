@@ -52,6 +52,53 @@ namespace Dsc
         }
 
         /// <summary>
+        private static bool IsAction(int role)
+            {
+                switch (role)
+                {
+                    case 30:  // Link
+                    case 34:  // ListItem（可选中）
+                    case 37:  // PageTab
+                    case 43:  // PushButton
+                    case 44:  // CheckButton
+                    case 45:  // RadioButton
+                    case 46:  // ComboBox
+                    case 47:  // DropList
+                    case 52:  // SpinButton
+                    case 56:  // ButtonDropDown
+                    case 57:  // ButtonMenu
+                    case 62:  // SplitButton
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        private static bool IsContent(int role)
+            {
+                switch (role)
+                {
+                    case 15:  // Document
+                    case 28:  // Row
+                    case 29:  // Cell
+                    case 30:  // Link
+                    case 33:  // List
+                    case 34:  // ListItem
+                    case 40:  // Graphic
+                    case 41:  // StaticText
+                    case 42:  // Text
+                    case 43:  // PushButton
+                    case 44:  // CheckButton
+                    case 45:  // RadioButton
+                    case 46:  // ComboBox
+                    case 47:  // DropList
+                    case 54:  // Animation
+                    case 61:  // Clock
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+
         /// <summary>
         /// 有界遍历（薄适配层）。
         ///
@@ -430,31 +477,46 @@ namespace Dsc
 
             // ── coverage 不能再说"full" ──
             //
-            // 外部复核的原话："contentStatus=has_rects 只能表明有面积，
-            // 不表明已取得内容。" 旧逻辑里"有矩形 + 无错误 = full"，
-            // 而外壳（标题栏/菜单/IME）也有矩形 —— 于是外壳被标成完整。
+            // ── 数值表修过一次错 ──
             //
-            // 现在分三档，且明确区分"遍历完"和"拿到了内容"：
-            //   no_content     没有有效矩形
-            //   shell_only     有矩形但角色全是容器/外壳，没有可交互候选
-            //   has_candidates 出现了像按钮/链接/文本这类细粒度元素
-            string coverage;
-            int interactive = 0;
+            // 上一版注释写 "42=LINK、41=TEXT"，**两个都错了**。
+            // 官方 AccessibleRole 枚举是：
+            //
+            //   Link       30      StaticText 41      Text       42
+            //   ListItem   34      PushButton 43      CheckButton 44
+            //   RadioButton 45     ComboBox   46      DropList   47
+            //
+            // 用错表的后果很具体：**真正的链接漏计，而静态文字反而被算成
+            // 可交互** —— 只有链接的页面会被说成 shell_only，只有静态文字的
+            // 页面会被说成 has_candidates。两个方向都错。
+            //
+            // ── 而且这两个概念要分开 ──
+            //
+            //   contentEvidence : 这块区域**有内容**（文字、列表项、图形都算）
+            //   actionCandidates: 有**可操作的**元素（按钮、链接、复选框…）
+            //
+            // "没有 actionCandidates"不能推出"只是外壳" —— 一段纯文字页面
+            // 也有内容。
+            int contentEvidence = 0;
+            int actionCandidates = 0;
             foreach (var n in nodes)
             {
                 if (n.Rect == null) continue;
                 int role;
                 if (!int.TryParse(n.Role, out role)) continue;
-                // 43=PUSHBUTTON 42=LINK 41=TEXT 44=CHECKBUTTON 45=RADIOBUTTON
-                // 10=CLIENT 9=WINDOW 是容器，不算候选
-                if (role == 43 || role == 42 || role == 44 || role == 45 ||
-                    role == 41 || role == 46 || role == 47)
-                    interactive++;
+                if (IsAction(role)) actionCandidates++;
+                if (IsContent(role)) contentEvidence++;
             }
+
+            // coverage 三档，但判据换了：
+            //   外壳 = 有矩形、但**一个内容证据都没有**（只有容器/标题栏/菜单）
+            //   有内容 = 至少有一个内容证据；其中有没有可操作元素另记
+            string coverage;
             if (useful == 0) coverage = "no_content";
-            else if (interactive == 0) coverage = "shell_only";
-            else coverage = "has_candidates";
-            result["interactiveCount"] = interactive;
+            else if (contentEvidence == 0) coverage = "shell_only";
+            else coverage = "has_content";
+            result["contentEvidence"] = contentEvidence;
+            result["actionCandidates"] = actionCandidates;
             result["traversalComplete"] = bestComplete;
             result["truncatedBy"] = bestTrunc;
 
