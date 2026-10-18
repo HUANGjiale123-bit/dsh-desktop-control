@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.10'
+const PLUGIN_VERSION = '2.18.11'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -2823,5 +2823,36 @@ function applyInner(ctx, config = {}) {
       try { child.kill() } catch { }
     }
     liveOverlays.clear()
+    // 定时器也要停：否则卸载之后它还在跑，每次触发都往一个已经销毁的
+    // 插件里写日志（而且 children 已经空了，它只是空转）。
+    if (_idleTimer) {
+      clearInterval(_idleTimer)
+      _idleTimer = null
+    }
   })
+
+  // ── 单个会话结束时撤销它的授权 ──
+  //
+  // 这和上面的 dispose 不同：dispose 是整个插件卸载，而这个只是**某一个
+  // 会话关掉了**，插件和别的会话都还活着。
+  //
+  // 不处理的话那个会话的授权表会一直留在内存里 —— 小泄漏，但更要紧的是
+  // **语义错**："仅对当前会话有效"里的那个会话已经不存在了。
+  //
+  // 外部复核还提了一个实在的竞态：授权弹窗发出后、用户点"允许"之前，
+  // 会话被关掉了 —— 那个"允许"如果照常写进去，就是给一个死会话发授权。
+  // 所以 toolset 那边写入前会复查 isSessionDisposed。
+  try {
+    ctx.on?.('session/disposed', (session) => {
+      const sid = session && (session.id || (session.session && session.session.id))
+      if (!sid) return
+      set.revokeSession(sid)
+      ctx.logger?.info?.(`[desktop-control] 会话 ${sid} 已结束，撤销其授权`)
+    })
+  } catch (e) {
+    ctx.logger?.warn?.(
+      `[desktop-control] 无法监听 session/disposed（${e?.message ?? e}）—— ` +
+        `会话结束后授权不会被撤销`,
+    )
+  }
 }

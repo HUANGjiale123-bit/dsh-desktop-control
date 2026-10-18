@@ -317,7 +317,18 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "24. 截图文件必须有保留上限（用户问出来的）"
+head_ "24. 会话销毁：撤销授权 + 挡住"迟到的同意""
+if [ -n "$NODE" ]; then
+  if "$NODE" tools/test-session-disposed.mjs >/dev/null 2>&1; then
+    ok "revokeSession 生效 / 写入前复查 / dispose 清定时器"
+  else
+    bad "会话销毁没处理干净 —— 单独跑 node tools/test-session-disposed.mjs"
+  fi
+else
+  echo "  （跳过：找不到 node）"
+fi
+
+head_ "25. 截图文件必须有保留上限（用户问出来的）"
 # 用户原话："你每次截图用完后会删掉吗？不删掉的话会占内存吧？"
 # 实测：67 个文件 32 MB，从不删除。
 if [ -n "$NODE" ]; then
@@ -330,7 +341,7 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "25. 改变布局的动作必须让旧截图坐标失效"
+head_ "26. 改变布局的动作必须让旧截图坐标失效"
 # 滚轮滚动后，同一张截图上的坐标全部指向别处。不作废的话旧 shotId 会
 # 通过全部检查（窗口没移、没改大小、没过期），然后点到完全不同位置。
 if [ -n "$NODE" ]; then
@@ -343,7 +354,7 @@ else
   echo "  （跳过：找不到 node）"
 fi
 
-head_ "26. helper 命令行行为（第三方反馈的三个 bug 的回归）"
+head_ "27. helper 命令行行为（第三方反馈的三个 bug 的回归）"
 # 这三个不是崩溃，而是【静默的错误语义】，只能靠行为断言守住：
 #   stop 是查询却有写副作用、press_key 把窗口句柄当按键回显、
 #   --timeout 承诺了自动消失但根本没实现。

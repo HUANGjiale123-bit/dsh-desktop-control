@@ -122,6 +122,34 @@ export function createDesktopToolset(options = {}) {
     }
   }
 
+  /* ── 已结束的会话 ──
+   *
+   * 外部复核的要求："dispose 取消该实例的排队请求、清授权和引用，
+   * **不能只删 Map 却让在途审批回来重新写入**。"
+   *
+   * 那个竞态是真的：
+   *
+   *   授权弹窗发出 → 会话被关掉 → 用户点了"允许" → 写进 grants
+   *   → 一个**已经不存在的会话**留下了授权，而且没人会来清它
+   *
+   * 所以销毁时记一笔，之后任何写入都先查这个集合。
+   * 会话 ID 不会被复用，所以这些记录可以留到进程结束。
+   */
+  const disposedSessions = new Set()
+
+  /** 会话结束了：撤销它的授权，并拒绝后续任何写入。 */
+  function revokeSession(sessionKey) {
+    const k = sessionKey ? String(sessionKey) : null
+    if (!k) return
+    disposedSessions.add(k)
+    grantsBySession.delete(k)
+  }
+
+  /** 这个会话是不是已经结束了。 */
+  function isSessionDisposed(sessionKey) {
+    return sessionKey ? disposedSessions.has(String(sessionKey)) : false
+  }
+
   /** 当前会话的授权表（按需创建）。 */
   function grants() {
     const k = currentSessionKey()
@@ -529,6 +557,17 @@ export function createDesktopToolset(options = {}) {
       }
     }
 
+    // ── 写之前复查：会话可能在等待授权期间就被关掉了 ──
+    //
+    // 不查的话，一个已经不存在的会话会留下永久授权，而且没人会来清。
+    const _k = currentSessionKey()
+    if (isSessionDisposed(_k)) {
+      return {
+        allowed: false,
+        reason: '这个会话已经结束了 —— 授权作废。请在新的会话里重新授权。',
+        deniedBy: 'session-disposed',
+      }
+    }
     grants().set(base, 'session')
     await afterAuthorize(toolName, base)
     return { ok: true, window: w, via: 'session-new' }
@@ -610,6 +649,14 @@ export function createDesktopToolset(options = {}) {
       }
     }
 
+    const _k2 = currentSessionKey()
+    if (isSessionDisposed(_k2)) {
+      return {
+        allowed: false,
+        reason: '这个会话已经结束了 —— 授权作废。请在新的会话里重新授权。',
+        deniedBy: 'session-disposed',
+      }
+    }
     grants().set(appBase, 'session')
     await afterAuthorize(toolName, appBase)
     return { ok: true }
@@ -1120,7 +1167,19 @@ export function createDesktopToolset(options = {}) {
           warn +
           `窗口 ${hwnd} 截图已保存：${r.filepath}\n` +
           `尺寸 ${r.width}x${r.height}，桌面原点 (${r.originX},${r.originY})，坐标空间 ${r.coords}。\n` +
-          `若要点图中某点 (ix,iy)，桌面坐标即 (${r.originX}+ix, ${r.originY}+iy)。`,
+          `若要点图中某点 (ix,iy)，桌面坐标即 (${r.originX}+ix, ${r.originY}+iy)。\n` +
+          // ── 缩放警告 ──
+          //
+          // 实测踩到的坑：截图 2226x1329，但模型看到的预览被前端缩到 1680x1003。
+          // 模型按**看到的**画面目测坐标，工具按**原图**算，于是每次都偏
+          // —— 偏的倍率就是缩放比。表现是"点了，但点到空白/别的元素"，
+          // 而日志里完全看不出问题（坐标合法、落在正确窗口、动作已发出）。
+          //
+          // 工具不知道前端把图缩到了多少，所以只能把**原图尺寸**说清楚，
+          // 并提醒按预览估坐标时要换算。
+          `⚠ 这张图你看到的多半是**缩放后的预览**（前端会缩到合适大小）。` +
+          `如果按预览目测坐标，先按「预览宽 ÷ ${r.width}」换算，` +
+          `或者先用 desktop_whatis 核对那个坐标下是不是你要的元素。`,
       }
     },
 
@@ -1709,6 +1768,9 @@ export function createDesktopToolset(options = {}) {
     get grants() {
       return grants()
     },
+    // 会话结束时调用它：撤销授权 + 拒绝后续写入
+    revokeSession,
+    isSessionDisposed,
     // 全进程的所有会话（只用于统计"有几个会话授权过"）
     get allGrantsBySession() {
       return grantsBySession
