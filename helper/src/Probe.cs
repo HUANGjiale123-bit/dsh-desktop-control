@@ -149,26 +149,34 @@ namespace Dsc
             result["pid"] = (int)pid;
             result["className"] = cls;
 
-            // ── Chromium 辅助技术握手（在查 UIA 之前）──
+            // ── Chromium 辅助技术握手 ──
             //
-            // 新版 Chromium 检测到辅助技术才启用完整无障碍树。只读 UIA
-            // 而不做任何"被辅助技术访问"的动作，可能永远只拿到 Window + Pane。
-            //
-            // 这里试两件不注入的事：
-            //   ① 对象 ID 1 的兼容查询（Chromium 历史握手对象）
-            //   ② MSAA 的 OBJID_CLIENT 根查询（本身就是一次无障碍访问）
-            // 结果只记进诊断，不作为成败判据 —— 外部复核明确说
-            // "返回失败不代表握手未触发"。
+            // 完整流程：挂 OUTOFCONTEXT 事件钩子 → 泵消息 → 收到
+            // EVENT_SYSTEM_ALERT(idObject=1) 时用 AccessibleObjectFromEvent 响应
+            // → 之后重新取树。**不注入 DLL，钩子只绑目标 PID。**
             var handshake = new Dictionary<string, object>();
             handshake["compatHr"] = "0x" + (Msaa.TryCompatHandshake(hwnd) & 0xFFFFFFFF).ToString("X8");
             int hsHr;
             var hsRoot = Msaa.OpenClient(hwnd, out hsHr);
             handshake["msaaRootHr"] = "0x" + (hsHr & 0xFFFFFFFF).ToString("X8");
             handshake["msaaRootOk"] = (hsRoot != null);
+
+            // 握手前的节点数：拿它和握手后对比，才能说"握手有没有用"
+            int beforeMsaa = 0, beforeRect = 0;
+            if (hsRoot != null && hsHr >= 0)
+            {
+                List<ProbeNode> bn; int brc; string btr;
+                WalkBounded(new IAccessibleShim(hsRoot), new List<string>(), out bn, out brc, out btr);
+                beforeMsaa = bn.Count;
+                beforeRect = brc;
+            }
+            handshake["msaaBefore"] = beforeMsaa;
+            handshake["rectBefore"] = beforeRect;
+
+            handshake["events"] = A11yHandshake.Run(hwnd, pid, 700);
             result["handshake"] = handshake;
 
-            // 握手之后等一下，让 provider 有机会建树
-            Thread.Sleep(200);
+            Thread.Sleep(250);
 
             // ── UIA：Raw View + 多次重查 ──
             result["uia"] = ProbeUia(hwnd, errors);
@@ -249,6 +257,11 @@ namespace Dsc
             }
 
             msaa["tried"] = tried;
+
+            // 握手前后的对比：这是判断"握手有没有用"的唯一依据
+            handshake["msaaAfter"] = bestNodeCount;
+            handshake["rectAfter"] = bestRectCount;
+            handshake["helped"] = (bestRectCount > beforeRect) || (bestNodeCount > beforeMsaa);
             msaa["chosenHwnd"] = bestHwnd.ToInt64();
             msaa["contentHwndCount"] = contentHwnds.Count;
             msaa["hr"] = "0x" + (rootHr & 0xFFFFFFFF).ToString("X8");
@@ -421,6 +434,44 @@ namespace Dsc
                     counts.Add(n);
                     if (n > 0) break;
                 }
+
+                // ── TreeWalker 递归（对比 FindAll）──
+                //
+                // FindAll(Descendants) 依赖 provider 实现；某些版本会返回很浅的
+                // 结果而 TreeWalker 逐层 GetFirstChild 能走得更深。
+                // 两条路都试，把数量都记下来 —— 差异本身就是诊断信息。
+                int walkerTotal = 0;
+                int walkerWithRect = 0;
+                try
+                {
+                    var queue = new Queue<AutomationElement>();
+                    queue.Enqueue(el);
+                    int guard = 0;
+                    while (queue.Count > 0 && guard < 5000)
+                    {
+                        guard++;
+                        var cur2 = queue.Dequeue();
+                        AutomationElement ch = null;
+                        try { ch = rawWalker.GetFirstChild(cur2); } catch { }
+                        int sib = 0;
+                        while (ch != null && sib < 200)
+                        {
+                            sib++;
+                            walkerTotal++;
+                            try
+                            {
+                                var rr = ch.Current.BoundingRectangle;
+                                if (rr.Width > 0 && rr.Height > 0) walkerWithRect++;
+                            }
+                            catch { }
+                            queue.Enqueue(ch);
+                            try { ch = rawWalker.GetNextSibling(ch); } catch { break; }
+                        }
+                    }
+                }
+                catch (Exception e) { errors.Add("UIA TreeWalker: " + e.Message); }
+                info["walkerTotal"] = walkerTotal;
+                info["walkerWithRect"] = walkerWithRect;
 
                 // 前几个节点（用 Raw View 走一遍，看真实子树长什么样）
                 try

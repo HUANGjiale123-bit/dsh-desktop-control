@@ -178,7 +178,25 @@ SuYou 有 71 个矩形，但前 40 个节点里只有 2 个 —— 因为 DFS �
 
 ---
 
-## 八、下一步
+## 八、握手试过了，不奏效
+
+完整实现了外部复核描述的那套：
+
+```
+SetWinEventHook(WINEVENT_OUTOFCONTEXT，绑目标 PID)
+  + PeekMessage 泵消息 700ms
+  + 收到 EVENT_SYSTEM_ALERT(idObject=1) 时 AccessibleObjectFromEvent 响应
+  + 重新取树
+```
+
+**两个目标都收到 0 个事件，握手前后树大小完全没变。**
+FindAll 和 TreeWalker 结果也一致，所以不是遍历方式的问题。
+
+诚实结论：**模拟 AT 客户端不足以让 Chromium 建树。**
+
+问题已整理成 docs/问题-Chromium无障碍拿不到元素.md，交给外部判断哪条路还有希望。
+
+## 九、下一步
 
 ```
 ① 实现 SetWinEventHook 握手（helper 里建消息循环 + 超时）

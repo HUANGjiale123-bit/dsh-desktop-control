@@ -85,6 +85,7 @@ echo "编译 dsc.exe ..."
     'src\Activate.cs' \
     'src\Launcher.cs' \
     'src\Msaa.cs' \
+    'src\A11yHandshake.cs' \
     'src\Probe.cs'
 
 echo
