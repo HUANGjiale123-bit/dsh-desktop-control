@@ -118,10 +118,32 @@ namespace Dsc
         /// 注意：它只回答"有没有服务端实现"，**不保证有网页内容**，
         /// 也不能单独作为排除 MSAA 的依据。
         /// </summary>
-        internal static bool HasServerSideProvider(IntPtr hwnd)
+        internal static Dictionary<string, object> HasServerSideProvider(IntPtr hwnd)
         {
-            try { return UiaHasServerSideProvider(hwnd); }
-            catch (Exception) { return false; }
+            // ── 三态，不是真假 ──
+            //
+            // 旧实现 `catch (Exception) { return false; }` 把"API 返回 false"
+            // 和"调用抛异常"混成一个字：False。外部复核指出这一点之后，
+            // 我意识到那个 False 根本不能当证据用。
+            //
+            // 注意：不假装这个 BOOL API 有 HRESULT 成败语义，
+            // 也不假定 GetLastError 一定有文档保证的含义。
+            var d = new Dictionary<string, object>();
+            try
+            {
+                bool v = UiaHasServerSideProvider(hwnd);
+                d["status"] = "returned";
+                d["value"] = v;
+            }
+            catch (Exception e)
+            {
+                d["status"] = "exception";
+                d["value"] = null;
+                d["exception"] = e.GetType().Name;
+                d["hresult"] = "0x" + (e.HResult & 0xFFFFFFFF).ToString("X8");
+                d["message"] = e.Message;
+            }
+            return d;
         }
 
         /// <summary>读一个节点的名字/角色/状态/默认动作/矩形。</summary>
@@ -186,30 +208,75 @@ namespace Dsc
         /// start 是**枚举偏移**，不是 childId。这是最容易搞错的一处：
         /// 把下标当 childId 传回父对象会读到别的元素，而且不会报错。
         /// </summary>
-        internal static List<MsaaRef> ChildrenBatch(
-            IAccessible parent, int start, int count, out int obtained, List<string> errors)
+        /// <summary>
+        /// 一次枚举的完整结果。
+        ///
+        /// ── 为什么不能只返回列表 ──
+        ///
+        /// 外部复核指出：旧实现失败时只往 errors 加一句字串、返回空列表，
+        /// 而调用方把"空列表"当成"正常枚举结束" —— 于是遍历器报
+        /// TraversalComplete=true，实际是失败被吞了。
+        ///
+        /// 他这个判断用纯内存复现验证过：模拟失败契约得到
+        /// `errors=1, TraversalComplete=true, TruncatedBy=null`。
+        /// **"走完"这个标志因此不可靠。**
+        /// </summary>
+        internal sealed class EnumResult
         {
-            obtained = 0;
-            var result = new List<MsaaRef>();
-            if (start < 0 || count < 1 || count > 64) return result;
+            public List<MsaaRef> Children = new List<MsaaRef>();
+            public int Obtained;
+            public int Hr;                 // AccessibleChildren 的原始返回值
+            public bool Failed;            // 真正的失败（hr < 0 或非法数量）
+            public string FailReason;      // 人看的失败原因，非空即失败
+        }
+
+        internal static EnumResult ChildrenBatch(
+            IAccessible parent, int start, int count, List<string> errors)
+        {
+            var r = new EnumResult();
+            if (start < 0 || count < 1 || count > 64)
+            {
+                r.Failed = true;
+                r.FailReason = "bad_range";
+                return r;
+            }
 
             object[] values = new object[count];
-            int hr = AccessibleChildren(parent, start, count, values, out obtained);
+            int obtained;
+            int hr;
+            try
+            {
+                hr = AccessibleChildren(parent, start, count, values, out obtained);
+            }
+            catch (Exception e)
+            {
+                r.Failed = true;
+                r.FailReason = "exception:" + e.GetType().Name;
+                r.Hr = unchecked((int)0x80004005);
+                return r;
+            }
+            r.Hr = hr;
+            r.Obtained = obtained;
 
             // S_FALSE（=1）表示"拿到了但没拿满"，**仍然有有效数据**。
             // 只有真正的失败（hr < 0）才该放弃。
             if (hr < 0)
             {
-                errors.Add("AccessibleChildren hr=0x" + hr.ToString("X8"));
-                obtained = 0;
-                return result;
+                r.Failed = true;
+                r.FailReason = "hr=0x" + hr.ToString("X8");
+                r.Obtained = 0;
+                errors.Add("AccessibleChildren " + r.FailReason);
+                return r;
             }
             if (obtained < 0 || obtained > count)
             {
+                r.Failed = true;
+                r.FailReason = "bad_obtained:" + obtained;
+                r.Obtained = 0;
                 errors.Add("AccessibleChildren 返回了非法数量 " + obtained);
-                obtained = 0;
-                return result;
+                return r;
             }
+            var result = r.Children;
 
             for (int i = 0; i < obtained; i++)
             {
@@ -233,7 +300,7 @@ namespace Dsc
                 errors.Add("未知的 MSAA 子元素类型: " +
                     (values[i] == null ? "null" : values[i].GetType().Name));
             }
-            return result;
+            return r;
         }
 
         /// <summary>子节点数量。provider 卡住时这里也可能抛，交给上层超时。</summary>

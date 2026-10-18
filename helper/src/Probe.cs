@@ -103,11 +103,18 @@ namespace Dsc
                 {
                     MsaaRef r = (MsaaRef)o;
                     var page = new WalkPage();
-                    int obtained;
-                    var kids = Msaa.ChildrenBatch(r.Owner, startOff, count, out obtained, errors);
-                    page.Obtained = obtained;
+                    // ★ 枚举失败必须**传进 WalkPage**。
+                    //
+                    // 旧实现只把成功时的孩子复制过去，失败时 page 是空白的 ——
+                    // 遍历器看到 Obtained=0 就当成"这一页空了 = 枚举结束"，
+                    // 于是把失败报成 TraversalComplete=true。
+                    // 外部复核用纯内存复现验证过这个契约。
+                    var er = Msaa.ChildrenBatch(r.Owner, startOff, count, errors);
+                    page.Obtained = er.Obtained;
                     page.Total = -1;
-                    foreach (var k in kids) page.Children.Add(k);
+                    if (er.Failed) page.FailReason = er.FailReason;
+                    if (er.Children != null)
+                        foreach (var k in er.Children) page.Children.Add(k);
                     return page;
                 },
                 delegate(object o) { return ((MsaaRef)o).SimpleChild; },
@@ -260,6 +267,9 @@ namespace Dsc
             int bestNodeCount = 0;
             int bestRectCount = 0;
             List<ProbeNode> bestNodes = null;
+            string bestTrunc = null;
+            bool bestComplete = false;
+            int bestDup = 0;
 
             foreach (var cand in candidates)
             {
@@ -277,7 +287,8 @@ namespace Dsc
                     uint cpid;
                     Native.GetWindowThreadProcessId(cand, out cpid);
                     rec["pid"] = (int)cpid;
-                    rec["uiaServerProvider"] = Msaa.HasServerSideProvider(cand);
+                    var hsp = Msaa.HasServerSideProvider(cand);
+                    rec["uiaServerProvider"] = hsp;
                 }
                 rec["hr"] = "0x" + (h & 0xFFFFFFFF).ToString("X8");
                 if (r == null || h < 0)
@@ -315,10 +326,44 @@ namespace Dsc
                     bestNodeCount = ns.Count;
                     bestRectCount = rc;
                     bestNodes = ns;
+                    bestTrunc = trunc;
+                    bestComplete = wr.TraversalComplete;
+                    bestDup = wr.DuplicateEdges;
                 }
             }
 
             msaa["tried"] = tried;
+
+            // ── 每个候选的独立诊断（不按矩形数淘汰）──
+            //
+            // 外部复核："内容根不能再因矩形少而被跳过"。所以顶层和每个
+            // 内容窗口都记一份：根角色/名称/childCount、第一页是对象还是
+            // 整数孩子、整数孩子能不能 get_accChild 拿到独立对象、IA2。
+            var perCandidate = new List<Dictionary<string, object>>();
+            foreach (var c in candidates)
+            {
+                try { perCandidate.Add(PointQuery.DiagnoseCandidate(c, errors)); }
+                catch (Exception e) { errors.Add("候选诊断 " + c.ToInt64() + ": " + e.Message); }
+            }
+            msaa["candidates"] = perCandidate;
+
+            // ── 点查询 ──
+            //
+            // 外部复核对这条的判据：**点查询得到细元素而根遍历得不到 →
+            // 优先修导航入口**；两者都只有外壳才算真的没有内容。
+            // 它比"根遍历有没有元素"硬，因为它绕过了我的遍历代码。
+            Native.RECT wrect;
+            if (Native.GetWindowRect(hwnd, out wrect))
+            {
+                try
+                {
+                    int w = wrect.Right - wrect.Left;
+                    int h = wrect.Bottom - wrect.Top;
+                    result["pointQuery"] = PointQuery.Run(hwnd, wrect.Left, wrect.Top, w, h, errors);
+                }
+                catch (Exception e) { errors.Add("点查询: " + e.Message); }
+            }
+
 
             // 握手前后的对比：这是判断"握手有没有用"的唯一依据
             handshake["msaaAfter"] = bestNodeCount;
@@ -331,11 +376,18 @@ namespace Dsc
             msaa["hr"] = "0x" + (rootHr & 0xFFFFFFFF).ToString("X8");
             msaa["hrOk"] = rootHr >= 0;
 
+            // ── 保留选中候选的真实截断原因 ──
+            //
+            // 旧代码在这里把 truncReason 设成 null、把 truncatedBy 输出 null，
+            // 然后靠"有矩形且无错误"给出 coverage=full —— 外壳也能被标成完整。
+            // 外部复核点名了这两处（Probe.cs 335/338、381-382）。
             var nodes = bestNodes ?? new List<ProbeNode>();
-            string truncReason = null;
+            string truncReason = bestTrunc;
             msaa["nodeCount"] = bestNodeCount;
             msaa["rectCount"] = bestRectCount;
-            msaa["truncatedBy"] = null;
+            msaa["truncatedBy"] = bestTrunc;
+            msaa["traversalComplete"] = bestComplete;
+            msaa["duplicateEdges"] = bestDup;
 
             // ── IA2 能力探测（只探不调）──
             var ia2 = new Dictionary<string, object>();
@@ -376,10 +428,35 @@ namespace Dsc
             int useful = 0;
             foreach (var n in nodes) if (n.Rect != null) useful++;
 
+            // ── coverage 不能再说"full" ──
+            //
+            // 外部复核的原话："contentStatus=has_rects 只能表明有面积，
+            // 不表明已取得内容。" 旧逻辑里"有矩形 + 无错误 = full"，
+            // 而外壳（标题栏/菜单/IME）也有矩形 —— 于是外壳被标成完整。
+            //
+            // 现在分三档，且明确区分"遍历完"和"拿到了内容"：
+            //   no_content     没有有效矩形
+            //   shell_only     有矩形但角色全是容器/外壳，没有可交互候选
+            //   has_candidates 出现了像按钮/链接/文本这类细粒度元素
             string coverage;
-            if (useful == 0 && uiaNodes <= 2) coverage = "none_or_shell_only";
-            else if (truncReason != null || errors.Count > 0) coverage = "partial";
-            else coverage = "full";
+            int interactive = 0;
+            foreach (var n in nodes)
+            {
+                if (n.Rect == null) continue;
+                int role;
+                if (!int.TryParse(n.Role, out role)) continue;
+                // 43=PUSHBUTTON 42=LINK 41=TEXT 44=CHECKBUTTON 45=RADIOBUTTON
+                // 10=CLIENT 9=WINDOW 是容器，不算候选
+                if (role == 43 || role == 42 || role == 44 || role == 45 ||
+                    role == 41 || role == 46 || role == 47)
+                    interactive++;
+            }
+            if (useful == 0) coverage = "no_content";
+            else if (interactive == 0) coverage = "shell_only";
+            else coverage = "has_candidates";
+            result["interactiveCount"] = interactive;
+            result["traversalComplete"] = bestComplete;
+            result["truncatedBy"] = bestTrunc;
 
             result["coverage"] = coverage;
 

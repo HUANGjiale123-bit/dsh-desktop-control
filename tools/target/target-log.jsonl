@@ -1,0 +1,2 @@
+﻿{"seq":1,"event":"selection","id":"Choice","value":"A"}
+{"seq":2,"event":"ready","hwnd":920378,"width":640,"height":480,"controls":[{"name":"Alpha","x":111,"y":145,"w":150,"h":32},{"name":"Beta","x":111,"y":185,"w":150,"h":32},{"name":"Duplicate","x":111,"y":225,"w":150,"h":32},{"name":"Duplicate","x":111,"y":265,"w":150,"h":32},{"name":"Input","x":293,"y":171,"w":220,"h":28},{"name":"Choice","x":291,"y":233,"w":220,"h":26},{"name":"Items","x":293,"y":277,"w":400,"h":160},{"name":"Pad","x":112,"y":316,"w":150,"h":220}]}
