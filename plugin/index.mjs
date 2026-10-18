@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.9'
+const PLUGIN_VERSION = '2.18.10'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1672,7 +1672,10 @@ function applyInner(ctx, config = {}) {
    * 才是代价，而实际上每一步之间都隔着一次模型推理。
    *
    * 所以改成 90 秒：覆盖两轮推理，操作期间不闪。
-   * 真正的收尾信号是助手主动调 desktop_off，超时只是保底。
+   *
+   * **主路径不是超时，是助手主动调 desktop_off** —— 任务做完就收，
+   * 那才是准确信号。90 秒只是"助手忘了调"时的保底，避免真挂着不走。
+   * 用户明确要求过这个：「收尾时主动调 desktop_off」。
    *
    * 可以用 profile 配置改：dsh-desktop-control 的 idleHideMs。
    * 设成 0 表示**永不自动收**（需要常驻时用）。
@@ -2560,11 +2563,14 @@ function applyInner(ctx, config = {}) {
   register({
     name: 'desktop_off',
     description:
-      '正常结束 computer use：关掉状态指示层（光带 + 逃生条），并让闸门回到未触发状态。' +
-      '**这是"这段结束了"的意思，不是"我被劫持了"**——所以它不留下闸门，' +
+      '结束这一次 computer use，把状态指示层（光带 + 逃生条）收掉。' +
+      '**当一个桌面任务做完了、或者你不再需要操作桌面时，主动调用它** —— ' +
+      '这是最后一步，不是可选项。指示层挂在屏幕上是"我正在操作你的电脑"的声明，' +
+      '任务结束了它就该消失；不调的话要等 90 秒空闲超时，那段时间用户会以为你还在动。' +
+      '**这是"这段结束了"，不是"我被劫持了"** —— 所以它不写闸门，' +
       '后续操作不会被无条件拒绝。' +
-      '要立刻打断正在进行的操作，让用户**按物理 ESC**，或点屏幕上方的逃生条：' +
-      '那两条路会留下闸门，之后的操作一律被拒，直到显式解除。' +
+      '要**立刻打断正在进行**的操作，让用户按物理 ESC 或点屏幕上方的逃生条：' +
+      '那两条路才会写闸门。' +
       '本工具不依赖按键通道或前台窗口，无论指示层是怎么起来的都收得掉。',
     parameters: {},
     output: {
