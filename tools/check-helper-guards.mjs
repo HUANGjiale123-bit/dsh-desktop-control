@@ -46,6 +46,9 @@ const POLICY = {
   CmdTree: 'both',
   CmdScreenshot: 'both',
   CmdWhatIs: 'both',
+  // a11y_probe 读的是界面内容（元素名字、角色、矩形）—— 和 whatis / tree
+  // 同一级别，所以**两道守卫都要**：急停时停，白名单外的应用不读。
+  CmdA11yProbe: 'both',
   CmdHold: 'both',
   CmdDragPath: 'both',
   // release **刻意**既不检查急停也不检查白名单：
