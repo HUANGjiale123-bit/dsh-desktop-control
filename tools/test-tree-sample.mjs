@@ -59,7 +59,7 @@ const formScript = [
 let child = null
 let hwnd = 0
 const tmp = mkdtempSync(join(process.cwd(), '.cache', 'treesample-'))
-for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs']) {
+for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs', 'visual-candidates.mjs', 'ocr-worker.mjs']) {
   writeFileSync(join(tmp, f), readFileSync(join('plugin', f)))
 }
 

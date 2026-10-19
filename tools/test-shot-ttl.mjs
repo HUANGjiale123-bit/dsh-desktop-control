@@ -29,7 +29,7 @@ const skip = (m) => { console.log(`  · ${m}（未验证）`) }
 process.env.DSC_SHOT_TTL_MS = '1'
 
 const tmp = mkdtempSync(join(process.cwd(), '.cache', 'shotttl-'))
-for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs']) {
+for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs', 'visual-candidates.mjs', 'ocr-worker.mjs']) {
   writeFileSync(join(tmp, f), readFileSync(join('plugin', f)))
 }
 

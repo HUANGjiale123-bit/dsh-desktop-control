@@ -22,7 +22,7 @@ const bad = (m) => { console.log(`  ✗ ${m}`); fail++ }
 const skip = (m) => { console.log(`  · ${m}`); skipped++ }
 
 const tmp = mkdtempSync(join(process.cwd(), '.cache', 'trace-'))
-for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs']) {
+for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs', 'visual-candidates.mjs', 'ocr-worker.mjs']) {
   writeFileSync(join(tmp, f), readFileSync(join('plugin', f)))
 }
 

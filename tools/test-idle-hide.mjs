@@ -51,7 +51,7 @@ const patched = join(tmp, 'index.mjs')
 writeFileSync(patched, src)
 
 // 插件副本要能解析到同目录的 toolset.mjs / tooldsl.mjs，所以复制过去
-for (const f of ['toolset.mjs', 'tooldsl.mjs', 'apps.mjs']) {
+for (const f of ['toolset.mjs', 'tooldsl.mjs', 'apps.mjs', 'visual-candidates.mjs', 'ocr-worker.mjs']) {
   try {
     writeFileSync(join(tmp, f), readFileSync(join('plugin', f)))
   } catch { }

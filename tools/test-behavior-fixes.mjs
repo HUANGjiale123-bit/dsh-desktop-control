@@ -77,7 +77,7 @@ console.log('── 4. 行为验证：取消的等待者不派发输入 ──')
 
 {
   const tmp = mkdtempSync(join(process.cwd(), '.cache', 'behav-'))
-  for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs']) {
+  for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs', 'visual-candidates.mjs', 'ocr-worker.mjs']) {
     writeFileSync(join(tmp, f), readFileSync(join('plugin', f)))
   }
 

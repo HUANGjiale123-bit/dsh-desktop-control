@@ -30,6 +30,14 @@ import { fileURLToPath } from 'node:url'
 // "所有 desktop_* 工具都不存在"。作者无法控制宿主的解析行为，
 // 所以不依赖它才是稳的。转换逻辑就十几行，见 tooldsl.mjs。
 import { defineTool } from './tooldsl.mjs'
+import { createHash, randomUUID } from 'node:crypto'
+// 视觉兜底：候选层与 OCR 后端。两者都**不发输入、不碰桌面**，
+// 真正的点击仍然走下面 set.tools.click 那条已经验证过的链。
+import {
+  cropFromRegion, viewPointToWindow, candidatesFromOcr, createCandidateStore,
+  labelMatches, pngSize,
+} from './visual-candidates.mjs'
+import { probeOcr, runOcr, linesToRows } from './ocr-worker.mjs'
 import { createDesktopToolset } from './toolset.mjs'
 
 export const name = 'dsh-desktop-control'
@@ -56,7 +64,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.38'
+const PLUGIN_VERSION = '2.18.39'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -874,6 +882,7 @@ function applyInner(ctx, config = {}) {
   // 之后无论做多少次点击都不会再出现 —— 用户看到的就是"掉了一次"。
   const MUTATING_TOOLS = new Set([
     'desktop_click',
+    'desktop_click_candidate',
     'desktop_click_element',
     'desktop_drag',
     'desktop_type',
@@ -977,6 +986,8 @@ function applyInner(ctx, config = {}) {
 
   /** 这些工具不碰桌面，不需要执行权（也拿不到就等，没意义）。 */
   const NO_LEASE_TOOLS = new Set([
+    // 只处理**已经登记过的旧图**与记录，不碰桌面、不点击 —— 不需要执行权。
+    'desktop_visual_candidates',
     'desktop_list_apps',
     'desktop_off',
     'desktop_revoke_grants',
@@ -1284,7 +1295,6 @@ function applyInner(ctx, config = {}) {
       const image = await imageBlockFor(filepath)
 
       // 记录这张截图的"坐标出处"，让后续点击可以绑定到它。
-      const shotId = `shot-${args.hwnd}-${Date.now()}`
 
       // 几何要**校验过再记**。缺字段时记下 undefined 会让后面每一次比较
       // 都判"变了"，于是一个本该有用的校验变成每次误报。
@@ -1301,7 +1311,7 @@ function applyInner(ctx, config = {}) {
       // evidence 说明这张观察**靠什么作数**。
       // geometry_only = 只核对了窗口几何，没做任何像素比较。
       // 这是诚实的下限，也是目前唯一能给的等级。
-      rememberShot(shotId, { hwnd: args.hwnd, ...(geomOk ? geom : {}), geomOk, evidence: 'geometry_only' })
+      const shotId = recordObservation({ hwnd: args.hwnd, geom, geomOk, pngPath: filepath })
 
       // shotId 必须出现在**模型能看到的地方**。
       //
@@ -1417,6 +1427,360 @@ function applyInner(ctx, config = {}) {
       kind: 'other',
       rawInput: args,
     }),
+  })
+
+  /* ═══════════ 视觉兜底：候选列表 与 按候选点击 ═══════════
+   *
+   * 为什么要有这一层，而不是让模型自己看图估坐标：
+   *   · 模型看到的图常常是**缩放后的预览**，它按肉眼估的坐标必然偏，
+   *     而偏移量取决于前端缩放比 —— 它自己无法知道；
+   *   · 树里没有文字的应用（自绘界面、WinUI 残树）只能靠看，但"看"出来的
+   *     坐标没有任何出处，事后无法判断"点偏了"还是"界面变了"。
+   *
+   * 候选这一层把「在图上的哪个位置」变成一个**有出处、可复核**的东西：
+   * 它绑在一次已登记的观察上（shotId + 图片摘要 + 真实尺寸），点击时
+   * 由代码换算，并且在发输入之前复查那块像素。
+   *
+   * 能力边界（写死在文本里，不许含糊）：
+   *   · OCR 只给"这里有这段文字"，**不证明它能点**；
+   *   · 本版没有裁图/放大，返回的是整窗观察里的位置；
+   *   · 图标类目标 OCR 会给空 —— 那是能力边界，不是"界面没有可点元素"。
+   */
+  const visualStore = createCandidateStore()
+  const VISUAL_MAX_LIST = 24
+
+  function shotRecordFor(shotId, hwnd) {
+    const rec = recentShots.get(String(shotId))
+    if (!rec) {
+      throw new Error(
+        `找不到截图 "${shotId}" 的记录（可能已作废、过期，或插件重启过）。` +
+        `请重新截图，再从新的 shotId 取候选。  [retry=reobserve] 先重新观察。`,
+      )
+    }
+    if (String(rec.hwnd) !== String(hwnd)) {
+      throw new Error(
+        `截图 "${shotId}" 是窗口 ${rec.hwnd} 的，不是 ${hwnd}。` +
+        `不同窗口的坐标不能混用。  [retry=disambiguate] 换对的 shotId。`,
+      )
+    }
+    const owner = currentSessionId()
+    if (rec.ownerId && owner && String(rec.ownerId) !== String(owner)) {
+      // 归属校验靠记录里的 owner，不靠"ID 难猜"。
+      throw new Error(
+        `截图 "${shotId}" 属于另一个会话，不能在这里使用。` +
+        `  [retry=stop] 不要重试；让自己重新截一张。`,
+      )
+    }
+    const ageMs = Date.now() - (rec.at ?? 0)
+    if (ageMs > SHOT_TTL_MS) {
+      throw new Error(
+        `截图 "${shotId}" 是 ${Math.round(ageMs / 60000)} 分钟前的，太久无法保证界面没变。` +
+        `请重新截图。  [retry=reobserve]`,
+      )
+    }
+    if (!rec.filepath || !existsSync(rec.filepath)) {
+      throw new Error(`截图 "${shotId}" 的文件不在了（可能已被清理）。请重新截图。  [retry=reobserve]`)
+    }
+    return rec
+  }
+
+  /** 读图片、核对摘要与真实尺寸；任何一项对不上都拒绝（不拿假尺寸去算坐标）。 */
+  function verifiedImageOf(rec) {
+    const buf = readFileSync(rec.filepath)
+    const sha = createHash('sha256').update(buf).digest('hex')
+    if (rec.pngSha256 && sha !== rec.pngSha256) {
+      throw new Error(
+        `截图文件的摘要与登记时不一致 —— 这个文件在登记之后被改动过。拒绝使用。  [retry=reobserve]`,
+      )
+    }
+    const image = rec.image ?? pngSize(buf.subarray(0, 64))
+    if (!image || !(image.width > 0) || !(image.height > 0)) {
+      throw new Error('读不出这张截图的真实尺寸，无法换算坐标。  [retry=reobserve]')
+    }
+    return { image, sha }
+  }
+
+  /** 两点矩形 → 与裁剪区是否有交集（半开区间）。 */
+  function intersectsCrop(quad, crop) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const [x, y] of quad) {
+      if (x < minX) minX = x
+      if (y < minY) minY = y
+      if (x > maxX) maxX = x
+      if (y > maxY) maxY = y
+    }
+    if (!Number.isFinite(minX)) return false
+    return maxX > crop.x && minX < crop.x + crop.w && maxY > crop.y && minY < crop.y + crop.h
+  }
+
+  register({
+    name: 'desktop_visual_candidates',
+    description:
+      '把一张**已登记的截图**送本地 OCR，返回"图上有哪些文字、各自在什么位置"的候选列表。\n' +
+      '用途：树里读不到文字（自绘界面、残树、WinUI）但屏幕上文字可见时，' +
+      '用候选拿到位置，再用 desktop_click_candidate 点它 —— 不必自己估坐标。\n' +
+      '**边界（先看清再用）**：OCR 只证明"这里有这段文字"，**不证明它可点击**；' +
+      '本版不裁图、不放大，返回的是整窗观察里的位置；图标类目标会返回空列表，' +
+      '那是能力边界，不等于界面上没有可点的东西。\n' +
+      '用的是这台机器自带的 OCR（Windows.Media.Ocr），不需要安装任何东西；' +
+      '没装对应语言包时会在返回里明说不可用。' +
+      '注意：它**不会**重新截图 —— 你传哪张观察，就是在看那一刻的界面。',
+    parameters: {
+      hwnd: HWND,
+      shotId: { type: 'string', required: true, description: 'desktop_screenshot 返回的 shotId。' },
+      query: {
+        type: 'string',
+        description: '可选：只看包含这段文字的行（中文会被去空格、全角转半角后比较）。',
+      },
+      region: {
+        type: 'object',
+        description: '可选：只看这块区域，归一化比例 {x,y,w,h}（0..1，相对整张图）。',
+      },
+      maxItems: {
+        type: 'integer',
+        description: '最多列出多少条（默认 24）。超出会明确标记"已截断"。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { result: { type: 'string', required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: value.result }],
+    },
+    async execute(args) {
+      const rec = shotRecordFor(args.shotId, args.hwnd)
+      const { image } = verifiedImageOf(rec)
+      const crop = cropFromRegion(image, args.region)
+      const limit = Number.isFinite(Number(args.maxItems))
+        ? Math.max(1, Math.min(200, Number(args.maxItems)))
+        : VISUAL_MAX_LIST
+
+      const probe = probeOcr()
+      if (!probe.ok) {
+        return {
+          result:
+            `视觉后端不可用：这台机器上读不到可用的 OCR 语言包` +
+            `（Windows.Media.Ocr 需要至少一种识别语言）。\n` +
+            `  · 这只是"没有视觉兜底"，其余桌面功能照常；\n` +
+            `  · 可以先在系统里装一个 OCR 语言包，或改用 desktop_read_window / desktop_screenshot。`,
+        }
+      }
+
+      const ocr = runOcr(rec.filepath, { lang: probe.languages[0] })
+      if (!ocr.ok) {
+        return {
+          result:
+            `视觉后端执行失败：${ocr.error}${ocr.message ? ' — ' + ocr.message : ''}\n` +
+            `  · 失败的只是这一次 OCR，桌面功能不受影响；\n` +
+            `  · 可以重试一次，或改用截图 + desktop_click 按坐标点。`,
+        }
+      }
+
+      const rows = linesToRows(ocr.lines)
+      const inCrop = rows.filter((row) => intersectsCrop(row.quad, crop))
+      const matched = inCrop.filter((row) => labelMatches(row.label, args.query))
+      const viewId = randomUUID()
+      visualStore.addView({ viewId, shotId: rec.hwnd ? String(args.shotId) : String(args.shotId), crop, ownerId: currentSessionId() })
+      const candidates = candidatesFromOcr(matched.slice(0, limit), {
+        shotId: String(args.shotId),
+        viewId,
+        ownerId: currentSessionId(),
+      })
+      visualStore.addCandidates(candidates)
+
+      const lines = []
+      lines.push(
+        `观察 ${args.shotId}（图片 ${image.width}x${image.height}，` +
+        `窗口 ${rec.w}x${rec.h} @(${rec.x},${rec.y})）`,
+      )
+      lines.push(
+        `裁剪区域 (${crop.x},${crop.y} ${crop.w}x${crop.h})；` +
+        `OCR ${ocr.backend}/${ocr.engineLanguage ?? '?'}，${ocr.elapsedMs ?? '?'}ms，` +
+        `${rows.length} 行`,
+      )
+      lines.push(
+        `与裁剪相交 ${inCrop.length} 行` +
+        (args.query ? `，匹配 "${args.query}" 的 ${matched.length} 条` : '') +
+        (matched.length > limit ? `（**已截断**，只列出 ${limit} 条）` : ''),
+      )
+      if (!candidates.length) {
+        lines.push(
+          `\n没有候选。常见原因：这块区域里本来就没有文字，或者这是图标/图形（OCR 只认文字）。` +
+          `这不是"界面上没有可点的东西"，只是这条路看不到。`,
+        )
+      } else {
+        lines.push('')
+        candidates.forEach((c, i) => {
+          const b = c.boxInSourceImage
+          lines.push(
+            `  #${i + 1} ${c.candidateId}  "${c.label}"  @(${Math.round(b.x)},${Math.round(b.y)} ` +
+            `${Math.round(b.w)}x${Math.round(b.h)})`,
+          )
+        })
+        lines.push('')
+        lines.push(
+          `选一个用 desktop_click_candidate({hwnd, shotId, candidateId}) —— ` +
+          `位置由插件换算，并且**点击前会复查那块像素**（内容变了会拒绝，不会盲点）。`,
+        )
+        lines.push(
+          `注意：这些是**文字锚点**，只说明"这里有这段文字"；` +
+          `是不是按钮、能不能点，OCR 不知道（role/可点击性均标为 unknown）。`,
+        )
+      }
+      return { result: lines.join('\n') }
+    },
+  })
+
+  register({
+    name: 'desktop_click_candidate',
+    description:
+      '按候选编号点击：位置取自 desktop_visual_candidates 返回的候选，由插件换算成窗口坐标。\n' +
+      '**点击前会复查**：先比对该候选区域的像素指纹（截图那一刻 vs 现在），' +
+      '不一致就拒绝发送输入并让你重新看 —— 窗口没动不代表内容没变（滚动、弹层都查得出来）。\n' +
+      '点击仍然走现有的那条链：窗口几何校验、白名单、急停闸门、落点归属检查，一个都不少。\n' +
+      '第一版只做单次左键。',
+    parameters: {
+      hwnd: HWND,
+      shotId: {
+        type: 'string',
+        required: true,
+        description: '候选来自哪张观察（desktop_visual_candidates 用的那个 shotId）。',
+      },
+      candidateId: { type: 'string', required: true, description: '候选编号。' },
+      observe: OBSERVE,
+      settleMs: SETTLE_MS,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '动作后的新画面（observe 未关闭时给出）' },
+        },
+      },
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
+    },
+    async execute(args, exec) {
+      const rec = shotRecordFor(args.shotId, args.hwnd)
+      const { image } = verifiedImageOf(rec)
+      const cand = visualStore.getCandidate(String(args.candidateId))
+      if (!cand) {
+        throw new Error(
+          `找不到候选 "${args.candidateId}"（可能已随截图作废）。` +
+          `  [retry=reobserve] 重新取一次候选。`,
+        )
+      }
+      if (String(cand.shotId) !== String(args.shotId)) {
+        throw new Error(
+          `候选属于观察 ${cand.shotId}，不是 ${args.shotId}。  [retry=disambiguate] 别混用。`,
+        )
+      }
+      const view = visualStore.getView(cand.viewId)
+      if (!view) {
+        throw new Error(`候选的视图记录已失效。  [retry=reobserve] 重新取候选。`)
+      }
+
+      // 候选点 → 窗口像素（唯一的一条换算，不加原点、不乘 DPI）
+      const u = cand.pointInSourceImage.x / image.width
+      const v = cand.pointInSourceImage.y / image.height
+      const wpx = viewPointToWindow(
+        { image, capture: { x: rec.x, y: rec.y, w: rec.w, h: rec.h } },
+        view,
+        { u, v },
+      )
+
+      /* ── 点击前复查：那块像素还是原来的样子吗 ──
+       *
+       * 为什么这一步不能省：窗口几何没变、shot 没过期，都**不能**
+       * 证明内容没变 —— 滚动、列表刷新、弹层盖上来，几何全都一样。
+       * 而"拿旧坐标点新界面"正是这个项目里最贵的一类错。
+       */
+      /* 复查区域 = 候选框 + 少量余量。
+       *
+       * 余量从 12 降到 4：实测 12px 会把旁边的**实时数字**（流量计数、时钟）
+       * 框进来，于是每一次复查都"内容变了"——误拒率 100%。
+       * 但余量也不能是 0：目标被弹层压住/移动一点点时，紧贴边界的框可能仍然相同。
+       * 4px 是"能看出位移和覆盖、又不至于把邻居吃进来"的折中；
+       * 真实误拒率要靠真实任务统计（见 docs）。
+       */
+      const margin = 4
+      const box = cand.boxInSourceImage ?? {
+        x: cand.pointInSourceImage.x - margin,
+        y: cand.pointInSourceImage.y - margin,
+        w: margin * 2,
+        h: margin * 2,
+      }
+      const roi = {
+        x: Math.max(0, Math.floor(box.x - margin)),
+        y: Math.max(0, Math.floor(box.y - margin)),
+        w: 0,
+        h: 0,
+      }
+      roi.w = Math.min(image.width - roi.x, Math.ceil(box.w + margin * 2))
+      roi.h = Math.min(image.height - roi.y, Math.ceil(box.h + margin * 2))
+
+      const oldHash = await set.runHelper(
+        ['image_hash', rec.filepath, String(roi.x), String(roi.y), String(roi.w), String(roi.h)],
+        'configured',
+      )
+      if (!oldHash.ok) {
+        throw new Error(
+          `复查没做成：读不出截图里那块区域的指纹（${oldHash.error} ${oldHash.message ?? ''}）。` +
+          `  [retry=stop] 不发送输入 —— 没有复查就点，等于赌。`,
+        )
+      }
+      // 图片像素 → 桌面像素（截图尺寸与窗口尺寸可能不同，两轴各自换算）
+      const liveX = rec.x + Math.floor((roi.x * rec.w) / image.width)
+      const liveY = rec.y + Math.floor((roi.y * rec.h) / image.height)
+      const liveW = Math.max(1, Math.ceil((roi.w * rec.w) / image.width))
+      const liveH = Math.max(1, Math.ceil((roi.h * rec.h) / image.height))
+      const liveHash = await set.runHelper(
+        ['region_hash', String(args.hwnd), String(liveX), String(liveY), String(liveW), String(liveH)],
+        'configured',
+      )
+      if (!liveHash.ok) {
+        throw new Error(
+          `复查没做成：抓不到现在那块屏幕像素（${liveHash.error} ${liveHash.message ?? ''}）。` +
+          `  [retry=stop] 不发送输入。`,
+        )
+      }
+      if (String(liveHash.hash) !== String(oldHash.hash)) {
+        return {
+          isError: true,
+          text:
+            `拒绝点击：候选「${cand.label}」那块区域的内容**已经变了**。\n` +
+            `  截图时的指纹 ${oldHash.hash}，现在是 ${liveHash.hash}。\n` +
+            `  窗口没移动也会变（滚动、弹层、列表刷新都会）。所以没有发送任何输入。\n` +
+            `  [retry=reobserve] 重新截图、重新取候选再点。`,
+        }
+      }
+
+      // 走现有链路：desktop 空间 + expectedGeom —— 窗口一移就拒（候选路径保守到底）
+      const r = await set.tools.click({
+        hwnd: args.hwnd,
+        x: rec.x + wpx.x,
+        y: rec.y + wpx.y,
+        space: 'desktop',
+        expectedGeom: { x: rec.x, y: rec.y, w: rec.w, h: rec.h },
+      })
+      if (r.isError) throw new Error(r.text)
+
+      const lines = [
+        `已点击候选「${cand.label}」（${args.candidateId}）。`,
+        `  图内锚点 (${cand.pointInSourceImage.x.toFixed(1)},${cand.pointInSourceImage.y.toFixed(1)})` +
+          ` → 窗口 (${wpx.x},${wpx.y}) → 桌面 (${rec.x + wpx.x},${rec.y + wpx.y})`,
+        `  复查：那块 ${roi.w}x${roi.h} 像素与截图时一致（指纹 ${oldHash.hash}）`,
+        `  通过现有链路：白名单 / 几何 / 落点归属都查过了`,
+        `  未核实：点击已发出，但应用是否响应要重新观察。`,
+      ]
+      return observeAfter(args.hwnd, lines.join('\n'), args.observe, args.settleMs)
+    },
   })
 
   register({
@@ -1625,7 +1989,6 @@ function applyInner(ctx, config = {}) {
       // （shotId 是桌面工具层截图时加的，toolset 是共享业务层）。
       // 于是动作后的画面永远写着"截图 ID：?"，而这个契约的意义正是
       // "让模型能把坐标绑到某张图上"——真实跑一次才看出来。
-      const shotId = `shot-${hwnd}-${Date.now()}`
       const g = {
         x: Number(shot.originX), y: Number(shot.originY),
         w: Number(shot.width), h: Number(shot.height),
@@ -1633,7 +1996,7 @@ function applyInner(ctx, config = {}) {
       const geomOk =
         Number.isFinite(g.x) && Number.isFinite(g.y) &&
         Number.isFinite(g.w) && Number.isFinite(g.h) && g.w > 0 && g.h > 0
-      rememberShot(shotId, { hwnd, ...(geomOk ? g : {}), geomOk, evidence: 'geometry_only' })
+      const shotId = recordObservation({ hwnd, geom: g, geomOk, pngPath: shot.filepath })
 
       const image = await imageBlockFor(shot.filepath)
       const tail =
@@ -1804,6 +2167,49 @@ function applyInner(ctx, config = {}) {
       const oldest = recentShots.keys().next().value
       recentShots.delete(oldest)
     }
+  }
+
+  /* ───────────── 观察登记：只有一个入口 ─────────────
+   *
+   * 原先截图有两处各写一遍登记逻辑（desktop_screenshot 与 observeAfter），
+   * 字段当然会漂：一处有几何、一处没有；一处记文件、一处不记。
+   * 而视觉候选要绑定的东西比以前多（归属会话、生成号、图片摘要、真实图片尺寸），
+   * 再复制一遍就是三份不一致。
+   *
+   * 所以收成一个函数。它**只登记，不判断**：几何有效性、会话归属由调用方给，
+   * 这里负责把"这张观察的身份"补齐并落库。
+   */
+  let observationGeneration = 0
+
+  function recordObservation({ hwnd, geom, geomOk, pngPath }) {
+    observationGeneration += 1
+    const shotId = `shot-${hwnd}-${Date.now()}`
+    let image = null
+    let sha = null
+    try {
+      const buf = readFileSync(pngPath)
+      // 图片真实尺寸必须**解码出来**，不信截图工具自报的数字：
+      // 两者不一致时，后面每一次 u/v 换算的基准都是错的，而且看不出来。
+      image = pngSize(buf.subarray(0, 64))
+      sha = createHash('sha256').update(buf).digest('hex')
+    } catch {
+      /* 读不到就留空：候选路径会因此拒绝，而不是拿假尺寸去算 */
+    }
+
+    rememberShot(shotId, {
+      hwnd,
+      ...(geomOk ? geom : {}),
+      geomOk,
+      evidence: 'geometry_only',
+      // 归属：换会话/撤权时按它级联失效
+      ownerId: currentSessionId(),
+      generation: observationGeneration,
+      capturedAt: Date.now(),
+      filepath: pngPath,
+      pngSha256: sha,
+      image,
+    })
+    return shotId
   }
 
   /**

@@ -874,6 +874,8 @@ namespace Dsc
                     case "move": return CmdMove(args);
                     case "drag": return CmdDrag(args);
                     case "wheel": return CmdWheel(args);
+                    case "region_hash": return CmdRegionHash(args);
+                    case "image_hash": return CmdImageHash(args);
                     case "whatis": return CmdWhatIs(args);
                     case "hold": return CmdHold(args);
                     case "release": return CmdRelease(args);
@@ -3046,6 +3048,157 @@ namespace Dsc
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// 把一张位图里某块区域的像素做成一个稳定的短指纹。
+        ///
+        /// 为什么用"指纹"而不是逐像素存下来比：比的是**同不等于同**，
+        /// 只需要一个能判等的值。FNV-1a 够快，也不需要任何依赖。
+        ///
+        /// 已知边界（写在这里免得以后被当成"内容一致"的证据）：
+        ///   · 指纹相同只能说明"这一块像素一样"，不能说明"界面语义没变"；
+        ///   · 动画、悬停、光标闪烁都会让它变 —— 那会**误报失效**。
+        ///     误报的代价是"让调用方重看一眼"，比漏报（拿旧坐标去点）安全，
+        ///     所以第一版接受它，并把误报次数记进返回值由上层统计。
+        /// </summary>
+        private static string HashBitmapRegion(Bitmap bmp, Rectangle rect)
+        {
+            BitmapData d = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int rowBytes = rect.Width * 4;
+                byte[] row = new byte[rowBytes];
+                ulong hash = 14695981039346656037UL;   // FNV-1a 64 初值
+                for (int y = 0; y < rect.Height; y++)
+                {
+                    IntPtr p = new IntPtr(d.Scan0.ToInt64() + (long)y * d.Stride);
+                    Marshal.Copy(p, row, 0, rowBytes);
+                    for (int i = 0; i < rowBytes; i++)
+                    {
+                        hash ^= row[i];
+                        hash *= 1099511628211UL;
+                    }
+                }
+                return hash.ToString("x16");
+            }
+            finally
+            {
+                bmp.UnlockBits(d);
+            }
+        }
+
+        private static Rectangle ParseRegion(string[] args, int offset)
+        {
+            int x = int.Parse(args[offset]);
+            int y = int.Parse(args[offset + 1]);
+            int w = int.Parse(args[offset + 2]);
+            int h = int.Parse(args[offset + 3]);
+            if (w <= 0 || h <= 0)
+                throw new DscError("BadValue", "区域宽高必须为正：" + w + "x" + h);
+            if ((long)w * h > 4000L * 4000L)
+                throw new DscError("BadValue", "区域太大：" + w + "x" + h);
+            return new Rectangle(x, y, w, h);
+        }
+
+        /// <summary>
+        /// region_hash —— 现在这一刻，屏幕上某块区域的指纹。
+        /// 用法：region_hash &lt;hwnd&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt;（x/y 是**桌面**物理像素）
+        ///
+        /// 这是"点击前复查内容有没有变"的新半边：老半边是 image_hash（读旧截图）。
+        /// 两边指纹一致 → 那块像素此刻和截图时一样；不一致 → 拒绝发送输入。
+        /// </summary>
+        private static int CmdRegionHash(string[] args)
+        {
+            if (args.Length < 6) throw new ArgumentException("region_hash 需要 hwnd x y w h");
+            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            // 抓屏就是读界面内容：急停要停，白名单外的应用不读。
+            RequireNotHalted("region_hash");
+            RequireAllowedWindow(hwnd, "region_hash");
+
+            Rectangle want = ParseRegion(args, 2);
+            Native.RECT wr;
+            if (!Native.GetWindowRect(hwnd, out wr))
+                throw new DscError("StaleTarget", "GetWindowRect 失败");
+            if (want.Left < wr.Left || want.Top < wr.Top ||
+                want.Right > wr.Right || want.Bottom > wr.Bottom)
+            {
+                // 越界就报错，不裁剪 —— 裁剪会把"算错了坐标"变成"看了一下别的地方"，照样返回成功。
+                throw new DscError("BadValue",
+                    "区域 (" + want.Left + "," + want.Top + " " + want.Width + "x" + want.Height +
+                    ") 超出窗口 (" + wr.Left + "," + wr.Top + " " + (wr.Right - wr.Left) + "x" +
+                    (wr.Bottom - wr.Top) + ")");
+            }
+
+            string hash;
+            using (Bitmap bmp = new Bitmap(want.Width, want.Height, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(want.Left, want.Top, 0, 0,
+                        new Size(want.Width, want.Height), CopyPixelOperation.SourceCopy);
+                }
+                hash = HashBitmapRegion(bmp, new Rectangle(0, 0, want.Width, want.Height));
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("hash").Val(hash)
+                .Key("rect").Val(want.Left + "," + want.Top + " " + want.Width + "x" + want.Height)
+                .Key("pixels").Num((long)want.Width * want.Height)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// image_hash —— 一张已保存的 PNG 里某块区域的指纹。
+        /// 用法：image_hash &lt;png 路径&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt;（x/y 是**图片内**像素）
+        ///
+        /// 和 region_hash 配对：一个读历史，一个读现在。
+        /// 只读文件，所以不需要窗口白名单；但急停时同样停 —— 急停的含义是
+        /// "别再用我的界面内容做任何事"。
+        /// </summary>
+        private static int CmdImageHash(string[] args)
+        {
+            if (args.Length < 6) throw new ArgumentException("image_hash 需要 png x y w h");
+            RequireNotHalted("image_hash");
+            string path = args[1];
+            if (!File.Exists(path)) throw new DscError("BadValue", "文件不存在：" + path);
+
+            Rectangle want = ParseRegion(args, 2);
+            string hash;
+            int imgW, imgH;
+            using (Bitmap src = new Bitmap(path))
+            {
+                imgW = src.Width;
+                imgH = src.Height;
+                if (want.Left < 0 || want.Top < 0 || want.Right > src.Width || want.Bottom > src.Height)
+                {
+                    throw new DscError("BadValue",
+                        "区域 (" + want.Left + "," + want.Top + " " + want.Width + "x" + want.Height +
+                        ") 超出图片 " + imgW + "x" + imgH);
+                }
+                using (Bitmap crop = new Bitmap(want.Width, want.Height, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(crop))
+                    {
+                        g.DrawImage(src, new Rectangle(0, 0, want.Width, want.Height),
+                            want, GraphicsUnit.Pixel);
+                    }
+                    hash = HashBitmapRegion(crop, new Rectangle(0, 0, want.Width, want.Height));
+                }
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("hash").Val(hash)
+                .Key("image").Val(imgW + "x" + imgH)
+                .Key("rect").Val(want.Left + "," + want.Top + " " + want.Width + "x" + want.Height)
+                .Key("pixels").Num((long)want.Width * want.Height)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
         }
 
         /// <summary>

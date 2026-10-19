@@ -1,4 +1,4 @@
-# 视觉兜底 · 第一批：候选层与本地 OCR（2.18.38）
+# 视觉兜底：候选层、本地 OCR、两个工具（2.18.38 → 2.18.39）
 
 > 依据外部评审的《轻量视觉兜底实现指引》，**方案改了一处**：OCR 不再打包
 > RapidOCR/onnxruntime，改用 **Windows 自带的 `Windows.Media.Ocr`** ——
@@ -72,3 +72,66 @@ OCR 后端：windows-ocr    语言：zh-Hans-CN（系统自带，无需安装）
 ## 全量测试
 
 32 个测试文件全绿（新增 `test-visual-candidates.mjs`，29 项断言）。
+
+
+---
+
+# 第二批：接进工具（2.18.39）
+
+## 新增的东西
+
+| 位置 | 内容 |
+|---|---|
+| `helper` | `region_hash`（现在屏幕某块像素的指纹）、`image_hash`（一张已存 PNG 里某块区域的指纹）。同一套 FNV-1a，两边必须给出同一个值 |
+| `plugin/index.mjs` | `recordObservation`：截图登记**收成一个入口**（原来是 `desktop_screenshot` 与 `observeAfter` 各写一遍）；登记项新增 `ownerId` / `generation` / `pngSha256` / 解码出的 `image` 尺寸 |
+| 工具 | `desktop_visual_candidates`（读旧图 → OCR → 候选列表）、`desktop_click_candidate`（按候选点击，**发输入前**做像素复查） |
+| 测试 | `test-region-hash.mjs`（8 项）、`test-visual-tools.mjs`（10 项） |
+
+## 点击流程（和评审要求对齐）
+
+```
+取候选（不占执行权，只读旧图）
+  → click_candidate 取执行权
+  → 校验：shot 存在 / 归属本会话 / 未过期 / 文件摘要与登记一致 / 候选属于这张 shot
+  → 换算坐标（viewPointToWindow，唯一一条）
+  → **复查**：image_hash(旧图区域) vs region_hash(现在屏幕同一块)
+        不一致 → 拒绝，不发送任何输入
+  → set.tools.click（desktop 空间 + expectedGeom：窗口一移就拒）
+  → observeAfter
+```
+
+## 实测发现的两件事
+
+1. **复查余量 12px 会把邻居吃进来**。第一版用 12px 余量，候选「剩余流量」旁边就是
+   实时流量计数，于是每次复查都判"内容变了" —— 误拒率 100%。改成 4px
+   （能看出位移与覆盖，又不至于把邻居框进来），并把"误拒要靠真实任务统计"写进注释。
+2. **真实应用的窗口在我们跑测试期间被移动过好几次**（空闲时不移动，也不像测试干的：
+   助手侧的 `click` 只做 SetCursorPos + down/up，激活层不动坐标）。
+   后果是"截图里的那块区域"和屏幕上的不是同一块，复查这一格失去前提。
+   测试现在会检测窗口位移并**跳过**，而不是给出一个假的结论。
+
+## 现在能演示什么
+
+```
+desktop_screenshot → shot-66988-…
+desktop_visual_candidates({hwnd, shotId, query:"剩余流量"})
+  → 13 条候选，带不透明 ID 与图片内坐标
+desktop_click_candidate({hwnd, shotId, candidateId})
+  → 已点击候选「剩 余 流 量」…复查：那块 XXxYY 像素与截图时一致（指纹 …）
+     通过现有链路：白名单 / 几何 / 落点归属都查过了
+```
+
+## 还没做的（评审 8 条里仍空着的）
+
+| # | 内容 | 状态 |
+|---|---|---|
+| 3 | 内容变了 → 旧候选拒绝 | 代码与手工验证都有；自动化那一格常因窗口被移动而跳过 |
+| 4 | OCR 期间截图被淘汰 / 撤权 / 会话结束 → 迟到结果不能登记 | ⬜ 需要 generation 在 OCR 前后各查一次 |
+| 5 | 推理结束到点击之间按 ESC | ⬜ 闸门在 helper 侧已生效，但没有专门的端到端测试 |
+| 6 | 已发送但超时 → 只报不确定、不二次点击 | ⬜ |
+| 7 | worker 缺依赖 / 管道断 / 协议不符 | 🟡 缺脚本、无语言包有结构化报错；进程被杀未测 |
+| 8 | 打包部署位置跑完整流程；100%/125% | ⬜ 文件已在打包清单里 |
+
+## 全量测试
+
+33 个测试文件通过；`test-visual-tools` 10 项通过、1–2 项按环境跳过。

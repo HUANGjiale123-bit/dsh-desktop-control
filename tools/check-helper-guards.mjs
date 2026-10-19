@@ -45,6 +45,11 @@ const POLICY = {
   CmdPressKey: 'both',
   CmdTree: 'both',
   CmdScreenshot: 'both',
+  // region_hash 抓屏幕上的像素：和 screenshot 同一级别（急停 + 白名单）。
+  CmdRegionHash: 'both',
+  // image_hash 只读一张本地 PNG，不碰桌面；但急停时同样停 ——
+  // 急停的含义是"别再用我的界面内容做任何事"。
+  CmdImageHash: 'halt',
   CmdWhatIs: 'both',
   // a11y_probe 读的是界面内容（元素名字、角色、矩形）—— 和 whatis / tree
   // 同一级别，所以**两道守卫都要**：急停时停，白名单外的应用不读。
