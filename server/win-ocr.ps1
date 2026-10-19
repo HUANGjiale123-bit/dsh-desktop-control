@@ -1,5 +1,6 @@
 param(
-  [Parameter(Mandatory = $true)][string]$Path,
+  [string]$Path = '',
+  [switch]$ProbeOnly,
   [string]$Lang = '',
   [int]$CropX = 0,
   [int]$CropY = 0,
@@ -49,6 +50,14 @@ try {
     Emit @{ ok = $false; error = 'NoOcrLanguage' ; languages = @() }
   }
 
+  # Languages only: one launch, no image, no recognition. The caller uses this to
+  # decide whether the backend is available, instead of starting a second
+  # PowerShell just to ask which languages exist.
+  # (ASCII only on purpose: PowerShell 5.1 reads a BOM-less UTF-8 .ps1 as ANSI.)
+  if ($ProbeOnly) {
+    Emit @{ ok = $true; backend = 'windows-ocr'; languages = $languages; lines = @(); elapsedMs = 0 }
+  }
+
   $engine = $null
   if ($Lang) {
     $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage(
@@ -73,12 +82,26 @@ try {
   foreach ($line in @($result.Lines)) {
     $words = @($line.Words)
     if ($words.Count -eq 0) { continue }
-    $w0 = $words[0]
-    $wN = $words[$words.Count - 1]
-    $x = [double]$w0.BoundingRect.X
-    $y = [double]$w0.BoundingRect.Y
-    $right = [double]($wN.BoundingRect.X + $wN.BoundingRect.Width)
-    $bottom = [double]($wN.BoundingRect.Y + $wN.BoundingRect.Height)
+    # Line box = min/max over ALL words, not "first word's top-left + last word's
+    # bottom-right": the latter misses taller words or non-monotonic layouts.
+    $minX = [double]::MaxValue
+    $minY = [double]::MaxValue
+    $maxX = [double]::MinValue
+    $maxY = [double]::MinValue
+    foreach ($w in $words) {
+      $bx = [double]$w.BoundingRect.X
+      $by = [double]$w.BoundingRect.Y
+      $br = [double]($bx + $w.BoundingRect.Width)
+      $bb = [double]($by + $w.BoundingRect.Height)
+      if ($bx -lt $minX) { $minX = $bx }
+      if ($by -lt $minY) { $minY = $by }
+      if ($br -gt $maxX) { $maxX = $br }
+      if ($bb -gt $maxY) { $maxY = $bb }
+    }
+    $x = $minX
+    $y = $minY
+    $right = $maxX
+    $bottom = $maxY
 
     # Per-word boxes are kept: a line box is the union of its words, which is
     # wrong for sparse lines (a row with two distant labels).

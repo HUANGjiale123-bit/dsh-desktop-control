@@ -86,6 +86,29 @@ export function cropFromRegion(image, region) {
 /* ───────────── 坐标变换：唯一的一条 ───────────── */
 
 /**
+ * 候选点（**整张原图**里的像素）→ 窗口像素。
+ *
+ * ★ 这一条和 `viewPointToWindow` 是两件事，别混：
+ *   · viewPointToWindow 吃的是"**裁图内部**的归一化坐标"；
+ *   · 候选存的是**整张原图**里的像素点（`pointInSourceImage`）。
+ * 把后者直接喂给前者，在全图 region 下恰好对（crop 从 0,0 开始、宽高等于全图），
+ * 一旦 region 是子矩形就会二次映射 —— 实测应点 (1200,400)，实际送到 (1480,360)。
+ *
+ * 所以这里单独一条：两轴各自按"截图尺寸 → 窗口尺寸"缩放，只取整一次，
+ * 越界抛 OutOfRange（不 clamp：夹边会把"算错了"变成"点了一下别处"）。
+ */
+export function candidatePointToWindow(cand, image, capture) {
+  const p = cand?.pointInSourceImage
+  if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) throw new Error('BadCandidate')
+  if (!(image?.width > 0) || !(image?.height > 0)) throw new Error('BadImageSize')
+  if (!(capture?.w > 0) || !(capture?.h > 0)) throw new Error('BadCapture')
+  const x = Math.floor((p.x * capture.w) / image.width)
+  const y = Math.floor((p.y * capture.h) / image.height)
+  if (x < 0 || x >= capture.w || y < 0 || y >= capture.h) throw new Error('OutOfRange')
+  return { x, y, space: 'window' }
+}
+
+/**
  * 视图内归一化点（u,v）→ **窗口内像素**。
  *
  * 两条来源共用这一个函数：OCR 在裁图上算出的点、以及看图模型报的点。
@@ -169,6 +192,69 @@ function quadBounds(quad) {
 }
 
 /**
+ * 在一行的词序列里找连续命中 query 的那一段。
+ *
+ * ── 为什么必须有 ──
+ *
+ * 外部评审用真实数据复现过：一行里"保存 …… 取消"，查询"保存"，
+ * 旧实现返回整行框的中心 —— 那个点在两个词之间的空白上，点下去什么都不会发生。
+ * 文字框是**词**的范围，不是行的范围；行只是上下文。
+ *
+ * 匹配方式：把每个词归一化（去空白/全角转半角/小写）后按顺序拼起来，
+ * 从每个词开头尝试消费 query 的字符，跨词也算命中。
+ * 中文常见"每字一个词"，所以跨词是常态，不是边角情况。
+ */
+function matchWordRun(words, query) {
+  const q = normalizeLabel(query)
+  if (!q) return null
+  const norm = words.map((w) => normalizeLabel(w?.text ?? ''))
+  for (let i = 0; i < words.length; i++) {
+    let need = q
+    const picked = []
+    for (let j = i; j < words.length && need; j++) {
+      const t = norm[j]
+      if (!t) continue
+      if (!need.startsWith(t)) {
+        // 允许末词只消费 query 的前缀（query 比这个词短）
+        if (t.startsWith(need)) {
+          picked.push(words[j])
+          need = ''
+          break
+        }
+        break
+      }
+      picked.push(words[j])
+      need = need.slice(t.length)
+    }
+    if (!need && picked.length) {
+      return { words: picked, text: picked.map((w) => w.text).join('') }
+    }
+  }
+  return null
+}
+
+/** 一组词的并集框（原图像素）。 */
+function wordsBounds(words) {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const w of words) {
+    const x = Number(w?.x)
+    const y = Number(w?.y)
+    const ww = Number(w?.w)
+    const hh = Number(w?.h)
+    if (![x, y, ww, hh].every((v) => Number.isFinite(v))) continue
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (x + ww > maxX) maxX = x + ww
+    if (y + hh > maxY) maxY = y + hh
+  }
+  if (!Number.isFinite(minX)) return null
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+}
+
+/**
  * 把 OCR 的行结果（原图像素坐标 + 文本 + 分数）变成候选。
  *
  * 保持诚实的三件事：
@@ -176,15 +262,25 @@ function quadBounds(quad) {
  *   · `role` / `actionability` 恒为 "unknown" —— OCR 不知道那是不是可点的；
  *   · 分数原样放在 `scores.textRecognition`，**不改名成置信度**。
  */
-export function candidatesFromOcr(rows, { shotId, viewId, ownerId }) {
+export function candidatesFromOcr(rows, { shotId, viewId, ownerId, query }) {
   const out = []
   for (const row of rows ?? []) {
     const label = row?.label
     if (typeof label !== 'string' || !label.trim()) continue
     const quad = Array.isArray(row.quad) ? row.quad.filter((p) => Array.isArray(p) && p.length >= 2) : []
     if (quad.length < 2) continue
-    const b = quadBounds(quad)
+    let b = quadBounds(quad)
     if (!b) continue
+    let shownLabel = label
+    // 有 query 时用**命中的词**的框：整行框的中心可能落在两个词之间的空白上。
+    if (query && Array.isArray(row.words) && row.words.length) {
+      const hit = matchWordRun(row.words, query)
+      const wb = hit ? wordsBounds(hit.words) : null
+      if (wb) {
+        b = wb
+        shownLabel = hit.text
+      }
+    }
     out.push({
       candidateId: randomUUID(),
       shotId,
@@ -192,7 +288,7 @@ export function candidatesFromOcr(rows, { shotId, viewId, ownerId }) {
       ownerId,
       source: 'ocr',
       kind: 'text',
-      label,
+      label: shownLabel,
       // 原图像素证据：OCR 给的是四点框，原样保留
       quadInSourceImage: quad.map(([x, y]) => [Number(x), Number(y)]),
       boxInSourceImage: b,

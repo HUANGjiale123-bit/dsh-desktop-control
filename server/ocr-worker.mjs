@@ -21,7 +21,8 @@
  * · OCR 分数只是**文字识别分数**，不是"可点击置信度"，所以这里不改名。
  */
 
-import { spawnSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -58,20 +59,40 @@ function decode(out) {
   }
 }
 
-function runPowerShell(script, args, timeoutMs) {
-  const r = spawnSync(PS, [
-    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, ...args,
-  ], { encoding: 'utf8', windowsHide: true, timeout: timeoutMs })
-  if (r.error) {
-    // ETIMEDOUT 是超时被杀，单独标出来：它和"程序不存在"是两种完全不同的局面，
-    // 混在一句 Spawn: ... 里，上层没法判断该不该重试。
-    const code = String(r.error.code ?? '')
-    if (code === 'ETIMEDOUT') return { ok: false, error: 'Timeout', message: 'OCR 超时被终止' }
-    return { ok: false, error: `Spawn: ${r.error.message}` }
+const execFileAsync = promisify(execFile)
+
+/**
+ * 起一个 PowerShell 跑脚本，**异步**等待。
+ *
+ * ── 为什么必须异步 ──
+ *
+ * 原来用 spawnSync：一次 OCR 会把宿主事件循环堵住 100~300ms（实测含启动更久）。
+ * 那段时间里整个插件是卡的 —— 连 desktop_list_windows 都进不来；
+ * 更糟的是"工具执行期间没有 await"会给人错觉，以为竞态不存在（评审第 4 条）。
+ * execFile 返回 Promise，让出事件循环，行为才是代码看上去的样子。
+ *
+ * 注意：异步不等于"竞态问题解决了" —— 恰恰相反，让出事件循环才**真的**产生
+ * 交错可能，所以提交前的那次有效性检查（index.mjs）现在是必须的，不是保险。
+ */
+async function runPowerShell(script, args, timeoutMs) {
+  try {
+    const { stdout } = await execFileAsync(PS, [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, ...args,
+    ], { encoding: 'utf8', windowsHide: true, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 })
+    return decode(stdout)
+  } catch (e) {
+    // execFile 的错误形状：非零退出 / 超时被杀 / 程序不存在，都从 error 上区分。
+    const code = String(e?.code ?? '')
+    if (code === 'ETIMEDOUT' || e?.killed) {
+      return { ok: false, error: 'Timeout', message: 'OCR 超时被终止' }
+    }
+    if (typeof e?.stdout === 'string' && e.stdout.trim()) {
+      // 脚本自己打印了 JSON（比如 ok:false）但又以非零退出：那才是我们要的结果。
+      const parsed = decode(e.stdout)
+      if (parsed && parsed.ok === false) return parsed
+    }
+    return { ok: false, error: `Spawn: ${e?.message ?? String(e)}` }
   }
-  const res = decode(r.stdout)
-  if (!res.ok && r.stderr) res.stderr = String(r.stderr).slice(0, 300)
-  return res
 }
 
 /**
@@ -81,19 +102,18 @@ function runPowerShell(script, args, timeoutMs) {
  * 没有中文语言包的机器上，中文界面 OCR 出来的东西是不可信的，
  * 那必须明说，而不是返回一堆乱码让模型去猜。
  */
-export function probeOcr() {
+export async function probeOcr() {
   const script = scriptPath()
-  if (!script) return { ok: false, error: 'NoOcrScript' }
-  // 用一个不存在但格式合法的路径只探测语言：脚本会在读文件前先报语言列表吗？
-  // 不会——所以这里跑一次真实 OCR 太重。改为直接问引擎的语言列表：见下。
-  const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-Command',
-    '[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null; ' +
-    '(@([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag })) -join ","'],
-  { encoding: 'utf8', windowsHide: true, timeout: 15000 })
-  const out = String(r.stdout ?? '').trim()
-  const languages = out ? out.split(',').map((s) => s.trim()).filter(Boolean) : []
-  return { ok: languages.length > 0, backend: 'windows-ocr', languages, script }
+  if (!script || !existsSync(script)) return { ok: false, error: 'NoOcrScript' }
+  const res = await runPowerShell(script, ['-ProbeOnly'], 15000)
+  const languages = Array.isArray(res.languages) ? res.languages : []
+  return {
+    ok: res.ok === true && languages.length > 0,
+    backend: 'windows-ocr',
+    languages,
+    script,
+    error: res.ok === true ? undefined : (res.error ?? 'NoOcrLanguage'),
+  }
 }
 
 /**
@@ -104,7 +124,7 @@ export function probeOcr() {
  * @returns {{ok:boolean, backend:string, image:{width,height}, elapsedMs:number,
  *            languages:string[], engineLanguage?:string, lines:Array, error?:string}}
  */
-export function runOcr(imagePath, opts = {}) {
+export async function runOcr(imagePath, opts = {}) {
   const script = scriptPath()
   // 脚本必须真实存在：不存在就明确说"没有后端"，而不是让 PowerShell 去报一个
   // 含糊的"文件找不到"，再被我们自己翻译成"执行失败"。
@@ -125,8 +145,10 @@ export function runOcr(imagePath, opts = {}) {
   const fullPath = String(imagePath).replace(/\//g, '\\')
   const args = ['-Path', fullPath]
   if (opts.lang) args.push('-Lang', String(opts.lang))
+  // 不传 -Lang 时脚本走 TryCreateFromUserProfileLanguages：让系统按用户偏好挑，
+  // 比"列表第一个"可靠（评审指出的问题）。真实用了哪种语言由 engineLanguage 回报。
 
-  const res = runPowerShell(script, args, timeoutMs)
+  const res = await runPowerShell(script, args, timeoutMs)
   if (!res.ok) return res
 
   /* 尺寸自检：脚本报的宽高必须和 PNG 头里的一致。

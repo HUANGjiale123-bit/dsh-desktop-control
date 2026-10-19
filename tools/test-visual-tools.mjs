@@ -189,7 +189,7 @@ try {
       const r = await clickCand.execute({ hwnd: win.hwnd, shotId: shotA, candidateId: pick.id, observe: false })
         .catch((e) => ({ err: e.message }))
       const t = r.result ?? r.err ?? ''
-      if (/已点击候选/.test(t) && /复查：那块 \d+x\d+ 像素与基线一致/.test(t)) {
+      if (/已点击候选/.test(t) && /复查：那块 \d+x\d+ 像素与截图时一致/.test(t)) {
         ok(`点到了「${pick.label.replace(/\s+/g, '')}」，复查通过`)
       } else {
         bad(`按候选点击失败：${t.slice(0, 200)}  原始=${JSON.stringify(r).slice(0, 300)}`)

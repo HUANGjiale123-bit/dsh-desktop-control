@@ -105,7 +105,12 @@ try {
   /* 3. 输出是垃圾：让 PowerShell 跑一个只会打印垃圾的脚本 */
   {
     const junk = join(tmp, 'junk.ps1')
-    writeFileSync(junk, "Write-Output 'this is not json at all'\n")
+    // 假脚本也要认 -ProbeOnly：真脚本自己会提前返回，不认的话探测阶段就要睡满。
+    writeFileSync(junk, [
+      'param([switch]$ProbeOnly)',
+      'if ($ProbeOnly) { Write-Output \'{"ok":true,"languages":["zh-Hans-CN"]}\'; exit 0 }',
+      "Write-Output 'this is not json at all'",
+    ].join('\n'))
     scenarios.push({
       name: '输出不是 JSON（协议不符）',
       env: { DSC_OCR_SCRIPT: junk },
@@ -116,7 +121,12 @@ try {
   /* 4. 卡死：脚本睡 5 秒，worker 的 timeout 设 800ms */
   {
     const slow = join(tmp, 'slow.ps1')
-    writeFileSync(slow, "Start-Sleep -Seconds 5\nWrite-Output '{}'\n")
+    writeFileSync(slow, [
+      'param([switch]$ProbeOnly)',
+      'if ($ProbeOnly) { Write-Output \'{"ok":true,"languages":["zh-Hans-CN"]}\'; exit 0 }',
+      'Start-Sleep -Seconds 5',
+      "Write-Output '{}'",
+    ].join('\n'))
     scenarios.push({
       name: '卡死（5 秒脚本，800ms 超时）',
       env: { DSC_OCR_SCRIPT: slow, DSC_OCR_TIMEOUT_MS: '800' },

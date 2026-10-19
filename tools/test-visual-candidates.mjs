@@ -17,7 +17,7 @@ import { join } from 'node:path'
 
 import {
   pngSize, cropFromRegion, viewPointToWindow, normalizeLabel, labelMatches,
-  candidatesFromOcr, candidatesFromProposal, createCandidateStore,
+  candidatesFromOcr, candidatesFromProposal, createCandidateStore, candidatePointToWindow,
 } from '../server/visual-candidates.mjs'
 import { probeOcr, runOcr, linesToRows } from '../server/ocr-worker.mjs'
 
@@ -62,6 +62,32 @@ console.log('── 1. 归一化点 → 窗口像素 ──')
     if (threw) ok(`${label} 被拒绝（不 clamp 到边缘）`)
     else bad(`${label} 没有被拒绝`)
   }
+}
+
+/* ══ 1b. 候选点（整图）→ 窗口像素：**不能**经过裁图变换 ══ */
+console.log()
+console.log('── 1b. 候选点 → 窗口像素（子区域也要对）──')
+{
+  // 评审给的反例：原图 2000x1000，region 是 (1000,200) 800x400，候选点在整图 (1200,400)。
+  // 正确结果是窗口 (1200,400)。旧实现把它当"裁图内归一化坐标"又乘了一次 crop，
+  // 实际送到点击链的是 (1480,360) —— 点歪了，而且看不出错。
+  const image = { width: 2000, height: 1000 }
+  const capture = { x: 0, y: 0, w: 2000, h: 1000 }
+  const cand = { pointInSourceImage: { x: 1200, y: 400 } }
+  const got = candidatePointToWindow(cand, image, capture)
+  if (got.x === 1200 && got.y === 400) ok('整图点 (1200,400) → 窗口 (1200,400)（不受 region 影响）')
+  else bad(`候选点被二次映射了：期望 (1200,400)，得到 (${got.x},${got.y})`)
+
+  // 截图与窗口尺寸不同时，两轴各自缩放
+  const scaled = candidatePointToWindow(cand, image, { x: 0, y: 0, w: 1000, h: 500 })
+  if (scaled.x === 600 && scaled.y === 200) ok('截图 2000x1000 / 窗口 1000x500 → (600,200)')
+  else bad(`缩放算错：${JSON.stringify(scaled)}`)
+
+  // 越界必须抛，不能夹边
+  let threw = false
+  try { candidatePointToWindow({ pointInSourceImage: { x: 2500, y: 10 } }, image, capture) } catch { threw = true }
+  if (threw) ok('越界点被拒绝（不夹到边界）')
+  else bad('越界点没有拒绝')
 }
 
 /* ══ 2. 裁剪区域 ══ */
@@ -165,7 +191,7 @@ console.log('── 4. 候选构造与级联失效 ──')
 console.log()
 console.log('── 5. 真实截图 → OCR → 候选 → 窗口像素（端到端）──')
 {
-  const probe = probeOcr()
+  const probe = await probeOcr()
   if (!probe.ok) {
     skip(`这台机器没有可用的 OCR（${probe.error ?? '无语言包'}），端到端这一段跳过`)
   } else {
@@ -198,7 +224,7 @@ console.log('── 5. 真实截图 → OCR → 候选 → 窗口像素（端到
           skip(`helper 截图失败：${String(shot.stdout ?? '').slice(0, 80)}`)
         } else {
           const size = pngSize(readFileSync(tmpPng).subarray(0, 64))
-          const r = runOcr(tmpPng, { lang: probe.languages[0] })
+          const r = await runOcr(tmpPng, { lang: probe.languages[0] })
           if (!r.ok) {
             bad(`OCR 失败：${r.error}`)
           } else {
