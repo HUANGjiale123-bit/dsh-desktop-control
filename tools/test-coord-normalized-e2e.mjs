@@ -39,7 +39,16 @@ const probe = createDesktopToolset({})
 
 const listRes = await probe.tools.listWindows({})
 const windows = listRes.windows ?? []
-const target = windows.find((w) => w.width > 300 && w.height > 300)
+/* 优先挑**前台窗口**当靶子。
+ *
+ * 踩到：这个测试要真的让 helper 把光标移过去，而 helper 注入前必须把目标窗口
+ * 激活到前台。原先挑的是"第一个够大的窗口"，于是当前台恰好是别的程序时，
+ * 激活会失败（"无法把窗口 X 激活到前台（当前前台是 Y）"），整个文件红掉 ——
+ * 而失败原因跟被测的坐标换算毫无关系。
+ * 前台窗口本来就在前台，不存在这个问题。
+ */
+const usable = (w) => w.width > 300 && w.height > 300 && w.exe
+const target = windows.find((w) => w.foreground && usable(w)) ?? windows.find(usable)
 if (!target) {
   console.log('  ✗ 没有找到可用的窗口来验证')
   process.exit(1)

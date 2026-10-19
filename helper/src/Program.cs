@@ -2727,6 +2727,8 @@ namespace Dsc
              */
             bool invoked = false;
             string cursorNote = "";
+            string cursorAfter = "";
+            bool cursorLanded = false;
 
             if (!right && !forceCoords)
             {
@@ -2748,6 +2750,13 @@ namespace Dsc
                      * 它有明确的失败可能（没输入权限、元素已消失、
                      * 矩形是空的），但**失败绝不影响后面的 Invoke** ——
                      * 视觉反馈是附加项，不是前提。移动失败只记进 cursorNote。
+                     *
+                     * ★ 移完必须**回读**，不能只信 SetCursorPos 的返回值。
+                     * 用户当场问过一句："鼠标还是没动啊？" —— 那时工具只打印
+                     * 一句"光标已移到元素上"，既没有坐标也没有回读，
+                     * 谁也证明不了它到底动没动。现在把回读坐标和是否到位一起报出去：
+                     * 到位 = 用户能看见；没到位 = 明说没到位（那通常是沙箱/权限环境，
+                     * 和我们之前在 Low 完整性下遇到的是同一类）。
                      */
                     try
                     {
@@ -2758,9 +2767,23 @@ namespace Dsc
                             int fcx = (int)Math.Round(br.Left + br.Width / 2);
                             int fcy = (int)Math.Round(br.Top + br.Height / 2);
                             if (Native.SetCursorPos(fcx, fcy))
-                                cursorNote = "，光标已移到元素中心 (" + fcx + "," + fcy + ")";
+                            {
+                                Native.POINT at;
+                                if (Native.GetCursorPos(out at))
+                                {
+                                    cursorAfter = at.X + "," + at.Y;
+                                    cursorLanded = Math.Abs(at.X - fcx) <= 2 && Math.Abs(at.Y - fcy) <= 2;
+                                }
+                                cursorNote = cursorLanded
+                                    ? "，光标已移到元素中心 (" + fcx + "," + fcy + ")（回读一致）"
+                                    : "，光标没到元素中心（目标 " + fcx + "," + fcy +
+                                      "，回读 " + (cursorAfter.Length > 0 ? cursorAfter : "?") +
+                                      "）—— 只影响\"看得见\"，不影响触发";
+                            }
                             else
-                                cursorNote = "，光标移动失败（不影响触发）";
+                            {
+                                cursorNote = "，光标移动被系统拒绝（不影响触发）";
+                            }
                         }
                     }
                     catch
@@ -2818,7 +2841,9 @@ namespace Dsc
                 jv.Obj().Key("ok").Bool(true)
                     .Key("matched").Val(desc)
                     .Key("method").Val("InvokePattern")
-                    .Key("cursorMoved").Bool(cursorNote.Length > 0)
+                    // cursorMoved 现在是**回读验证过的**，不是"我调过 SetCursorPos"。
+                    .Key("cursorMoved").Bool(cursorLanded)
+                    .Key("cursorAfter").Val(cursorAfter)
                     .Key("verified").Bool(false)
                     .Key("note").Val(
                         "已通过控件的 InvokePattern 触发" + cursorNote + "。" +

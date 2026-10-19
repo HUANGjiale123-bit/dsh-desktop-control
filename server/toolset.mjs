@@ -2224,12 +2224,25 @@ export function createDesktopToolset(options = {}) {
       // （字段全是 undefined）。现在 helper 已经不再往 method 里拼东西，
       // 但这里仍然按前缀判断 —— 描述方式变了不该让分支判断失效。
       if (String(r.method ?? '').startsWith('InvokePattern')) {
+        /* 光标那条要**说清楚发生了什么**，并且带坐标。
+         *
+         * 用户问过："感觉鼠标还是没动啊？"—— 而那时工具只打印一句
+         * "光标已移到元素上"，没有坐标、没有回读，谁也没法证明它动了没有。
+         * 现在 helper 会回读 GetCursorPos，这里把回读值原样带出来：
+         *   cursorMoved=true  → 光标确实停在元素中心（给坐标）
+         *   cursorMoved=false 且 cursorAfter 有值 → 没到位（给目标和回读，说明只影响"看得见"）
+         *   两者都空 → 元素没有可用矩形，本来就没尝试移动
+         */
+        const cursorLine = r.cursorMoved
+          ? `  光标已移到元素上（回读 ${r.cursorAfter}）—— 只为让人看见，Invoke 本身不需要坐标\n`
+          : r.cursorAfter
+            ? `  ⚠ 光标没能落到元素中心（回读 ${r.cursorAfter}）—— 只影响"看得见"，` +
+              `触发已经发出；沙箱/权限受限环境常见\n`
+            : `  没有移动鼠标（元素没有可用矩形，或这类控件不需要坐标）\n`
         return {
           text:
             `已按描述符 "${r.matched}" 定位到元素，并通过它的 **InvokePattern** 触发。\n` +
-            (r.cursorMoved
-              ? `  光标已移到元素上（只为让人看见，Invoke 本身不需要坐标）\n`
-              : `  没有移动鼠标（这类控件不需要坐标，也就不受遮挡和缩放影响）\n`) +
+            cursorLine +
             `  未核实：Invoke 是异步投递，返回成功不代表界面已经改变。\n` +
             `  要确认效果请用 desktop_read_window 或 desktop_screenshot 再看一次。`,
         }

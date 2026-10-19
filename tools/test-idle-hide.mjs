@@ -130,13 +130,34 @@ const op = await shot.execute({ hwnd, maxNodes: 5 }).catch((e) => ({ error: e.me
 console.log(`  触发一次操作（screenshot hwnd=${hwnd}）→ ${op.error ? '失败: ' + op.error : '成功'}`)
 
 // ── 观察：指示层应当被拉起 ──
-const running = () =>
-  spawnSync('powershell.exe', ['-NoProfile', '-Command',
-    "if (Get-Process dsc-esc -EA SilentlyContinue) { 'yes' } else { 'no' }"],
-    { encoding: 'utf8', windowsHide: true }).stdout.trim() === 'yes'
+//
+// 两件不同的事，用两个不同的信号：
+//
+//   · "**有没有**指示层在跑"  → 看系统里有没有 dsc-esc 进程（任意一个）。
+//     这正是用户看到的东西，所以"拉起"和"持续期间不收"用它。
+//   · "**这次插件实例有没有收起它**" → 看**日志里那条"自动收起指示层"**。
+//     不能用"进程消失"来判断：dsc-esc 是单实例的，如果用户自己的 ESC 监听器
+//     本来就在跑，这个测试就永远 spawn 不出自己的进程，于是"空闲后应自动收起"
+//     会在整套测试连跑时假红、单跑时又假绿。
+function escPids() {
+  const out = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+    "(Get-Process dsc-esc -EA SilentlyContinue | ForEach-Object { $_.Id }) -join ','"],
+    { encoding: 'utf8', windowsHide: true }).stdout.trim()
+  return out.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+const preexistingEsc = new Set(escPids())
+const anyEsc = () => escPids().length > 0
+const ourEsc = () => escPids().filter((id) => !preexistingEsc.has(id))
+const hidByUs = () => logs.some((l) => l[1].includes('自动收起指示层'))
+
+if (preexistingEsc.size > 0) {
+  console.log(`  · 开跑前已有 ${preexistingEsc.size} 个 dsc-esc 在跑（你自己的 ESC 监听器？）`
+    + '——本次不再拉起新实例，收起改用日志判断')
+}
 
 await new Promise((r) => setTimeout(r, 1500))
-if (running()) ok('变更性操作后指示层被自动拉起')
+if (anyEsc()) ok('变更性操作后指示层被自动拉起')
 else {
   bad('指示层没有被拉起 —— 自动显示能力坏了')
   console.log('     相关日志:', logs.slice(-3).map((l) => l[1]).join(' | '))
@@ -146,16 +167,18 @@ else {
 await new Promise((r) => setTimeout(r, 2000))
 await shot.execute({ hwnd, maxNodes: 5 }).catch(() => { })
 await new Promise((r) => setTimeout(r, 2500))
-if (running()) ok('操作持续期间不会被收（锚点被推后）')
+if (anyEsc()) ok('操作持续期间不会被收（锚点被推后）')
 else bad('操作还在进行时指示层就被收了 —— 计时没重置')
 
 // ── 停止操作，等超过 IDLE_HIDE_MS（4 秒）+ 检查间隔 ──
 await new Promise((r) => setTimeout(r, 9000))
-if (!running()) ok('空闲后自动收起')
-else {
+if (hidByUs()) ok('空闲后自动收起（日志里有收起记录）')
+else if (ourEsc().length === 0 && preexistingEsc.size > 0) {
+  bad('空闲 9 秒后仍没有收起记录 —— 插件没有收掉自己该收的指示层')
+} else if (ourEsc().length === 0) {
+  bad('空闲 9 秒后仍没有收起记录（进程也没了，但日志没说为什么）')
+} else {
   bad('空闲 9 秒后指示层仍在（IDLE_HIDE_MS=4 秒，应该早收了）')
-  spawnSync('powershell.exe', ['-NoProfile', '-Command',
-    'Get-Process dsc-esc -EA SilentlyContinue | Stop-Process -Force'], { windowsHide: true })
 }
 
 // ── 关键：收起不能写闸门 ──
@@ -167,7 +190,16 @@ const hideLog = logs.find((l) => l[1].includes('自动收起指示层'))
 if (hideLog) ok(`日志记录了收起原因：${hideLog[1].slice(0, 60)}`)
 else bad('日志里没有收起记录 —— 事后无法判断它为什么消失')
 
-// 清理
+// 清理：只收掉**本次测试拉起的** dsc-esc。
+// 用户自己的 ESC 监听器（开跑前就在的那些）一律不动 —— 那是急停能力，不是垃圾。
+try {
+  const mine = escPids().filter((id) => !preexistingEsc.has(id))
+  if (mine.length) {
+    spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      `Stop-Process -Id ${mine.join(',')} -Force -ErrorAction SilentlyContinue`],
+      { windowsHide: true })
+  }
+} catch { /* 收不掉就留给系统 */ }
 try { rmSync(tmp, { recursive: true, force: true }) } catch { }
 
 console.log()
