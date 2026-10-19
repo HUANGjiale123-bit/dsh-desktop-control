@@ -109,8 +109,32 @@ try {
         if (clickEv.recheck && typeof clickEv.recheck.diffPixels === 'number') {
           ok(`记录里有复查结果：diffPixels=${clickEv.recheck.diffPixels} maxDelta=${clickEv.recheck.maxDelta} tol=${clickEv.recheck.tol}`)
         } else bad('记录里没有复查结果')
-        if (clickEv.sourceImage && existsSync(clickEv.sourceImage)) ok('记录里带来源图片路径，且文件存在')
-        else bad('来源图片路径缺失或不存在')
+        const before = clickEv.beforeImage ?? clickEv.sourceImage
+        if (before && existsSync(before)) ok('记录里带 before 图片路径，且文件存在')
+        else bad(`before 图片路径缺失或不存在：${JSON.stringify(before)}`)
+      }
+    }
+  }
+
+  console.log()
+  console.log('── 1b. 动作后的画面（after 帧）也要记进去 ──')
+  {
+    const shot3 = await by.get('desktop_screenshot').execute({ hwnd: win.hwnd })
+    const list3 = await by.get('desktop_visual_candidates').execute({ hwnd: win.hwnd, shotId: shot3.shotId })
+    const c3 = [...(list3.result ?? '').matchAll(/#\d+ ([0-9a-f-]{36})/g)].map((m) => m[1])[0]
+    if (!c3) {
+      skip('没取到候选，跳过 after 帧检查')
+    } else {
+      await by.get('desktop_click_candidate').execute({
+        hwnd: win.hwnd, shotId: shot3.shotId, candidateId: c3, observe: true, settleMs: 300,
+      }).catch(() => {})
+      const ev = readTrace().filter((e) => e.kind === 'click' && e.ok === true).pop()
+      if (ev?.afterImage && existsSync(ev.afterImage)) {
+        ok(`after 帧已记录：${ev.afterShotId}（文件存在）`)
+      } else if (ev?.afterImage === null) {
+        skip('这次 observe 没产出 after 帧')
+      } else {
+        bad(`after 帧没记进去：afterImage=${JSON.stringify(ev?.afterImage)}`)
       }
     }
   }

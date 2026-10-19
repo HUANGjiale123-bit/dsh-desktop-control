@@ -67,7 +67,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.50'
+const PLUGIN_VERSION = '2.18.51'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -87,6 +87,17 @@ const OBSERVE = {
 const SETTLE_MS = {
   type: 'integer',
   description: '动作后等待多久再截图，毫秒，默认 220。界面响应慢的应用可以调大（上限 5000）。',
+}
+
+/** 最近一次 apply 出来的 toolset。
+ *
+ * 只给测试用：外部评审要求在**工具边界**拦截真正传给 `set.tools.click` 的参数
+ * （纯函数单测证明不了"调用点传对了坐标空间"）。宿主不会读这个导出，生产行为不变。
+ */
+let __lastToolset = null
+
+export function getToolsetForTest() {
+  return __lastToolset
 }
 
 export function apply(ctx, config = {}) {
@@ -2238,18 +2249,22 @@ function applyInner(ctx, config = {}) {
         `  通过现有链路：白名单 / 几何 / 落点归属都查过了`,
         `  未核实：点击已发出，但应用是否响应要重新观察。`,
       ]
+      const outcome = await observeAfter(args.hwnd, lines.join('\n'), args.observe, args.settleMs)
+      // 动作后的观察也算证据：before 是这张截图，after 是动作之后那张。
       recordTrace({
         kind: 'click', ok: true,
         hwnd: args.hwnd, shotId: String(args.shotId),
         candidateId: args.candidateId ?? null, viewId: args.viewId ?? null,
         label: cand.label, source: cand.source ?? 'ocr',
-        sourceImage: rec.filepath,
+        beforeImage: rec.filepath,
+        afterShotId: lastObservation?.shotId ?? null,
+        afterImage: lastObservation?.filepath ?? null,
         imagePoint: { x: Math.round(cand.pointInSourceImage.x), y: Math.round(cand.pointInSourceImage.y) },
         windowPoint: wpx, desktopPoint: { x: rec.x + wpx.x, y: rec.y + wpx.y },
         recheck: { diffPixels: diff.diffPixels, total: diff.totalPixels, maxDelta: diff.maxDelta, tol: diff.tol },
         roi,
       })
-      return observeAfter(args.hwnd, lines.join('\n'), args.observe, args.settleMs)
+      return outcome
       } catch (e) {
         // 失败也要留痕：拒绝的原因、以及**没有发送输入**这件事，比成功更值得回放。
         recordTrace({
@@ -2450,6 +2465,11 @@ function applyInner(ctx, config = {}) {
   // 在几百行之外，看着完全不像变量撞名。
   const DEFAULT_SETTLE_MS = 220
 
+  /* 最近一次自动观察的身份（shotId + 文件路径）。
+   * observeAfter 的返回值形状受工具 output schema 限制（additionalProperties: false），
+   * 不能塞额外字段，所以用模块变量带出去，给 trace 用。 */
+  let lastObservation = null
+
   async function observeAfter(hwnd, text, observe, settleMs) {
     if (observe === false) return { result: text }
 
@@ -2479,6 +2499,7 @@ function applyInner(ctx, config = {}) {
         Number.isFinite(g.w) && Number.isFinite(g.h) && g.w > 0 && g.h > 0
       const shotId = recordObservation({ hwnd, geom: g, geomOk, pngPath: shot.filepath })
 
+      lastObservation = { hwnd, shotId, filepath: shot.filepath }
       const image = await imageBlockFor(shot.filepath)
       const tail =
         `\n\n── 动作后的画面 ──\n` +
@@ -3815,4 +3836,6 @@ function applyInner(ctx, config = {}) {
         `会话结束后授权不会被撤销`,
     )
   }
+
+  __lastToolset = set
 }
