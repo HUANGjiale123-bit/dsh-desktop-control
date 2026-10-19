@@ -58,7 +58,9 @@ done
 
 # ③ 同步到目标
 mkdir -p "$DEST/bin"
-for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json; do
+# uia-bridge.py 必须一起拷：Chromium 系的读取桥靠它。
+# 漏了它的表现不是报错，而是"读到的节点变少"—— 静默降级，最难查的那种。
+for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py; do
   cp "$SRC/$f" "$DEST/$f"
 done
 for exe in dsc.exe dsc-esc.exe; do
@@ -70,7 +72,7 @@ echo
 # ④ 校验：源与目标逐文件比对
 echo "校验（源 ↔ 目标）："
 fail=0
-for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json bin/dsc.exe bin/dsc-esc.exe; do
+for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py bin/dsc.exe bin/dsc-esc.exe; do
   a=$(md5sum "$SRC/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   b=$(md5sum "$DEST/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   if [ "$a" = "$b" ] && [ "$a" != "missing" ]; then
