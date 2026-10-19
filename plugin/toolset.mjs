@@ -251,6 +251,186 @@ export function createDesktopToolset(options = {}) {
   //
   // 名字用 helper.<子命令>，这样"一次点击花了 300ms，其中两次 helper 往返
   // 各占 95ms"能直接看出来 —— 而这两次往返是**可以并行化或合并**的候选。
+  /* ───────────────────── UIA 读取桥 ─────────────────────
+   *
+   * ── 为什么存在这一层 ──
+   *
+   * 实测（同一个 SuYou 窗口、同一秒）：
+   *
+   *   父进程 bash / cmd / python（都非 .NET）→ PowerShell 读到 39 / 38 / 37 / 37 / 29
+   *   父进程 .NET（dsc.exe / DpiTest / JobTest）→ 读到 5 / 4 / 3 / 2 / -1
+   *
+   * 而且影响沿整条进程树传下去：
+   *
+   *   .NET → cmd.exe → powershell.exe    → 5
+   *   .NET → python.exe → powershell.exe → 5
+   *
+   * 所以桥不能由 dsc.exe（.NET）启动。DSH 是 Node.js，不是 .NET ——
+   * 由这里直接起 python（也不是 .NET），那条链上就没有 .NET 了。
+   *
+   * 实测这样能读到完整树：29 个节点，含「首页」「规则模式」「充值」这些
+   * 有名字、有控制类型、有矩形的元素。而 dsc.exe 读同一窗口是 0 个。
+   *
+   * ── 代价 ──
+   *
+   * 每次查询要起一个 python 进程，约 300-800ms。所以只在 dsc.exe 的树
+   * 明显不可用时才走这条路，不是默认路径。
+   */
+
+  /** python 在哪。找不到就返回 null —— 桥是可选的，不是硬依赖。 */
+  function findPython() {
+    const fromEnv = process.env.DSC_PYTHON
+    if (fromEnv && existsSync(fromEnv)) return fromEnv
+
+    // DSH 的 runtime 目录里通常带一个
+    const candidates = []
+    const home = process.env.USERPROFILE || process.env.HOME || ''
+    if (home) {
+      candidates.push(join(home, '.dsh', 'dsh-runtimes', 'dsh-primary-runtime',
+        'dependencies', 'python', 'python.exe'))
+    }
+    for (const c of candidates) {
+      if (existsSync(c)) return c
+    }
+
+    // 最后交给 PATH
+    return 'python'
+  }
+
+  /** 桥脚本的路径。插件打包后它和 toolset 同目录。 */
+  function bridgeScript() {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const cand = [
+      join(here, 'uia-bridge.py'),
+      join(here, '..', 'server', 'uia-bridge.py'),
+    ]
+    for (const c of cand) if (existsSync(c)) return c
+    return null
+  }
+
+  /**
+   * 用桥读一棵树。失败返回 null（调用方据此降级，不报错）。
+   *
+   * 安全上和 helper 一致：调用方必须先 authorize(hwnd)，这里不再重复授权，
+   * 但**不接受调用方传任意脚本** —— 脚本是固定的 uia-bridge.py。
+   */
+  function readTreeViaBridge(hwnd, maxNodes = 300, timeoutMs = 12000) {
+    const py = findPython()
+    const script = bridgeScript()
+    if (!py || !script) return Promise.resolve(null)
+
+    return new Promise((resolvePromise) => {
+      let done = false
+      const finish = (v) => { if (!done) { done = true; resolvePromise(v) } }
+
+      let child
+      try {
+        child = spawn(py, [script, String(hwnd)], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        })
+      } catch {
+        return finish(null)
+      }
+
+      let out = ''
+      let err = ''
+      const timer = setTimeout(() => {
+        try { child.kill() } catch { /* 已经退了 */ }
+        finish(null)
+      }, timeoutMs)
+
+      child.stdout.on('data', (d) => { out += d.toString('utf8') })
+      child.stderr.on('data', (d) => { err += d.toString('utf8') })
+      child.on('error', () => { clearTimeout(timer); finish(null) })
+      child.on('close', () => {
+        clearTimeout(timer)
+        const line = out.trim().split('\n').filter(Boolean).pop()
+        if (!line) return finish(null)
+        try {
+          const parsed = JSON.parse(line)
+          return finish(parsed && parsed.ok ? parsed : null)
+        } catch {
+          return finish(null)
+        }
+      })
+    })
+  }
+
+  /** 从 helper 的 tree 结果里抽出内容子窗口的 hwnd（Chromium 的内容在子窗口里）。 */
+  function findNearChildWindows(treeResult) {
+    const out = []
+    const text = treeResult?.tree ?? ''
+    // helper 的 tree 里每行形如：[5] Pane "Chrome Legacy Window" aid=12 @(...)
+    // 但那行没有 hwnd。所以退一步：用 list_windows 拿不到子窗口，
+    // 只能靠桥自己再枚举。这里返回空，由桥内部处理。
+    return out
+  }
+
+  /**
+   * 把桥的返回转成 helper tree 的形状。
+   *
+   * 两个来源必须产出同样的字段，否则下游（模型看到的文本、usable 判断、
+   * 角色统计）会各走一路 —— 那种分叉最容易出"看起来读到了、其实格式不同"。
+   */
+  function convertBridgeResult(bridged, original) {
+    const items = bridged.items ?? []
+    const roleCount = new Map()
+    let named = 0
+    let actionable = 0
+
+    const ACTIONABLE = new Set([
+      'Button', 'RadioButton', 'CheckBox', 'ComboBox', 'Edit', 'Hyperlink',
+      'ListItem', 'MenuItem', 'Tab', 'TabItem', 'Slider', 'Spinner',
+      'SplitButton', 'TreeItem', 'DataItem', 'Calendar', 'Text',
+    ])
+
+    const lines = []
+    items.forEach((it, i) => {
+      // 桥给的 type 形如 "ControlType.Text"
+      const type = String(it.type || '').replace('ControlType.', '') || 'Unknown'
+      roleCount.set(type, (roleCount.get(type) ?? 0) + 1)
+      const name = String(it.name || '')
+      if (name) named++
+      if (ACTIONABLE.has(type)) actionable++
+
+      const rect = `@(${it.l},${it.t} ${it.w}x${it.h})`
+      const namePart = name ? ` "${name}"` : ''
+      lines.push(`[${i}] ${type}${namePart} ${rect}`)
+    })
+
+    const roles = [...roleCount.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ')
+
+    const total = items.length
+    // 和 helper 的 usable 判据保持一致：有名字且至少一个可交互
+    const usable = named >= 3 && actionable >= 1
+
+    return {
+      ok: true,
+      hwnd: bridged.hwnd ?? original.hwnd,
+      revision: (original.revision ?? 1) + 1,
+      total: bridged.nodes ?? total,
+      listed: total,
+      truncated: (bridged.nodes ?? total) > total,
+      named,
+      actionable,
+      usable,
+      roles,
+      tree: lines.join('\n'),
+      viaBridge: true,
+      viaHwnd: bridged.viaHwnd,
+      bridgeReported: {
+        isControlElement: bridged.isControlElement,
+        isContentElement: bridged.isContentElement,
+        name: bridged.name,
+        className: bridged.className,
+      },
+    }
+  }
+
   function runHelper(args, allow, timeoutMs = 30000) {
     return span(`helper.${args[0]}`, () => runHelperInner(args, allow, timeoutMs))
   }
@@ -1090,8 +1270,40 @@ export function createDesktopToolset(options = {}) {
       const auth = await authorize(hwnd, 'readWindow')
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['tree', String(hwnd), String(maxNodes ?? 300)], auth.window)
+      let r = await runHelper(['tree', String(hwnd), String(maxNodes ?? 300)], auth.window)
       if (!r.ok) return { isError: true, text: failMessage(r) }
+
+      /* ── 树不可用时，用桥再试一次 ──
+       *
+       * Chromium 系（Electron / Tauri / Edge）在 dsc.exe 里读不到内容：
+       * IsControlElement 被算成 true，控件视图不再展开，FindAll 返回 0。
+       * 而从非 .NET 进程启动的 UIA 客户端读同一窗口能拿到 39 个节点
+       * （含「首页」「规则模式」「全局模式」，都有名字和矩形）。
+       *
+       * 所以这里做的是"换一条已验证能读的通道再试一次"。失败就静默降级回
+       * 原来的质量提示 —— 桥是加分项，不是硬依赖（没有 python 的机器上
+       * 它应该完全无感）。
+       */
+      let bridgeNote = ''
+      if (!r.usable) {
+        const candidates = [hwnd, ...findNearChildWindows(r)]
+        let bridged = null
+        for (const h of candidates) {
+          const got = await readTreeViaBridge(h, maxNodes ?? 300)
+          if (got && Array.isArray(got.items) && got.items.length > (r.total ?? 0)) {
+            bridged = got
+            bridged.viaHwnd = got.viaHwnd ?? h
+            break
+          }
+        }
+        if (bridged) {
+          r = convertBridgeResult(bridged, r)
+          bridgeNote =
+            `\n\n（这棵树来自 UIA 桥：dsc.exe 直读时 Chromium 把窗口当成叶子元素，` +
+            `换用非 .NET 的读取进程后拿到 ${bridged.nodes} 个节点，` +
+            `来源窗口 hwnd=${bridged.viaHwnd}。）`
+        }
+      }
 
       // ── 把"这棵树能不能用"一并说出来 ──
       //
@@ -1127,7 +1339,8 @@ export function createDesktopToolset(options = {}) {
           `窗口 ${hwnd} 无障碍树（共 ${r.total} 个元素，列出 ${r.listed} 个；` +
           `带名字 ${r.named}，可交互 ${r.actionable}）：\n` +
           r.tree +
-          quality,
+          quality +
+          bridgeNote,
       }
     },
 

@@ -38,6 +38,11 @@ cp "$REPO/server/toolset.mjs" "$SRC/toolset.mjs"
 # apps.mjs 也住在 server/：toolset.mjs import 它，所以测试要能直接在
 # server/ 下 import（放 plugin/ 的话，测 server/toolset.mjs 就会找不到）。
 cp "$REPO/server/apps.mjs" "$SRC/apps.mjs"
+# UIA 读取桥：Chromium 系在 dsc.exe（.NET）里读不到内容，
+# 要由这个非 .NET 的 python 脚本代读。少拷它 = 桥静默失效，
+# 而失效的表现只是"读到的节点少"，不会报错 —— 正是这个脚本底部
+# 那段注释说的那类事故。
+cp "$REPO/server/uia-bridge.py" "$SRC/uia-bridge.py"
 echo "① server/toolset.mjs → plugin/toolset.mjs"
 
 # ② 辅助程序：helper/bin → plugin/bin
