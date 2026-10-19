@@ -8,7 +8,7 @@
  * 它会读本机的窗口、无障碍树与屏幕像素——这些发生在运行它的那台机器上。
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, stat, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -623,7 +623,33 @@ export function createDesktopToolset(options = {}) {
 
       const timer = setTimeout(() => {
         try { child.kill() } catch {}
-        finish({ ok: false, error: 'Timeout', message: `dsc.exe ${args[0]} 超时（${timeoutMs}ms）` })
+        /* ── 超时可能是"按下之后被杀" ──
+         *
+         * 用户实测到过鼠标卡在按下状态（黏在窗口上能拖着动）。成因：helper 在
+         * mouse_event(down) 与 (up) 之间被 TerminateProcess 杀掉，而 Windows
+         * 不会替谁松开。helper 自己挂了 ProcessExit 兜底，但**强杀收不到那个回调**，
+         * 所以这里补一发 release。
+         *
+         * 代价说明：release 会松开左/右/中三个键 —— 如果用户此刻正自己按着鼠标，
+         * 也会被一起松开。鼠标只有一个，这是无法两全的地方；两害相权，
+         * "把卡住的键松开"比"让用户拖不了东西"更可接受。
+         */
+        try {
+          const env = allow === 'configured'
+            ? { ...process.env, DSC_ALLOWED_APPS: effectiveAllowlist().join(',') }
+            : process.env
+          const gate2 = typeof options.getGatePath === 'function' ? options.getGatePath() : options.gatePath
+          spawnSync(helperPath, ['release'], {
+            encoding: 'utf8', windowsHide: true, timeout: 4000,
+            env: gate2 ? { ...env, DSC_HALT_GATE: gate2 } : env,
+          })
+        } catch { /* 补发失败也不影响超时结论 */ }
+        finish({
+          ok: false,
+          error: 'Timeout',
+          message: `dsc.exe ${args[0]} 超时（${timeoutMs}ms）` +
+            `（已补发一次鼠标松开，避免按键卡在按下状态）`,
+        })
       }, timeoutMs)
 
       child.stdout.on('data', (b) => out.push(b))

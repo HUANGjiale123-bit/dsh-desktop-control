@@ -64,7 +64,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.40'
+const PLUGIN_VERSION = '2.18.41'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1578,6 +1578,28 @@ function applyInner(ctx, config = {}) {
         }
       }
 
+      /* ── OCR 跑完之后，先确认这张观察**还活着** ──
+       *
+       * 外部评审第 4 条：OCR 期间截图可能被淘汰（超过 24 条、动作后作废）、
+       * 会话可能结束、权限可能被收回。那时候迟到的结果**不能登记** ——
+       * 一旦登记，就是一个"指向已经不存在的观察"的候选，而它照样能算出坐标。
+       *
+       * 判据用 generation：登记时自增的序号。同一 shotId 的 generation 变了，
+       * 说明这条记录被替换/重建过；记录不在，说明被清掉了。
+       */
+      const stillThere = recentShots.get(String(args.shotId))
+      if (!stillThere || Number(stillThere.generation) !== Number(rec.generation)) {
+        return {
+          result:
+            `观察 ${args.shotId} 在 OCR 期间失效了（被作废、被淘汰，或会话/权限变了），` +
+            `本次**没有登记任何候选**。
+` +
+            `  · 这是刻意的：迟到的识别结果指向的界面已经不在了；
+` +
+            `  [retry=reobserve] 重新截图、重新取候选。`,
+        }
+      }
+
       const rows = linesToRows(ocr.lines)
       const inCrop = rows.filter((row) => intersectsCrop(row.quad, crop))
       const matched = inCrop.filter((row) => labelMatches(row.label, args.query))
@@ -1667,6 +1689,22 @@ function applyInner(ctx, config = {}) {
           : [{ type: 'text', text: value.result }],
     },
     async execute(args, exec) {
+      /* 急停要在**最前面**查。
+       *
+       * 用户按 ESC 的意图是"别再碰我的电脑"。如果这里不查，流程会一路走到
+       * 复查（helper 会拒绝 region_hash）然后报"复查没做成" —— 那句话会把
+       * "用户叫停了"说成"技术上失败了"，方向完全错了。
+       */
+      if (isHalted()) {
+        // ★ 插件层的错误必须**抛**，不能返回 {isError}：
+        //   {isError} 是 toolset 层的形状，宿主不认识它，会当成一次成功的调用 ——
+        //   于是这一轮的 trace 记成 ok，旧截图还会被当成"动作之后"清掉。
+        throw new Error(
+          '失败：Halted — 用户按了 ESC 叫停（闸门拉着），这次点击没有执行。\n' +
+          '  不要重试，也不要自行解除闸门 —— 它由人来清。  [retry=stop]',
+        )
+      }
+
       const rec = shotRecordFor(args.shotId, args.hwnd)
       const { image } = verifiedImageOf(rec)
       const cand = visualStore.getCandidate(String(args.candidateId))
@@ -1751,14 +1789,13 @@ function applyInner(ctx, config = {}) {
         )
       }
       if (String(liveHash.hash) !== String(oldHash.hash)) {
-        return {
-          isError: true,
-          text:
-            `拒绝点击：候选「${cand.label}」那块区域的内容**已经变了**。\n` +
-            `  截图时的指纹 ${oldHash.hash}，现在是 ${liveHash.hash}。\n` +
-            `  窗口没移动也会变（滚动、弹层、列表刷新都会）。所以没有发送任何输入。\n` +
-            `  [retry=reobserve] 重新截图、重新取候选再点。`,
-        }
+        // 同上：抛，不返回 {isError}。带上机器可读的码，便于上层按"没发输入"处理。
+        throw new Error(
+          `失败：StaleVisualTarget — 拒绝点击：候选「${cand.label}」那块区域的内容**已经变了**。\n` +
+          `  截图时的指纹 ${oldHash.hash}，现在是 ${liveHash.hash}。\n` +
+          `  窗口没移动也会变（滚动、弹层、列表刷新都会）。所以没有发送任何输入。\n` +
+          `  [retry=reobserve] 重新截图、重新取候选再点。`,
+        )
       }
 
       // 走现有链路：desktop 空间 + expectedGeom —— 窗口一移就拒（候选路径保守到底）
@@ -2272,6 +2309,7 @@ function applyInner(ctx, config = {}) {
     'Refused',             // 激活失败 / 落点不属于目标 / 光标移不过去
     'StaleTarget',         // 目标窗口没了
     'StaleSnapshot',       // 界面已经变了（这种本来就该重截）
+    'StaleVisualTarget',   // 候选那块像素变了：校验阶段就拒绝，没有发输入
     'NotFound',
     'AmbiguousTarget',
     'BadValue', 'BadIndex', 'BadAction', 'OutOfRange',

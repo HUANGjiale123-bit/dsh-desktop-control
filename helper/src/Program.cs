@@ -850,6 +850,17 @@ namespace Dsc
             // 即"修复"比不修更糟，故移除。桌面句柄不同不构成本次注入失败的原因。
             Console.OutputEncoding = Encoding.UTF8;
 
+            /* ── 退出兜底：把**我们按下的**鼠标键抬起来 ──
+             *
+             * 用户报过"鼠标黏在窗口上能拖着动"，也就是左键没抬。
+             * 成因：按下和抬起之间隔着 Sleep(40ms)，进程若在这中间被
+             * TerminateProcess 杀掉（宿主超时兜底就是这么干的），抬起就永远不执行。
+             * 这里挂 ProcessExit 兜住"正常退出 / 未处理异常退出"两类；
+             * 被强杀的进程收不到这个回调，那种情况由插件侧在超时后补一发 release
+             * （见 toolset 的 Timeout 处理）。
+             */
+            AppDomain.CurrentDomain.ProcessExit += delegate { ReleaseOursIfStuck(); };
+
             // 剥掉全局选项（--allow x），它们可能出现在命令名之前。
             // 不剥的话 `dsc.exe --allow notepad.exe set_value ...` 会被当成 help
             // ——这个坑我踩过一次，测试时看到的是帮助文本而不是错误。
@@ -4071,10 +4082,52 @@ namespace Dsc
             down = Native.MOUSEEVENTF_LEFTDOWN; up = Native.MOUSEEVENTF_LEFTUP;
         }
 
+        /* 我们**自己按着**的鼠标键（位掩码）。0 = 没按着。
+         *
+         * ── 为什么必须有这个记账 ──
+         *
+         * 用户实测到过"鼠标黏在窗口上，拖着动"—— 也就是左键处于按下状态没抬起来。
+         * 成因很具体：按下和抬起之间隔着一次 Sleep(40ms)，如果这中间进程被
+         * **TerminateProcess 杀掉**（宿主的超时兜底就是这么干的），抬起那一句
+         * 永远不会执行，而 Windows 不会替谁松开鼠标。
+         *
+         * 所以：按下时记账、抬起时销账；进程正常退出/抛异常退出时兜底松开。
+         * 注意只能松开"我们记着的"那些键 —— 用户自己按着的不能碰。
+         */
+        private static int _mouseDownMask = 0;
+        private static readonly object _mouseLock = new object();
+
+        private static int MouseBit(string button)
+        {
+            if (button == "right") return 2;
+            if (button == "middle") return 4;
+            return 1;
+        }
+
+        /// <summary>兜底：把**我们自己**按下的键抬起来。可重复调用。</summary>
+        public static void ReleaseOursIfStuck()
+        {
+            int mask;
+            lock (_mouseLock)
+            {
+                mask = _mouseDownMask;
+                _mouseDownMask = 0;
+            }
+            if (mask == 0) return;
+            try
+            {
+                if ((mask & 1) != 0) Native.mouse_event(0x0004 /*LEFTUP*/, 0, 0, 0, UIntPtr.Zero);
+                if ((mask & 2) != 0) Native.mouse_event(0x0010 /*RIGHTUP*/, 0, 0, 0, UIntPtr.Zero);
+                if ((mask & 4) != 0) Native.mouse_event(0x0040 /*MIDDLEUP*/, 0, 0, 0, UIntPtr.Zero);
+            }
+            catch { }
+        }
+
         private static void SendMouseButton(string button, int clickCount)
         {
             uint down, up;
             ButtonFlags(button, out down, out up);
+            int bit = MouseBit(button);
 
             int n = Math.Max(1, clickCount);
             for (int i = 0; i < n; i++)
@@ -4083,9 +4136,23 @@ namespace Dsc
                 // 但 40ms 那种"间隔很快的两次单击"在多数应用里会被当成双击。
                 // 第一次按下前多等一点，让前一个动作的界面响应先到位。
                 System.Threading.Thread.Sleep(i == 0 ? 40 : 30);
-                Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
-                System.Threading.Thread.Sleep(n > 1 ? 30 : 40);
-                Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+                lock (_mouseLock)
+                {
+                    Native.mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+                    _mouseDownMask |= bit;
+                }
+                try
+                {
+                    System.Threading.Thread.Sleep(n > 1 ? 30 : 40);
+                }
+                finally
+                {
+                    lock (_mouseLock)
+                    {
+                        Native.mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+                        _mouseDownMask &= ~bit;
+                    }
+                }
             }
         }
 
