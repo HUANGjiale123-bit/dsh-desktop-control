@@ -31,15 +31,20 @@ const bad = (m) => { results.push(`  ✗ ${m}`); fail++ }
 const toolsetPath = pathToFileURL(path.resolve('server/toolset.mjs')).href
 const { createDesktopToolset } = await import(toolsetPath)
 
-const set = createDesktopToolset({})
+// 先用空配置实例只做观察（列窗口不受白名单限制），
+// 找到靶子之后再按它的 exe 建一个能操作的实例。
+// 直接用 createDesktopToolset({}) 会撞 WhitelistEmpty：
+// 那消息说"观察类工具不受限制"，但这个测试要的是**点击**。
+const probe = createDesktopToolset({})
 
-const listRes = await set.tools.listWindows({})
+const listRes = await probe.tools.listWindows({})
 const windows = listRes.windows ?? []
 const target = windows.find((w) => w.width > 300 && w.height > 300)
 if (!target) {
   console.log('  ✗ 没有找到可用的窗口来验证')
   process.exit(1)
 }
+const set = createDesktopToolset({ allowedApps: path.basename(String(target.exe ?? '')) })
 results.push(`  目标窗口: hwnd=${target.hwnd} ${target.width}x${target.height}，原点 (${target.x}, ${target.y})`)
 results.push('')
 

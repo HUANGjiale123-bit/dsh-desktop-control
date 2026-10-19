@@ -80,7 +80,14 @@
 实测元素数：自建 WinForms 窗口 9 个（完整）、系统记事本 12 个（多为无名 Pane）、
 DeepSeek Harness 自身 4 个、腾讯视频 2 个。
 
-**这类应用要用截图路径。** 树路径只对经典 Win32 控件可靠。
+**Chromium 系（Electron / Tauri / WebView2）已经绕开了这个限制**：`dsc.exe` 是 .NET 进程，
+在这类窗口上只拿到一层空壳；插件会由 Node 直接起一条非 .NET 的 UIA 桥
+（`server/uia-bridge.py`：python → PowerShell）重新读 —— 实测 SuYou（Tauri）能读到 
+39~62 个有名字、有矩形的节点，`desktop_read_window` 与 `desktop_click_element`
+都会自动走这条路（点击优先用 InvokePattern，不移动鼠标）。
+WinUI / 打包应用仍然很残，那类应用要用截图路径。
+
+详见 `docs/问题-Chromium无障碍-第十轮-按名字点击打通.md`。
 
 **3. 低层键盘钩子不可用。**
 

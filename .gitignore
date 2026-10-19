@@ -32,3 +32,7 @@ local.config.json
 /.state/
 dist/
 tools/diag/bin/
+
+# 临时探测目录（本地脚本、解包验证）
+/.tmp/
+__pycache__/

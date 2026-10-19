@@ -97,10 +97,13 @@ const tools = [
   {
     name: 'desktop_click_element',
     description:
-      '按描述符定位窗口内的元素并点击其矩形中心，需要目标窗口在白名单内。' +
+      '按描述符定位窗口内的元素并触发它，需要目标窗口在白名单内。' +
       '描述符形如 role=Button/name=保存，可用字段：role、name、aid（AutomationId）、class。' +
+      '优先用 InvokePattern 触发（不移动鼠标），元素不支持时才点矩形中心。' +
+      '在 Electron / Tauri / WebView2 上会自动改用 UIA 桥（非 .NET 的读取进程）定位，' +
+      '因为原生程序在这些窗口里看不到元素。' +
       '比按坐标点击更稳：不受元素位置变化影响，也不依赖上一次读取的短 id。' +
-      '这是变更性操作，会真实移动并点击鼠标。',
+      '这是变更性操作，可能会真实移动并点击鼠标。',
     inputSchema: {
       type: 'object',
       properties: {

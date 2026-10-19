@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.30'
+const PLUGIN_VERSION = '2.18.31'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1414,7 +1414,9 @@ function applyInner(ctx, config = {}) {
       '① 它按名字找，不受元素位置变化影响，也不依赖上一次读到的短 id；' +
       '② 能触发 InvokePattern 时**根本不移动鼠标**，所以不受遮挡和图片缩放影响；' +
       '③ 只有当元素不支持这个模式时才退回按矩形中心点击。返回里会说明走了哪条。' +
-      '前提是 desktop_read_window 能读到你想点的那个元素 —— 读不到就改用截图 + 坐标。' +
+      '在 Electron / Tauri / WebView2 这类窗口上，原生程序看不到里面的元素，' +
+      '插件会自动改用 UIA 桥（非 .NET 的读取进程）重新定位 —— 不用你换工具或改写法。' +
+      '两条链都找不到时，返回里会列出那个窗口里**实际有哪些名字**，照着改描述符即可。' +
       '这是变更性操作。' +
       allowNote,
     parameters: {

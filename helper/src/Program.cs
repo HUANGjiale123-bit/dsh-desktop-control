@@ -2635,11 +2635,31 @@ namespace Dsc
             // 并把实际用了哪种方式写进返回值——调用方不该去猜。
             //
             // 强制走坐标：给 --coords（有些控件实现 Invoke 但行为与真实点击不同）。
-            string method = "";
             string invokeError = null;
             bool forceCoords = false;
             foreach (string a2 in args)
                 if (a2 == "--coords") forceCoords = true;
+
+            /* ★ "有没有真的 Invoke 过"必须用布尔量记，不能用 method 字符串判断。
+             *
+             * 原来写的是 `if (method == "InvokePattern")`，而成功时 method 会被
+             * 拼上光标说明（"InvokePattern，光标已移到元素中心 (1712,1115)"），
+             * 于是那个判断为假 —— 代码继续往下走，取矩形、移到中心、再点一次。
+             *
+             * 结果就是**同一个按钮被触发两次**：Invoke 一次、坐标点击一次。
+             * 点"提交"会提交两遍，发消息会发两条，而且返回的 JSON 里
+             * method 写着 CoordinateClick，看不出前面已经 Invoke 过。
+             *
+             * 这台机器上 SetCursorPos 在沙箱里返回 5（拒绝），光标没动，
+             * cursorNote 一直是空串，那个分支从来没有被走到 —— 所以这个 bug
+             * 只在"鼠标能真的移动"的正常机器上出现。也就是**用户的机器上**。
+             *
+             * 现在：method 由"走到哪个分支"直接决定（Invoke 成功就返回
+             * method=InvokePattern 并立即结束），光标说明单独放 cursorNote，
+             * 判断只看 invoked —— 没有任何一处需要解析字符串。
+             */
+            bool invoked = false;
+            string cursorNote = "";
 
             if (!right && !forceCoords)
             {
@@ -2660,9 +2680,8 @@ namespace Dsc
                      * 所以这里补一次光标移动，只为了让人看见。
                      * 它有明确的失败可能（没输入权限、元素已消失、
                      * 矩形是空的），但**失败绝不影响后面的 Invoke** ——
-                     * 视觉反馈是附加项，不是前提。移动失败只记进 method 说明。
+                     * 视觉反馈是附加项，不是前提。移动失败只记进 cursorNote。
                      */
-                    string cursorNote = "";
                     try
                     {
                         System.Windows.Rect br = found.Current.BoundingRectangle;
@@ -2685,7 +2704,7 @@ namespace Dsc
                     try
                     {
                         ((InvokePattern)ip).Invoke();
-                        method = "InvokePattern" + cursorNote;
+                        invoked = true;
                     }
                     catch (Exception ex)
                     {
@@ -2723,18 +2742,19 @@ namespace Dsc
                 return 6;
             }
 
-            if (method == "InvokePattern")
+            if (invoked)
             {
-                // 没有取矩形、没有移动鼠标。诚实说明：Invoke 是异步投递，
-                // 返回成功只代表"控件接受了触发请求"，不代表界面已经变了。
+                // 这里**必须直接返回**：Invoke 已经发出，再走坐标点击就是第二次触发。
+                // 诚实说明：Invoke 是异步投递，返回成功只代表"控件接受了触发请求"，
+                // 不代表界面已经变了。
                 Jw jv = new Jw();
                 jv.Obj().Key("ok").Bool(true)
                     .Key("matched").Val(desc)
                     .Key("method").Val("InvokePattern")
-                    .Key("cursorMoved").Bool(false)
+                    .Key("cursorMoved").Bool(cursorNote.Length > 0)
                     .Key("verified").Bool(false)
                     .Key("note").Val(
-                        "已通过控件的 InvokePattern 触发，没有移动鼠标。" +
+                        "已通过控件的 InvokePattern 触发" + cursorNote + "。" +
                         "Invoke 是异步投递，返回成功不代表界面已经改变——" +
                         "要确认效果请重读一次界面或截图。")
                  .End();

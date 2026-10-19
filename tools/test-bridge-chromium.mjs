@@ -21,10 +21,10 @@ const bad = (m) => { results.push(`  ✗ ${m}`); fail++ }
 
 const toolsetPath = pathToFileURL(path.resolve('server/toolset.mjs')).href
 const { createDesktopToolset } = await import(toolsetPath)
-const set = createDesktopToolset({})
+const probe = createDesktopToolset({})
 
 // 找一个 SuYou 或者任何 Chromium 系窗口
-const listRes = await set.tools.listWindows({})
+const listRes = await probe.tools.listWindows({})
 const windows = listRes.windows ?? []
 // 优先 Tauri（已知桥能读到 39 个），其次别的 Chromium 系
 const target =
@@ -36,7 +36,10 @@ if (!target) {
   console.log(results.join('\n'))
   process.exit(1)
 }
-results.push(`  目标: hwnd=${target.hwnd} class=${target.class} ${target.width}x${target.height}`)
+// 按靶子的 exe 建一个能操作的实例：空配置会撞 WhitelistEmpty，
+// 而那消息只会让人以为"桥不工作"。
+const set = createDesktopToolset({ allowedApps: path.basename(String(target.exe ?? '')) })
+results.push(`  目标: hwnd=${target.hwnd} class=${target.class} ${target.width}x${target.height}（白名单 ${path.basename(String(target.exe ?? ''))}）`)
 results.push('')
 
 results.push('── 1. readWindow 必须返回内容 ──')

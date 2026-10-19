@@ -381,6 +381,103 @@ export function createDesktopToolset(options = {}) {
     })
   }
 
+  /**
+   * 给桥发一条请求（走 stdin 那套"一行 JSON 进、一行 JSON 出"的协议）。
+   *
+   * 为什么用 stdin 而不是命令行参数：描述符里可能有空格、引号、中文，
+   * 塞进 argv 要过一层 Windows 命令行转义。那层转义出错的症状是
+   * "名字里恰好有个引号就找不到元素"，只在特定输入下复现 —— 最难查的一类。
+   *
+   * 返回 null 的语义很关键：**桥根本没跑起来**（没装 python、脚本丢了、超时）。
+   * null = 不知道，调用方应当退回 helper 的结论；
+   * 有返回值 = 桥真的看过那个窗口，它的 NotFound 才是可信的。
+   */
+  function runBridgeRequest(req, timeoutMs = 16000) {
+    const py = findPython()
+    const script = bridgeScript()
+    if (!py || !script) return Promise.resolve(null)
+
+    /* 急停闸门也必须传给桥。
+     *
+     * dsc.exe 每次调用都会查闸门文件，但桥是另一条链 —— 它由 Node 直接起
+     * python，完全不经过 dsc.exe。不传的话就是"按了 ESC，界面收起来了，
+     * 而桥照样按名字把按钮点下去"。这类"看起来停了其实没停"正是这个项目
+     * 反复踩到的坑（见 sync-plugin.sh 里关于 DSC_HALT_GATE 的注释）。
+     *
+     * 桥那边收到后会在做**变更性动作之前**检查这个文件（读树不受限：
+     * 观察不改变任何东西，而拦住观察只会让排查看不见现场）。
+     */
+    let env = process.env
+    const gate =
+      typeof options.getGatePath === 'function'
+        ? options.getGatePath()
+        : options.gatePath
+    if (gate) env = { ...env, DSC_HALT_GATE: gate }
+
+    return new Promise((resolvePromise) => {
+      let done = false
+      const finish = (v) => { if (!done) { done = true; resolvePromise(v) } }
+
+      let child
+      try {
+        child = spawn(py, [script], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env })
+      } catch {
+        return finish(null)
+      }
+
+      let out = ''
+      const timer = setTimeout(() => {
+        try { child.kill() } catch { /* 已经退了 */ }
+        finish(null)
+      }, timeoutMs)
+
+      child.stdout.on('data', (d) => { out += d.toString('utf8') })
+      child.on('error', () => { clearTimeout(timer); finish(null) })
+      child.on('close', () => {
+        clearTimeout(timer)
+        const line = out.trim().split('\n').filter(Boolean).pop()
+        if (!line) return finish(null)
+        try {
+          return finish(JSON.parse(line))
+        } catch {
+          return finish(null)
+        }
+      })
+
+      try {
+        child.stdin.write(JSON.stringify(req) + '\n')
+        child.stdin.end()
+      } catch {
+        clearTimeout(timer)
+        finish(null)
+      }
+    })
+  }
+
+  /**
+   * 用桥按描述符点一个元素。
+   *
+   * 存在的唯一原因：dsc.exe（.NET）在 Chromium 上看不到元素，
+   * 所以 desktop_click_element 在 Electron / Tauri / WebView2 上稳定 NotFound。
+   * 桥（python → PowerShell，非 .NET）能读到 39~62 个节点，也就能找到它。
+   *
+   * 分工刻意分成两半：
+   *   · InvokePattern 由桥里调（不需要坐标）
+   *   · 坐标点击不在这里做 —— 桥只返回矩形，由 dsc.exe 去点。
+   *     因为 PowerShell 默认不是 DPI 感知的（桥里已声明 Per-Monitor V2，
+   *     但 dsc.exe 那条 `click` 路径已经验证过、还会检查落点是否属于目标窗口）。
+   */
+  function bridgeClick(hwnd, descriptor, opts = {}) {
+    return runBridgeRequest({
+      mode: 'click',
+      hwnd,
+      descriptor,
+      button: opts.button ?? 'left',
+      dryRun: opts.dryRun === true,
+      timeoutMs: opts.timeoutMs ?? 14000,
+    }, (opts.timeoutMs ?? 14000) + 2000)
+  }
+
   /** 从 helper 的 tree 结果里抽出内容子窗口的 hwnd（Chromium 的内容在子窗口里）。 */
   function findNearChildWindows(treeResult) {
     const out = []
@@ -574,7 +671,12 @@ export function createDesktopToolset(options = {}) {
     HelperMissing: { retry: 'stop', hint: 'helper 程序不存在 —— 这是安装问题，重试不会变好。' },
     Refused: {
       retry: 'giveUp',
-      hint: '明确拒绝（白名单 / 坐标不在目标窗口 / 闸门之一）。看清 message 是哪一种，换方法。',
+      // 同一句"拒绝"背后其实是三种完全不同的原因，message 里写着是哪一种：
+      //   · 白名单/闸门 —— 这条路本来就走不通
+      //   · 落点不属于目标窗口 —— 被遮挡了
+      //   · SetCursorPos 失败 —— 环境限制（沙箱里常见），光标根本没动
+      // 前两种换方法能绕，第三种换方法也绕不过去，所以提示里都要点到。
+      hint: '明确拒绝（白名单 / 落点不在目标窗口 / 闸门 / 光标移不过去）。看清 message 是哪一种，换方法。',
     },
     StaleSnapshot: { retry: 'reobserve', hint: '界面已经变了。重新截图或读树，再决定下一步。' },
     AmbiguousTarget: {
@@ -1912,7 +2014,144 @@ export function createDesktopToolset(options = {}) {
       const auth = await authorize(hwnd, 'clickElement')
       if (!auth.ok) return { isError: true, text: auth.message }
 
-      const r = await runHelper(['click_element', String(hwnd), descriptor, button ?? 'left'], auth.window)
+      const btn = button === 'right' ? 'right' : 'left'
+      let r = await runHelper(['click_element', String(hwnd), descriptor, btn], auth.window)
+
+      /* ── helper 找不到元素时，换桥再找一次 ──
+       *
+       * dsc.exe 是 .NET 进程。Chromium 系（Electron / Tauri / WebView2）在
+       * 这种进程眼里是一个 IsControlElement=True、Descendants=0 的"叶子"，
+       * FindByDescriptor 只扫得到根节点，于是**任何**描述符都是 NotFound。
+       * 同一个窗口换成非 .NET 的桥去读，能拿到 39~62 个有名字、有矩形的节点。
+       *
+       * 只在这一种失败上回退，而且理由各不相同：
+       *   · NotFound         —— 换条链再找一遍，不会产生副作用
+       *   · AmbiguousTarget  —— helper 看见了多个，桥只会看见同样多个，不猜
+       *   · UnknownOutcome   —— Invoke 已经发出去了，再试一次就是重复触发
+       *
+       * 桥"跑不起来"（null）时不改口：原样交给 helper 的结论，
+       * 免得把"没装 python"说成"这个元素不存在"。
+       */
+      if (!r.ok && r.error === 'NotFound') {
+        const b = await bridgeClick(hwnd, descriptor, { button: btn })
+
+        if (b && b.ok && b.method === 'InvokePattern') {
+          const el = b.element ?? {}
+          return {
+            text:
+              `已按描述符 "${b.matched ?? descriptor}" 定位到元素` +
+              `（${el.type ?? '?'} "${el.name ?? ''}"，矩形 ${el.l},${el.t} ${el.w}x${el.h}），` +
+              `并通过它的 **InvokePattern** 触发。\n` +
+              `  定位走的是 UIA 桥：dsc.exe 没找到它，换用非 .NET 的读取进程读到了这 ` +
+              `${b.nodes ?? '?'} 个节点（来源 hwnd=${b.viaHwnd}），元素是其中之一。\n` +
+              `  没有移动鼠标 —— Invoke 不需要坐标，也就不受遮挡和缩放影响。\n` +
+              `  未核实：Invoke 是异步投递，返回成功不代表界面已经改变。\n` +
+              `  要确认效果请用 desktop_read_window 或 desktop_screenshot 再看一次。`,
+          }
+        }
+
+        if (b && b.ok && b.method === 'Coordinate') {
+          const el = b.element ?? {}
+          const rectText = `${el.l},${el.t} ${el.w}x${el.h}`
+          if (!(el.w > 0 && el.h > 0)) {
+            return {
+              isError: true,
+              text: advice('UiaError',
+                `桥找到了元素（${el.type ?? '?'} "${el.name ?? ''}"），但它的矩形是空的（${el.w}x${el.h}），` +
+                `没有可点的位置。描述符：${descriptor}\n` +
+                `  可能是元素还没渲染完（等界面稳定后重读一次），或者它被折叠/滚出了可视区。`),
+            }
+          }
+
+          /* 桥只负责"找到并给出矩形"，鼠标动作交给 dsc.exe。
+           *
+           * 为什么不在这里直接点：PowerShell 默认不是 DPI 感知的，
+           * 坐标会被系统按缩放比虚拟化；而 dsc.exe 有 Per-Monitor V2 清单，
+           * `click` 那条路径是已验证的，还会检查落点是否真的属于目标窗口。
+           * 两条链各干自己可靠的那件事。 */
+          const cx = Math.round(el.l + el.w / 2)
+          const cy = Math.round(el.t + el.h / 2)
+          const c = await runHelper(
+            ['click', String(cx), String(cy), btn, '--hwnd', String(hwnd)], auth.window)
+          if (!c.ok) {
+            return {
+              isError: true,
+              text: advice(c.error ?? 'Unknown',
+                `通过桥定位到了元素（${el.type ?? '?'} "${el.name ?? ''}"，矩形 ${rectText}），` +
+                `但坐标点击 (${cx},${cy}) 失败：${c.message ?? ''}`),
+            }
+          }
+
+          const lines = [
+            `已按描述符 "${b.matched ?? descriptor}" 定位到元素` +
+              `（${el.type ?? '?'} "${el.name ?? ''}"，矩形 ${rectText}），` +
+              `并在其中心 (${c.clickedX ?? cx},${c.clickedY ?? cy}) 执行 ${c.button ?? btn} 键点击。`,
+            `  定位走的是 UIA 桥（dsc.exe 没找到它），鼠标动作仍由 dsc.exe 执行。`,
+          ]
+          if (c.cursorLanded === true) {
+            lines.push(`  光标已到位（回读 ${c.cursorAfter}）`)
+          } else if (c.cursorAfter) {
+            lines.push(
+              `  ⚠ 光标回读为 ${c.cursorAfter}，与目标 (${cx},${cy}) 不一致 —— ` +
+              `鼠标可能根本没移过去，这次点击**没有真正发生**。`)
+          }
+          if (c.atExe) lines.push(`  落点属于「${c.atExe}」`)
+          lines.push(`  未核实：点击已发出，但应用是否响应要重新观察。`)
+          return { text: lines.join('\n') }
+        }
+
+        if (b && b.error === 'UnknownOutcome') {
+          return {
+            isError: true,
+            text: advice('UnknownOutcome',
+              `已通过桥定位到元素并调用了 InvokePattern，但它抛了异常：${b.message ?? ''}\n` +
+              `  应用可能已经开始执行，也可能没有 —— 异常证明不了是哪一种。\n` +
+              `  **不会再去点一次**：重复触发可能点两次提交、发两条消息。`),
+          }
+        }
+
+        if (b && b.error === 'AmbiguousTarget') {
+          const sample = Array.isArray(b.sample) ? b.sample : []
+          return {
+            isError: true,
+            text: advice('AmbiguousTarget',
+              `描述符匹配到多个元素（至少 ${b.matches ?? '?'} 个）：${descriptor}\n` +
+              (sample.length ? `  前几个：\n` + sample.map((s) => `    ${s}`).join('\n') + '\n' : '') +
+              `拒绝执行——点错其中哪一个都不会报错，而且可能做错事。` +
+              `请加更具体的条件（例如补上 aid=，或写更完整的 name）。`),
+          }
+        }
+
+        if (b && (b.error === 'NotFound' || b.error === 'NoContentWindow')) {
+          const near = Array.isArray(b.nearby) ? b.nearby : []
+          let tail = ''
+          if (near.length && b.nearbyKind === 'sameRole') {
+            tail =
+              `\n\n同一范围里**其余条件都对上**的元素，名字是这些（多半是 name 写错了）：\n` +
+              near.map((n) => `  · "${n}"`).join('\n')
+          } else if (near.length) {
+            tail = `\n\n那个窗口里读得到的名字有：\n` + near.map((n) => `  · "${n}"`).join('\n')
+          }
+          return {
+            isError: true,
+            text: advice('NotFound',
+              `${b.message ?? '未找到匹配元素：' + descriptor}\n` +
+              `  两条链都找过了：dsc.exe 与 UIA 桥` +
+              (typeof b.nodes === 'number' ? `（桥在那个窗口里读到 ${b.nodes} 个节点）` : '') +
+              `。桥的来源 hwnd=${b.viaHwnd ?? '?'}${b.viaClassName ? `（${b.viaClassName}）` : ''}。` +
+              tail +
+              `\n\n下一步：用 desktop_read_window 重新读一次树，描述符照抄树里那一行的 name；` +
+              `或改用 desktop_screenshot 看图定位。`),
+          }
+        }
+
+        /* 桥跑起来了但返回别的东西（BadDescriptor / timeout / bad json）：
+         * 不吞掉它 —— 那是排查线索，附加在 helper 的结论后面。 */
+        if (b && b.error && b.error !== 'NotFound') {
+          r = { ...r, message: `${r.message ?? ''}（桥：${b.error}${b.message ? ' — ' + b.message : ''}）` }
+        }
+      }
+
       if (!r.ok) return { isError: true, text: failMessage(r) }
 
       // ── 两条路径的返回字段完全不同，必须分开格式化 ──
@@ -1924,11 +2163,19 @@ export function createDesktopToolset(options = {}) {
       //
       // 这是加 InvokePattern 时漏掉的：改了 helper 的返回，没跟上这一侧。
       // 也就是我一直在批的那种"静默把成功说成别的样子"。
-      if (r.method === 'InvokePattern') {
+      //
+      // ★ 判断必须用 startsWith 而不是 ===：
+      // helper 曾经在 method 后面接上光标说明（"InvokePattern，光标已移到…"），
+      // 那时 === 为假，于是走下面那条坐标分支，把一次 Invoke 说成了坐标点击
+      // （字段全是 undefined）。现在 helper 已经不再往 method 里拼东西，
+      // 但这里仍然按前缀判断 —— 描述方式变了不该让分支判断失效。
+      if (String(r.method ?? '').startsWith('InvokePattern')) {
         return {
           text:
             `已按描述符 "${r.matched}" 定位到元素，并通过它的 **InvokePattern** 触发。\n` +
-            `  没有移动鼠标（这类控件不需要坐标，也就不受遮挡和缩放影响）\n` +
+            (r.cursorMoved
+              ? `  光标已移到元素上（只为让人看见，Invoke 本身不需要坐标）\n`
+              : `  没有移动鼠标（这类控件不需要坐标，也就不受遮挡和缩放影响）\n`) +
             `  未核实：Invoke 是异步投递，返回成功不代表界面已经改变。\n` +
             `  要确认效果请用 desktop_read_window 或 desktop_screenshot 再看一次。`,
         }
