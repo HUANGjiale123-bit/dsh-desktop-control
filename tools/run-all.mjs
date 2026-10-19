@@ -16,11 +16,35 @@ import { readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 
-const filter = process.argv[2] ?? ''
+const args = process.argv.slice(2)
+const fast = args.includes('--fast')
+const filter = args.find((a) => !a.startsWith('--')) ?? ''
+
+/* --fast：pre-commit 用。排除**需要真实窗口/桌面环境**的文件（慢且会被环境干扰）。
+ * 排除清单要写死并在这里说明理由 —— 否则以后有人加了个慢测试，
+ * 提交会突然变慢，而他不知道为什么。 */
+const FAST_EXCLUDE = new RegExp('^test-(' + [
+  'visual-',        // 视觉路径：要真窗口 + OCR
+  'bridge-',        // UIA 桥：要 Chromium/真窗口
+  'idle-hide',      // 要等指示层自己隐藏
+  'packaged-install', // 解包 + 端到端
+  'shot-matrix',    // 九格坐标矩阵：要真窗口
+  'target',         // 落点归属：要真窗口
+  'region-hash',    // 屏幕抓取
+  'coord-normalized-e2e',
+  'shot-chain', 'shot-ttl', 'shot-invalidate', // 都要真窗口
+  'isourwindow', 'tree-sample', 'image-block',
+].join('|') + ')')
+
 const files = readdirSync('tools')
   .filter((f) => /^test-.*\.mjs$/.test(f))
   .filter((f) => !filter || f.includes(filter))
+  .filter((f) => !(fast && FAST_EXCLUDE.test(f)))
   .sort()
+
+if (fast) {
+  console.log(`  （--fast：跳过需要真实桌面环境的文件；被跳过的在提交钩子里也算"未验证"）`)
+}
 
 const rows = []
 let totalPass = 0

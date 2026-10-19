@@ -98,9 +98,16 @@
 ## 7. 验证状态
 
 ```
-node tools/run-all.mjs
-→ 45 个文件，479 条断言通过，0 失败，N 跳过（跳过项会单独列出）
+node tools/run-all.mjs          # 全部：45 文件 / 479 断言（约 3~4 分钟）
+node tools/run-all.mjs --fast   # 快测：只跑纯逻辑，约 30 秒
 ```
+
+**提交前钩子**（`sh tools/install-hooks.sh` 安装；`.git/hooks/` 不进版本库）：
+
+- 每次 `git commit` 自动跑 `--fast` 那一批（234 条断言、0 跳过、约 26 秒）；
+- 失败会**拦下提交**；
+- 逃生口：`SKIP_TESTS=1 git commit ...`（输出里会写明"没有跑测试"）；
+- 需要真实窗口的那批（bridge / visual / shot-matrix / 打包端到端）**不在钩子里**，靠手动跑全量。
 
 - 跳过 = **没有验过**，runner 会点名是哪个文件。
 - 未验证清单（不要在别处写成"已支持"）：多屏、100% 缩放、跨机安装、任务对照重复实验。
