@@ -183,7 +183,12 @@ try {
   console.log('── 4. OCR 期间观察失效 → 不登记候选（源码级）──')
   {
     const src = readFileSync(join('plugin', 'index.mjs'), 'utf8')
-    const ocrAt = src.indexOf('runOcr(rec.filepath')
+    // OCR 现在可能跑在裁图上（ocrPath），所以别把路径写死 —— 写死的话
+    // 一次实现调整就会让"检查还在"的断言变成假失败。
+    const ocrAt = (() => {
+      const a = src.indexOf('runOcr(ocrPath')
+      return a >= 0 ? a : src.indexOf('runOcr(rec.filepath')
+    })()
     const genAt = src.indexOf('stillThere', ocrAt)
     const regAt = src.indexOf('candidatesFromOcr', ocrAt)
     if (ocrAt > 0 && genAt > ocrAt && regAt > genAt) {

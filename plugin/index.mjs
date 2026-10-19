@@ -64,7 +64,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.48'
+const PLUGIN_VERSION = '2.18.49'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1458,6 +1458,13 @@ function applyInner(ctx, config = {}) {
    * 这种错看着像界面在变，其实是自己两边定义不一致。
    */
   const VISUAL_MARGIN = 4
+  /* 小于这个尺寸的目标**不点**。
+   *
+   * 截图不是矢量图：原始抓屏里就只有几个像素高的东西，放大只是把它复制成更大的糊块，
+   * 点下去落在哪一半都说不准。与其给一个"看起来成功"的坐标，不如明确说看不了、
+   * 换条路（用树的元素、或让应用自己放大）。
+   */
+  const VISUAL_MIN_TARGET_PX = 8
 
   function visualRoi(cand, image) {
     const box = cand.boxInSourceImage ?? {
@@ -1636,8 +1643,29 @@ function applyInner(ctx, config = {}) {
       const lang = (wantedLang && probe.languages.includes(wantedLang))
         ? wantedLang
         : (probe.languages.find((l) => /^zh/i.test(l)) ?? probe.languages[0])
+      /* ── 给了 region 就**真的把那一块裁出来**再 OCR ──
+       *
+       * 之前 region 只用来"筛掉不相关的行"，OCR 仍在整张图上跑。
+       * 外部评审点过这一条：图一大小字就被摊薄，识别率白丢。
+       * 现在 region 非全图时：先 crop（1×，不改像素）→ 对裁图跑 OCR →
+       * 把所有坐标加回 (crop.x, crop.y)。多一次裁图（几毫秒），换识别质量。
+       */
+      const isFullImage = crop.x === 0 && crop.y === 0 && crop.w === image.width && crop.h === image.height
+      let ocrPath = rec.filepath
+      let cropFile = null
+      if (!isFullImage) {
+        cropFile = join(dirname(rec.filepath), `ocr-region-${randomUUID()}.png`)
+        const cr = await set.runHelper(
+          ['crop', rec.filepath, cropFile, String(crop.x), String(crop.y),
+            String(crop.w), String(crop.h), '1'],
+          'configured',
+        )
+        if (cr.ok) ocrPath = cropFile
+        // 裁图失败就退回整图：宁可慢一点，也不要因为裁剪把这条路彻底断掉。
+      }
+
       const ocrStartedAt = Date.now()
-      const ocr = await runOcr(rec.filepath, { lang })
+      const ocr = await runOcr(ocrPath, { lang })
       const ocrWallMs = Date.now() - ocrStartedAt
       if (!ocr.ok) {
         return {
@@ -1676,7 +1704,12 @@ function applyInner(ctx, config = {}) {
         )
       }
 
-      const rows = linesToRows(ocr.lines)
+      // 裁图坐标 → 原图坐标（全图时偏移是 0，走同一条代码）
+      const dx = ocrPath === rec.filepath ? 0 : crop.x
+      const dy = ocrPath === rec.filepath ? 0 : crop.y
+      const rows = linesToRows(ocr.lines).map((row) => (dx === 0 && dy === 0
+        ? row
+        : { ...row, quad: row.quad.map(([x, y]) => [x + dx, y + dy]) }))
       const inCrop = rows.filter((row) => intersectsCrop(row.quad, crop))
       const matched = inCrop.filter((row) => labelMatches(row.label, args.query))
       const viewId = randomUUID()
@@ -1729,7 +1762,10 @@ function applyInner(ctx, config = {}) {
         // 两个时间分开写：elapsedMs 只是脚本内部的识别耗时，不含 PowerShell 启动、
         // WinRT 初始化、建引擎。用户感知的是 ocrWallMs（整个子进程往返）。
         `OCR ${ocr.backend}/${ocr.engineLanguage ?? '?'}，` +
-        `识别 ${ocr.elapsedMs ?? '?'}ms，进程往返 ${ocrWallMs}ms，${rows.length} 行`,
+        `识别 ${ocr.elapsedMs ?? '?'}ms，进程往返 ${ocrWallMs}ms，${rows.length} 行；` +
+        (ocrPath === rec.filepath
+          ? 'OCR 输入：整图'
+          : `OCR 输入：裁图（坐标已偏移 ${crop.x},${crop.y}）`),
       )
       lines.push(
         `与裁剪相交 ${inCrop.length} 行` +
@@ -1745,9 +1781,11 @@ function applyInner(ctx, config = {}) {
         lines.push('')
         candidates.forEach((c, i) => {
           const b = c.boxInSourceImage
+          const tiny = b && (b.w < VISUAL_MIN_TARGET_PX || b.h < VISUAL_MIN_TARGET_PX)
           lines.push(
             `  #${i + 1} ${c.candidateId}  "${c.label}"  @(${Math.round(b.x)},${Math.round(b.y)} ` +
-            `${Math.round(b.w)}x${Math.round(b.h)})`,
+            `${Math.round(b.w)}x${Math.round(b.h)})` +
+            (tiny ? '  ← 太小，点它不可靠' : ''),
           )
         })
         lines.push('')
@@ -2037,6 +2075,26 @@ function applyInner(ctx, config = {}) {
           )
         }
         throw new Error(`失败：StaleVisualTarget — 目标没有可用的坐标。  [retry=reobserve]`)
+      }
+
+      /* ── 太小的目标不点 ──
+       *
+       * 判据用**原始抓屏里的像素**，不是放大后的：放大不会增加信息。
+       * 只对 OCR 候选生效；模型自己报的点（viewId+point）不在这里拦 ——
+       * 那是它看着放大图明确指的位置，拦下来没有意义。
+       */
+      if (cand.boxInSourceImage) {
+        const bw = cand.boxInSourceImage.w
+        const bh = cand.boxInSourceImage.h
+        if (bw < VISUAL_MIN_TARGET_PX || bh < VISUAL_MIN_TARGET_PX) {
+          throw new Error(
+            `失败：TargetTooSmall — 候选「${cand.label}」在截图里只有 ${Math.round(bw)}x${Math.round(bh)} 像素` +
+            `（小于 ${VISUAL_MIN_TARGET_PX}px）。放大只是把糊块变大，不会变清楚，点它不可靠。
+` +
+            `  换条路：用 desktop_click_element 按元素名点；或让应用自己放大后再截图。` +
+            `  [retry=stop]`,
+          )
+        }
       }
 
       /* ── 复查区域 = 候选框 + 少量余量 ──
@@ -2600,6 +2658,7 @@ function applyInner(ctx, config = {}) {
     'StaleVisualTarget',   // 候选那块像素变了：校验阶段就拒绝，没有发输入
     'StaleObservation',    // 观察本身过期/属别处：连坐标都没算，更没有输入
     'BadParams',           // 参数就不对：什么都没做，更不可能改布局
+    'TargetTooSmall',      // 目标太小直接拒：没有发输入
     'NotFound',
     'AmbiguousTarget',
     'BadValue', 'BadIndex', 'BadAction', 'OutOfRange',

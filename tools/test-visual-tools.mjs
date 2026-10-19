@@ -104,6 +104,20 @@ try {
   console.log(`  靶子 hwnd=${win.hwnd} ${win.width}x${win.height} @(${win.x},${win.y})  exe=${exe}`)
 
   const freshShot = async () => {
+    /* 截图拍的是**屏幕上那块**，目标被别的窗口盖住时会拍到覆盖者。
+     * 所以每次截图前先点一下标题栏把它提到前台（只激活，不点到按钮）。
+     * 这件事在真实会话里也发生过：第一张图拍到的是 DSH 自己的界面。
+     */
+    const rectNow = currentRect()
+    if (rectNow) {
+      await by.get('desktop_click').execute({
+        hwnd: win.hwnd,
+        x: Math.round(rectNow.x + rectNow.w / 2),
+        y: rectNow.y + 10,
+        observe: false,
+      }).catch(() => {})
+      await new Promise((r) => setTimeout(r, 350))
+    }
     const s = await shotTool.execute({ hwnd: win.hwnd })
     return s.shotId
   }
@@ -245,6 +259,40 @@ try {
         if (home) externalClickOn(home)
         await new Promise((r) => setTimeout(r, 600))
       }
+    }
+  }
+
+  console.log()
+  console.log('── 3b. 给了 region 就真的裁出来再 OCR（坐标要加回去）──')
+  {
+    const shot = await freshShot()
+    const full = await candTool.execute({ hwnd: win.hwnd, shotId: shot })
+    const sub = await candTool.execute({ hwnd: win.hwnd, shotId: shot, region: { x: 0, y: 0.8, w: 1, h: 0.2 } })
+    const fullText = full.result ?? ''
+    const subText = sub.result ?? ''
+    if (/裁剪区域 \(0,\d+ \d+x\d+\)/.test(subText)) ok('region 生效：裁剪区域被单独处理')
+    else skip(`裁剪区域形态不固定：${subText.split('\n')[1]?.slice(0, 80)}`)
+
+    // 坐标必须**加回了偏移**：裁的是底部 20%，所以所有候选的 y 都应落在 844..1055。
+    // 如果忘了加偏移，它们会落在 0..211 —— 这个判据不依赖具体文字，更稳。
+    // 只从**候选行**里取坐标：表头里也有一个 "@(1508,166)"（窗口原点），
+    // 之前把表头也算进来，误判成"没加偏移"。
+    const candLines = subText.split('\n').filter((l) => l.trim().startsWith('#'))
+    const ys = candLines.map((l) => Number((/@\(\d+,(\d+)/.exec(l) ?? [])[1])).filter(Number.isFinite)
+    if (!ys.length) {
+      skip('子区域里没有候选，跳过偏移断言')
+    } else if (ys.every((y) => y >= 840 && y <= 1060)) {
+      ok(`子区域候选的 y 都在裁剪带内（${ys.length} 个，${Math.min(...ys)}..${Math.max(...ys)}）—— 偏移加回去了`)
+    } else {
+      bad(`子区域坐标没加回偏移：y = ${ys.slice(0, 6).join(', ')}（应在 844..1055）`)
+      console.log(`    候选行：${subText.split('\n').filter((l) => l.includes('@(')).join(' | ').slice(0, 240)}`)
+    }
+
+    // 工具要如实说 OCR 跑在裁图上（而不是"给了 region 其实还是整图"）
+    if (/OCR 输入：裁图（坐标已偏移 0,844）/.test(subText)) {
+      ok('返回里写明 OCR 用了裁图并加回了偏移')
+    } else {
+      bad(`返回里没写清 OCR 输入来源：${subText.split('\n')[1]?.slice(0, 120)}`)
     }
   }
 
