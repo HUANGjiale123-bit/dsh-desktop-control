@@ -58,13 +58,39 @@ done
 
 # ③ 同步到目标
 mkdir -p "$DEST/bin"
+
+# 内容相同就不拷；拷不动（文件被运行中的进程占用）只警告，不中断整次同步。
+#
+# 踩到：ESC 监听器 dsc-esc.exe 一直在跑，而它就住在目标目录里。
+# 每次同步到 cp 那一步就 "Device or resource busy" 直接退出（set -e），
+# 于是 dsc.exe / toolset.mjs 都没同步过去，而脚本只留下一行 cp 错误 ——
+# 看起来像"同步成功"（因为其他步骤的 echo 已经打过了）。
+copy_if_changed() {
+  local src="$1" dst="$2"
+  local a b
+  a=$(md5sum "$src" 2>/dev/null | cut -d' ' -f1)
+  b=$(md5sum "$dst" 2>/dev/null | cut -d' ' -f1)
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then
+    return 0
+  fi
+  if ! cp "$src" "$dst" 2>/dev/null; then
+    echo "  ⚠ 覆盖失败（可能正被运行中的进程占用）：$dst" >&2
+    echo "    内容与源不同，重启那个进程后再同步一次。" >&2
+    return 1
+  fi
+  return 0
+}
+
 # uia-bridge.py 必须一起拷：Chromium 系的读取桥靠它。
 # 漏了它的表现不是报错，而是"读到的节点变少"—— 静默降级，最难查的那种。
+sync_failed=0
 for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py; do
-  cp "$SRC/$f" "$DEST/$f"
+  copy_if_changed "$SRC/$f" "$DEST/$f" || sync_failed=1
 done
 for exe in dsc.exe dsc-esc.exe; do
-  [ -f "$SRC/bin/$exe" ] && cp "$SRC/bin/$exe" "$DEST/bin/$exe"
+  if [ -f "$SRC/bin/$exe" ]; then
+    copy_if_changed "$SRC/bin/$exe" "$DEST/bin/$exe" || sync_failed=1
+  fi
 done
 echo "③ 已同步到 $DEST"
 echo
@@ -122,9 +148,12 @@ done
 [ "$LEFTOVER" -eq 0 ] && echo "  ✓ 未发现残留引用"
 
 echo
-if [ "$fail" -eq 0 ] && [ "$LEFTOVER" -eq 0 ]; then
+if [ "$fail" -eq 0 ] && [ "$LEFTOVER" -eq 0 ] && [ "$sync_failed" -eq 0 ]; then
   echo "同步完成。重启 DSH 让插件重新加载。"
 else
+  if [ "$sync_failed" -ne 0 ]; then
+    echo "有文件没能同步过去（多半是被运行中的进程占用，见上面 ⚠）。" >&2
+  fi
   echo "同步有问题，见上面 ✗ 标记。" >&2
   exit 1
 fi

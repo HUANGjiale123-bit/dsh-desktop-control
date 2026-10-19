@@ -57,11 +57,28 @@ const shotTool = by.get('desktop_screenshot')
 const clickTool = by.get('desktop_click')
 const msgOf = (r) => String(r?.err ?? r?.result ?? r?.text ?? '')
 
-const raw = JSON.parse(
-  spawnSync('helper/bin/dsc.exe', ['list_windows'], { encoding: 'utf8', windowsHide: true }).stdout,
-)
+/* 列窗口要能扛住偶发的空输出。
+ *
+ * 踩到：整套测试连跑时，这个文件偶尔**直接抛异常**（JSON.parse('') 就是
+ * "Unexpected end of JSON input"），而报告里没有任何 ✗ —— 只看得到 exit 1。
+ * 那是最难读的一种失败：既不是断言失败，也看不出是哪一步。
+ * 一次列窗口失败不该让整个文件崩掉，重试一次再放弃。
+ */
+function listWindows() {
+  for (let i = 0; i < 2; i++) {
+    const r = spawnSync('helper/bin/dsc.exe', ['list_windows'],
+      { encoding: 'utf8', windowsHide: true, timeout: 60000 })
+    const out = String(r.stdout ?? '').trim()
+    if (out) {
+      try { return JSON.parse(out).windows ?? [] } catch { /* 下一轮再试 */ }
+    }
+  }
+  return []
+}
+
+const windows = listWindows()
 const ours = (w) => /^(dsc|dsc-esc|textinputhost)\.exe$/i.test(String(w.exe ?? '').split(/[\\/]/).pop())
-const win = raw.windows.find((w) => w.width > 400 && w.height > 400 && w.exe && !ours(w))
+const win = windows.find((w) => w.width > 400 && w.height > 400 && w.exe && !ours(w))
 
 try {
   if (!win) {

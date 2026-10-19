@@ -313,8 +313,14 @@ try {
       if (/移到了/.test(m2) && /仍然有效/.test(m2)) {
         ok('放行了，并且明确说明"原点按当前矩形算，坐标仍然有效"')
       } else if (/SetCursorPos|拒绝访问/.test(m2)) {
+        // 这一格在脚本里验不了：脚本跑在沙箱里（Low），注入被拦。
+        // 但同样的调用**通过插件**（Medium）已经实机验过：
+        //   窗口从 (1242,113) 移到 (1302,153) 之后，
+        //   带旧 shotId + space="window" 的点击返回了
+        //   "窗口从 … 移到了 …，坐标仍然有效"，并真的点在新坐标 (1491,357) 上，
+        //   落点元素仍是「剩余流量」，落点应用 su-you.exe。
         skip(`几何校验**已经放行**（走到了注入这一步），但这台机器的沙箱拦下 SetCursorPos，`
-          + '看不到"放行+警告"那段文字')
+          + '脚本里看不到"放行+警告"那段文字（插件里已实机验过，见第十轮文档）')
       } else {
         bad(`期望"放行+警告"，实际：${m2.slice(0, 100)}`)
       }
@@ -424,12 +430,90 @@ try {
     }
   }
 
-  /* ══ 6. 剩下两条没验的 ══ */
+  /* ══ 6. 窗口被关掉 → 必须拒绝（StaleTarget 那一格） ══ */
   console.log()
-  console.log('── 6. 本文件没覆盖的两条 ──')
-  console.log('    · 过期（5 分钟）另有一个专门的测试：tools/test-shot-ttl.mjs'
+  console.log('── 6. 截图之后目标窗口被关掉（必须拒绝） ──')
+  {
+    /* 靶子得是"能随手关掉"的窗口，所以自己造一个，不动用户的应用。
+     * 有标题、默认 ShowInTaskbar，这样它会出现在 list_windows 里，便于确认真的关掉了。 */
+    const formScript = [
+      `Add-Type -AssemblyName System.Windows.Forms`,
+      `Add-Type -AssemblyName System.Drawing`,
+      `$f = New-Object System.Windows.Forms.Form`,
+      `$f.Text = 'dsc-doomed-window'`,
+      `$f.StartPosition = 'Manual'`,
+      `$f.Location = New-Object System.Drawing.Point(400, 200)`,
+      `$f.Size = New-Object System.Drawing.Size(360, 240)`,
+      `$l = New-Object System.Windows.Forms.Label`,
+      `$l.Text = '这个窗口即将被关掉'`,
+      `$l.Location = New-Object System.Drawing.Point(20, 20)`,
+      `$l.AutoSize = $true`,
+      `$f.Controls.Add($l)`,
+      `$f.Show()`,
+      `$end = (Get-Date).AddSeconds(30)`,
+      `while ((Get-Date) -lt $end) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 80 }`,
+      `$f.Close()`,
+    ].join('; ')
+
+    const before = new Set(listWindows().map((w) => w.hwnd))
+    const child = spawnDetached(formScript)
+    let doomed = null
+    for (let i = 0; i < 12 && !doomed; i++) {
+      await new Promise((r) => setTimeout(r, 250))
+      doomed = listWindows().find((w) => !before.has(w.hwnd) &&
+        /dsc-doomed-window/.test(String(w.title ?? '')))
+    }
+
+    if (!doomed) {
+      skip('造不出临时窗口（要有标题才能确认它真的关掉了），这一格没验')
+      try { child?.kill() } catch { /* ignore */ }
+    } else {
+      const shotId = await (async () => {
+        const r = await shotTool.execute({ hwnd: doomed.hwnd }).catch(() => ({}))
+        return r.shotId ?? ''
+      })()
+      try { child?.kill() } catch { /* ignore */ }
+
+      // 等它真的消失：kill 之后窗口销毁有个先后
+      let gone = false
+      for (let i = 0; i < 12 && !gone; i++) {
+        await new Promise((r) => setTimeout(r, 250))
+        gone = !listWindows().some((w) => String(w.hwnd) === String(doomed.hwnd))
+      }
+
+      if (!gone) {
+        skip('临时窗口没能关掉，这一格没验')
+      } else if (!shotId) {
+        skip('没能拿到那个窗口的 shotId，这一格没验')
+      } else {
+        // 坐标用窗口内的点：窗口已不在，窗口原点无从计算 —— 两种坐标空间都应被拒。
+        const a = await clickTool.execute({
+          hwnd: doomed.hwnd, x: 10, y: 10, space: 'window', shotId, observe: false,
+        }).catch((e) => ({ err: e.message }))
+        const mA = msgOf(a)
+        if (/已在桌面坐标|已发出/.test(mA)) bad(`窗口已经关掉了，却把点击发了出去：${mA.slice(0, 100)}`)
+        else if (/矩形|StaleTarget|不存在|没找到|窗口/.test(mA)) ok(`space="window" 被拒绝：${mA.split('\n')[0].slice(0, 70)}`)
+        else bad(`预期之外的返回：${mA.slice(0, 100)}`)
+
+        const b = await clickTool.execute({
+          hwnd: doomed.hwnd, x: 420, y: 260, space: 'desktop', shotId, observe: false,
+        }).catch((e) => ({ err: e.message }))
+        const mB = msgOf(b)
+        if (/已在桌面坐标|已发出/.test(mB)) bad(`窗口已经关掉了，桌面坐标点击仍然被发出：${mB.slice(0, 100)}`)
+        else if (/StaleTarget|不存在|没找到|白名单|未授权|拒绝/.test(mB)) {
+          ok(`space="desktop" 也被拒绝（${(mB.match(/失败：([A-Za-z]+)/) ?? [])[1] ?? '拒绝'}）`)
+        } else {
+          bad(`预期之外的返回：${mB.slice(0, 100)}`)
+        }
+      }
+    }
+  }
+
+  /* ══ 7. 本文件没覆盖的那一条 ══ */
+  console.log()
+  console.log('── 7. 本文件没覆盖的一条 ──')
+  console.log('    · 过期（5 分钟）有专门的测试：tools/test-shot-ttl.mjs'
     + '（用 DSC_SHOT_TTL_MS 把保鲜期调成 1ms 就能立刻验）')
-  skip('窗口被关掉 → StaleTarget 这一格没验（要关掉一个应用，代价大于收益）')
 } finally {
   // 无论哪一格炸了，都必须把窗口放回去。
   setWindowPos(win.hwnd, ORIG.x, ORIG.y, ORIG.w, ORIG.h)

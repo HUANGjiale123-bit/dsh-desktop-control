@@ -62,40 +62,41 @@
 
 ## 已知限制
 
-**1. 辅助程序不能放在名为 `dsh workspace` 的目录里。**
+**1. `dsc.exe` 不能放在带 Low 完整性标签的目录里（例如 `D:\dsh workspace`）。**
 
-同一份 `dsc.exe`，放在该目录下时鼠标/键盘注入**静默失效**：
-`SetCursorPos` 返回 `False`、光标不动、**没有任何报错**。
-放到别处（插件目录、`%LOCALAPPDATA%`、任意其它路径）则正常。
+同一份 `dsc.exe`：放在工作区里跑是 **Low** 完整性级别，读 Chromium 系窗口只拿到
+7 个节点（外壳）；同样字节复制到 `%TEMP%` 就是 **Medium**，读到 20~40 个。
+`icacls "D:\dsh workspace"` 能看到 `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`
+—— 从那里执行的程序也跟着变 Low，而 Low 完整性的 UIA 客户端拿不到内容树。
 
-原因未查明。已排除：AppContainer、提权、会话、窗口站/桌面、
-作业对象 UI 限制、`BlockInput`、DPI、shell 启动链、进程存活时间、
-目标窗口的上下文、文件哈希差异。
+注入同理：低完整性下 `SetCursorPos` 失败、光标不动、**不报错**。
 
-插件会自动检测这种情况并打警告，但**不会自动绕过**——那属于改变部署位置，
-应由使用者决定。详见 `docs/当前状态.md`。
+插件不受影响（它用 profile 安装目录里的那份，是 Medium）。
+只有"直接跑 `helper/bin/dsc.exe`"（开发、调试、测试）才会踩到。
+`ping` 和 `tree` 现在都会回报 `integrity` / `integrityRid`，**树读残时先看它**。
+详见 `docs/定案-低完整性级别不是Chromium的毛病.md`。
 
-**2. 无障碍树在 Electron / WinUI 应用上很残。**
+**2. 无障碍树在 WinUI / 打包应用上仍然很残。**
 
-实测元素数：自建 WinForms 窗口 9 个（完整）、系统记事本 12 个（多为无名 Pane）、
-DeepSeek Harness 自身 4 个、腾讯视频 2 个。
+实测元素数：自建 WinForms 窗口 9 个（完整）、系统记事本 12 个（多为无名 Pane）。
+WinUI / 打包应用这类只有外壳，要用截图路径。
 
-**Chromium 系（Electron / Tauri / WebView2）已经绕开了这个限制**：`dsc.exe` 是 .NET 进程，
-在这类窗口上只拿到一层空壳；插件会由 Node 直接起一条非 .NET 的 UIA 桥
-（`server/uia-bridge.py`：python → PowerShell）重新读 —— 实测 SuYou（Tauri）能读到 
-39~62 个有名字、有矩形的节点，`desktop_read_window` 与 `desktop_click_element`
-都会自动走这条路（点击优先用 InvokePattern，不移动鼠标）。
-WinUI / 打包应用仍然很残，那类应用要用截图路径。
+**Chromium 系（Electron / Tauri / WebView2）已经能读也能点**：插件会自动换一条
+UIA 读取链（`server/uia-bridge.py`：python → PowerShell），实测 SuYou（Tauri）
+读到 39~62 个有名字、有矩形的节点；`desktop_click_element` 在 Chromium 上会
+自动改用这条链定位，然后优先用 `InvokePattern` 触发（不移动鼠标）。
 
 详见 `docs/问题-Chromium无障碍-第十轮-按名字点击打通.md`。
 
-**3. 低层键盘钩子不可用。**
+**3. 停止用 ESC，不是 `desktop_off`。**
 
-`SetWindowsHookEx(WH_KEYBOARD_LL)` 能装上、句柄非零、消息循环正常，
-但**回调一次都不触发**。因此没有"按 ESC 急停"，停止请用 `desktop_off`。
+`dsc-esc.exe` 装上低层键盘钩子，按 ESC 拉下**闸门文件**；`dsc.exe` 每条命令执行前
+都查这个文件，拦住所有变更性动作（连观察类命令也一并停）。
+`desktop_off` 只收指示层界面，**不拉闸**。
 
-**4. 尚未实现**：`launch_app`（启动应用）、`drag`、`scroll`、
-截图坐标锚定（`screenshotId`）。
+**4. 尚未实现**：`visual-candidates`（在截图上标出候选元素、
+带 `observationId` / `imageSha256` / 坐标仿射关系的那套）。
+其余早先列为"未实现"的（`launch_app`、`drag`、滚轮、截图坐标锚定）都已实现。
 
 ## 安全说明
 

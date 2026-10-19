@@ -1632,7 +1632,7 @@ export function createDesktopToolset(options = {}) {
         return {
           isError: true,
           text:
-            `失败：无法取得窗口 ${hwnd} 的矩形，因此无法把图内坐标换算成桌面坐标。\n` +
+            `失败：StaleTarget — 无法取得窗口 ${hwnd} 的矩形，因此无法把图内坐标换算成桌面坐标。\n` +
             `请先用 desktop_list_windows 确认窗口还在，或改用 space="desktop" 直接给桌面绝对坐标。`,
         }
       }
@@ -1714,11 +1714,14 @@ export function createDesktopToolset(options = {}) {
         if (!inside) {
           return {
             isError: true,
+            // 带错误码：这是**校验阶段**的拒绝，什么都没发出去。
+            // 没有码的时候分类器只能归成"未知错误"，于是保守地把旧截图作废 ——
+            // 调用方按提示改好坐标重试，却被告知"找不到截图"。
             text: useWindowSpace
-              ? `失败：图内坐标 (${x},${y}) 超出窗口 ${hwnd} 的尺寸` +
+              ? `失败：OutOfRange — 图内坐标 (${x},${y}) 超出窗口 ${hwnd} 的尺寸` +
                 `（${w0.width}x${w0.height}）。换算后的桌面坐标是 (${dx},${dy})。\n` +
                 `已跳过授权询问——这个点击本来就到不了目标窗口。`
-              : `失败：桌面坐标 (${x},${y}) 不在窗口 ${hwnd} 的范围内` +
+              : `失败：OutOfRange — 桌面坐标 (${x},${y}) 不在窗口 ${hwnd} 的范围内` +
                 `（该窗口位于 ${w0.x},${w0.y}，尺寸 ${w0.width}x${w0.height}）。\n` +
                 `点击用的是**桌面绝对坐标**，不是窗口内相对坐标。` +
                 `若你手上是截图里的图内坐标，请加 space:"window" 让插件自己加原点，` +
@@ -1790,11 +1793,23 @@ export function createDesktopToolset(options = {}) {
                 `鼠标事件会穿透到它下面的控件，所以点击本身仍然有效。`,
             )
           } else if (el && el.actionable === false) {
+            /* 分两种，别混成一句。
+             *
+             * 实测踩到：按 space="window" 点一个**文本标签**（SuYou 的「剩余流量」），
+             * 报告里说"没有可交互元素……很可能点在空白/背景上"——可那句话里
+             * 恰好写着"读到的是一层 Text 叫 剩余流量"。一边指出元素名字，
+             * 一边说"点在空白上"，读的人只能犯迷糊。
+             *
+             * 有名字 = 点的是个东西，只是它不接收点击（Text/Image/Group 常见）；
+             * 没名字 = 才真的是背景。
+             */
             lines.push(
-              `  ⚠ 该坐标下没有可交互元素（读到的是一层 "${el.role ?? '?'}"` +
-                `${el.name ? ` 叫 "${el.name}"` : '，没有名字'}，矩形 ${el.w}x${el.h}）。` +
-                `很可能点在空白/背景上。` +
-                `**建议改用 desktop_click_element 按名字点**，或先 desktop_whatis 确认位置。`,
+              el.name
+                ? `  · 该坐标上是「${el.name}」（${el.role ?? '?'}）。这类元素通常不接收点击 —— ` +
+                  `如果你要的是可交互控件，改用 desktop_click_element 按名字点那个控件。`
+                : `  ⚠ 该坐标下没有可交互元素（读到的是一层 "${el.role ?? '?'}"，没有名字，` +
+                  `矩形 ${el.w}x${el.h}）。很可能点在空白/背景上。` +
+                  `**建议改用 desktop_click_element 按名字点**，或先 desktop_whatis 确认位置。`,
             )
           } else if (el && el.name) {
             lines.push(`  该坐标下的元素：「${el.name}」（${el.role ?? '?'}）`)
