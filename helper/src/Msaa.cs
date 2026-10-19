@@ -303,7 +303,17 @@ namespace Dsc
                     }
                     catch (Exception e)
                     {
-                        // 失败和"正常无对象"必须分开：前者是未知，后者是叶子
+                        // ── 这里有一个我犯过的错，值得写下来 ──
+                        //
+                        // 第一版把 get_accChild 抛异常当成"枚举失败"往上报，
+                        // 于是 ChildrenBatch 设 Failed=true，遍历器提前中止。
+                        // 实测后果：SuYou 的节点数从 116 掉到 2。
+                        //
+                        // 但 get_accChild 抛 COMException 是**正常情况** ——
+                        // 很多 provider 根本不支持对象提升。它只说明
+                        // "这个孩子不能提升"，不影响同一页的其它孩子。
+                        //
+                        // 所以这里只把原因记进节点，**不设枚举失败**。
                         failReason = "get_accChild:" + e.GetType().Name;
                         return new MsaaRef
                         {
@@ -454,13 +464,19 @@ namespace Dsc
                 }
                 if (!string.IsNullOrEmpty(why))
                 {
-                    // ★ 只设原因不设 Failed，上层根本看不到 ——
-                    // Probe 只在 er.Failed 为 true 时才往 WalkPage 传原因。
-                    // 外部复核的变异实验证实了这个缺口：
-                    //   ResolvedKind=unresolved, FailReason 有值，Failed=false
-                    //   → 顶层 TraversalComplete=true、TruncatedBy=null、errors=[]
-                    r.Failed = true;
-                    r.FailReason = r.FailReason ?? why;
+                    // ── 两个不同的问题，**绝不能合并** ──
+                    //
+                    // ① 枚举本身失败：AccessibleChildren 返回 hr<0、数量非法、
+                    //    或抛异常。这时上面的分支已经设了 Failed=true 并返回。
+                    //
+                    // ② 某个孩子的 get_accChild 提升失败：**只进 errors**。
+                    //    很多 provider 不支持对象提升，抛 COMException 是常态；
+                    //    同页其它孩子照样能读，不该因此中止整棵树。
+                    //
+                    // 我第一版把 ② 也写进 FailReason，而 ToWalkPage 把
+                    // "FailReason 非空"当成枚举失败 —— 于是 SuYou 上每个整数孩子
+                    // 都抛异常，整棵树只读了 2 个节点就中止（原本能读 116 个）。
+                    errors.Add("子元素提升失败: " + why);
                 }
             }
             return r;

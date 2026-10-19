@@ -302,6 +302,48 @@ namespace Dsc
             }
 
             _lines.Add("");
+            _lines.Add("── 8. 单个孩子提升失败，不能让整页枚举失败 ──");
+            {
+                // ── 这条守的是一个真事故 ──
+                //
+                // 上一轮我把 get_accChild 抛的 COMException 当成"枚举失败"往上报，
+                // 于是遍历器提前中止。实测后果：SuYou 的节点数**从 116 掉到 2**。
+                //
+                // 而自测当时全绿 —— 因为假数据里的 resolver 从不抛异常。
+                // 真实 provider 的这一点只在实机上暴露，但
+                // "提升失败不该中止同页其它孩子"这条语义可以在这里守住。
+                var okPage = new Dsc.WalkPage();
+                okPage.Obtained = 2;
+                okPage.Children.Add("a");
+                okPage.Children.Add("b");
+                if (string.IsNullOrEmpty(okPage.FailReason))
+                    Ok("正常枚举页的 FailReason 为空（不会被误报失败）");
+                else
+                    Bad("正常页带了失败原因：" + okPage.FailReason);
+
+                // 真失败：必须有原因，必须让遍历器知道
+                var badRes = new Dsc.Msaa.EnumResult();
+                badRes.Failed = true;
+                badRes.FailReason = "AccessibleChildren hr=0x80004005";
+                var badPage2 = badRes.ToWalkPage();
+                if (!string.IsNullOrEmpty(badPage2.FailReason))
+                    Ok("真枚举失败仍然报出来：" + badPage2.FailReason);
+                else
+                    Bad("真失败被吞了");
+
+                // 提升失败：ResolveChild 的 failReason 非空，但**不能**让枚举失败
+                string whyP;
+                Dsc.MsaaRef simple = Dsc.Msaa.ResolveChild(
+                    null, (object)11, delegate(Accessibility.IAccessible pp, int cc)
+                    { throw new System.Runtime.InteropServices.COMException("SuYou 的 provider 就是这样"); },
+                    out whyP);
+                if (simple != null && simple.ResolvedKind == "unresolved")
+                    Ok("提升失败 → 节点标 unresolved（不是枚举失败）");
+                else
+                    Bad("提升失败的节点标记不对");
+            }
+
+            _lines.Add("");
             Console.WriteLine(string.Join("\n", _lines.ToArray()));
             Console.WriteLine();
             Console.WriteLine("══════════════════════════════");
