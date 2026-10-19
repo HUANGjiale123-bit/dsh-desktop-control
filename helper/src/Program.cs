@@ -4102,6 +4102,7 @@ namespace Dsc
                 if (p.Length == 0) continue;
                 string low = p.ToLowerInvariant();
                 byte vk;
+                int fnum;
 
                 if (low == "ctrl" || low == "control") vk = 0x11;
                 else if (low == "alt") vk = 0x12;
@@ -4119,7 +4120,12 @@ namespace Dsc
                 else if (low == "right") vk = 0x27;
                 else if (low == "home") vk = 0x24;
                 else if (low == "end") vk = 0x23;
-                else if (low == "f5") vk = 0x74;
+                // F1~F12 全部支持。
+                // 实测踩到：Alt+F4 报"不认识的按键：F4"——关窗口这种最常见的操作都做不了。
+                // 之前只硬编码了 F5（刷新），是历史遗留的个别补丁。
+                else if (low.Length >= 2 && low.Length <= 3 && low[0] == 'f' &&
+                         int.TryParse(low.Substring(1), out fnum) && fnum >= 1 && fnum <= 24)
+                    vk = (byte)(0x6F + fnum);
                 else if (p.Length == 1)
                 {
                     char ch = char.ToUpperInvariant(p[0]);
