@@ -1314,7 +1314,14 @@ export function createDesktopToolset(options = {}) {
         let bridged = null
         for (const h of candidates) {
           const got = await readTreeViaBridge(h, maxNodes ?? 300)
-          if (got && Array.isArray(got.items) && got.items.length > (r.total ?? 0)) {
+          // 比的是**树的规模**，不是列出的条数。
+          //
+          // 原来写的是 items.length > r.total。当调用方给 maxNodes=10 时，
+          // 桥返回 items=10，而 helper 的 r.total 也是 10，于是 10 > 10 为假，
+          // 桥明明读到了 62 个节点的树却被整个丢掉 —— 表现出来就是"桥没生效"。
+          // 而且 maxNodes 越小越容易踩到，正好和"只想看几个"的用法重合。
+          const gotSize = got && typeof got.nodes === 'number' ? got.nodes : (got?.items?.length ?? 0)
+          if (got && Array.isArray(got.items) && gotSize > (r.total ?? 0)) {
             bridged = got
             bridged.viaHwnd = got.viaHwnd ?? h
             break
