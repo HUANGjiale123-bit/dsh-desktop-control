@@ -50,6 +50,16 @@ PS = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 SCRIPT_TEMPLATE = r"""
 $ErrorActionPreference = 'Stop'
+
+# ── 输出必须是 UTF-8 ──
+#
+# 不设这一行的时候，PowerShell 的 stdout 用系统 ANSI（中文 Windows 上是 GBK），
+# 而桥那边按 UTF-8 解码 —— 于是每个中文窗口名都变成一串 �。
+# 表现是"读到了 62 个节点，但一个名字都不认识"，
+# 而且 JSON 结构完全正常，所以看起来不像编码问题。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 # 枚举子窗口 —— Chromium 的内容在 Chrome_RenderWidgetHostHWND 这类子窗口里。
@@ -165,7 +175,10 @@ def main():
     # 单次模式：命令行给 hwnd
     if len(sys.argv) > 1:
         hwnd = int(sys.argv[1])
-        result = read_tree(hwnd)
+        # 第二个参数是 maxNodes。原来这里只读 hwnd，于是调用方传的
+        # 上限被静默忽略 —— 请求 8 个会拿回全部 62 个。
+        max_nodes = int(sys.argv[2]) if len(sys.argv) > 2 else 300
+        result = read_tree(hwnd, max_nodes)
         sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
         return 0 if result.get("ok") else 1
 

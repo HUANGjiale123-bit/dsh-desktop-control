@@ -349,7 +349,7 @@ export function createDesktopToolset(options = {}) {
 
       let child
       try {
-        child = spawn(py, [script, String(hwnd)], {
+        child = spawn(py, [script, String(hwnd), String(maxNodes)], {
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
         })
