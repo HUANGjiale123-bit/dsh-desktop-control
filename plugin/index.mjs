@@ -67,7 +67,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.51'
+const PLUGIN_VERSION = '2.18.52'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -3811,6 +3811,41 @@ function applyInner(ctx, config = {}) {
       _idleTimer = null
     }
   })
+
+  /* ── 系统提示里的一段"该用哪个工具" ──
+   *
+   * 每条工具描述只说"我做什么"，没有一条能拥有"什么情况下该用我、什么时候该换人"。
+   * 而模型的选择恰好卡在这一层：树能按名字点的场景，它也可能去用坐标点；
+   * 树读不到的场景，它可能压根想不到还有视觉这条路。
+   *
+   * DSH 的 systemPrompt 服务允许插件注册一段文本（PromptSection：name/order/text）。
+   * 这里刻意写得短：只放**判断规则**和**跨工具的不变量**，不复述工具描述本身
+   * ——复述会让同一句话在提示里出现两次，还容易与描述漂移。
+   *
+   * 拿不到这个服务（宿主版本差异）时静默跳过：注册提示失败绝不能影响工具可用。
+   */
+  try {
+    const prompt = ctx.get?.('systemPrompt')
+    if (prompt && typeof prompt.section === 'function') {
+      prompt.section({
+        name: 'desktop-control',
+        // 放在工具说明之后、收尾之前。没有和别的 section 竞争的意图，
+        // 只是别插到最前面去抢注意力。
+        order: 850,
+        text: [
+          '## 桌面操作（dsh-desktop-control）',
+          '- 能按名字定位就用 desktop_click_element；桌面坐标点击（desktop_click）只是没有名字时的退路。',
+          '- 只有树里读不到（画布、自绘界面、残树）才走视觉：desktop_visual_candidates 取候选 → ' +
+            'desktop_click_candidate；目标很小先 desktop_visual_view 放大，再按 (u,v) 报点。',
+          '- 截图可能被别的窗口挡住，工具会明说；先激活目标再截，别拿遮挡者的画面做判断。',
+          '- 读取和输入都可能要求授权；按 ESC 会立刻拦下所有操作——闸门拉着时不要重试，也不要自己解除。',
+          '- 不确定动作有没有生效时，重新观察一次；不要对同一位置重复点击。',
+        ].join('\n'),
+      })
+    }
+  } catch (e) {
+    ctx.logger?.warn?.(`[desktop-control] 注册系统提示失败（不影响工具）：${e?.message ?? e}`)
+  }
 
   // ── 单个会话结束时撤销它的授权 ──
   //

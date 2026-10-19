@@ -76,8 +76,14 @@ const win = wins.find((w) => String(w.class ?? '').includes('Tauri') && w.width 
 try {
   console.log()
   if (!win) {
-    console.log('  ✗ 没找到可用窗口')
-    process.exit(1)
+    // 没有可用窗口不是"功能坏了"，是环境不满足 —— 但要**留汇总行**，
+    // 否则 runner 会把它记成"直接崩溃"，看起来像代码炸了。
+    console.log('  · 没找到可用窗口（环境不满足），本文件未验证')
+    console.log()
+    console.log('══════════════════════════════')
+    console.log('  0 项通过，0 项失败，1 项跳过')
+    console.log('══════════════════════════════')
+    process.exit(0)
   }
   process.env.DSC_ALLOWED_APPS = String(win.exe).split(/[\\/]/).pop()
 
