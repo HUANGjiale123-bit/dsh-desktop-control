@@ -122,6 +122,23 @@ $all = $best
 if ($el -eq $null) {{ Write-Output '{{"ok":false,"error":"FromHandle null"}}'; exit 0 }}
 $all = $el.FindAll([System.Windows.Automation.TreeScope]::Descendants,
                    [System.Windows.Automation.Condition]::TrueCondition)
+# ── 统计必须基于**全部**节点，不是列出的那几条 ──
+#
+# 实测踩到：maxNodes=12 时，前 12 个恰好全是 Pane/Group，
+# 于是"带名字 3、可交互 0"——而整棵树其实有 36 个有名字、33 个可交互。
+# 结果是插件报"信息很少，建议改用截图"，把一棵能用的树劝退了。
+$namedTotal = 0
+$actionTotal = 0
+$roleCount = @{{}}
+foreach ($x in $all) {{
+  try {{
+    $t = $x.Current.ControlType.ProgrammaticName -replace 'ControlType.','' -replace '^$','Unknown'
+    if ($roleCount.ContainsKey($t)) {{ $roleCount[$t] = $roleCount[$t] + 1 }} else {{ $roleCount[$t] = 1 }}
+    if ($x.Current.Name -and $x.Current.Name.Trim().Length -gt 0) {{ $namedTotal++ }}
+    if ($t -match 'Button|Edit|ComboBox|CheckBox|RadioButton|Hyperlink|ListItem|MenuItem|Tab|TabItem|Slider|TreeItem|DataItem|Text') {{ $actionTotal++ }}
+  }} catch {{ }}
+}}
+
 $items = @()
 $n = 0
 foreach ($x in $all) {{
@@ -143,6 +160,9 @@ foreach ($x in $all) {{
   name = $el.Current.Name
   className = $el.Current.ClassName
   nodes = $all.Count
+  named = $namedTotal
+  actionable = $actionTotal
+  roles = ($roleCount.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object {{ $_.Key + '=' + $_.Value }}) -join ', '
   items = $items
 }} | ConvertTo-Json -Depth 6 -Compress
 """

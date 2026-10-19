@@ -400,8 +400,12 @@ export function createDesktopToolset(options = {}) {
   function convertBridgeResult(bridged, original) {
     const items = bridged.items ?? []
     const roleCount = new Map()
-    let named = 0
-    let actionable = 0
+    // 桥自己统计了全部节点（named/actionable/roles）。用它，
+    // **不要**从 items 重算 —— items 是被 maxNodes 截断过的，
+    // 截断后的统计会把"62 个节点里有 36 个有名字"说成"只有 3 个"。
+    let named = typeof bridged.named === 'number' ? bridged.named : 0
+    let actionable = typeof bridged.actionable === 'number' ? bridged.actionable : 0
+    const statsFromBridge = typeof bridged.named === 'number' 
 
     const ACTIONABLE = new Set([
       'Button', 'RadioButton', 'CheckBox', 'ComboBox', 'Edit', 'Hyperlink',
@@ -415,8 +419,7 @@ export function createDesktopToolset(options = {}) {
       const type = String(it.type || '').replace('ControlType.', '') || 'Unknown'
       roleCount.set(type, (roleCount.get(type) ?? 0) + 1)
       const name = String(it.name || '')
-      if (name) named++
-      if (ACTIONABLE.has(type)) actionable++
+      // named / actionable 由桥统计，这里只数类型分布
 
       const rect = `@(${it.l},${it.t} ${it.w}x${it.h})`
       const namePart = name ? ` "${name}"` : ''
