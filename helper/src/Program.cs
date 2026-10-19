@@ -886,6 +886,7 @@ namespace Dsc
                     case "drag": return CmdDrag(args);
                     case "wheel": return CmdWheel(args);
                     case "region_hash": return CmdRegionHash(args);
+                    case "region_diff": return CmdRegionDiff(args);
                     case "image_hash": return CmdImageHash(args);
                     case "whatis": return CmdWhatIs(args);
                     case "hold": return CmdHold(args);
@@ -897,6 +898,7 @@ namespace Dsc
                     case "press_key": return CmdPressKey(args);
                     case "halt": return CmdHalt(args);
                     case "stop": return CmdStop(args);
+                    case "cursor": return CmdCursor();
                     case "ping": return CmdPing();
                     case "allowcheck": return CmdAllowCheck(args);
                     case "gate_probe": return CmdGateProbe();
@@ -924,6 +926,24 @@ namespace Dsc
                 Console.WriteLine(e.ToString());
                 return 1;
             }
+        }
+
+        /// <summary>
+        /// cursor —— 读当前光标位置。只读，不注入、不需要窗口。
+        ///
+        /// 为什么需要它：测试里要证明"**没有发送任何输入**"，光看返回文本是不够的
+        /// （评审指出得对：文字只能证明报告怎么写，不能证明鼠标动没动）。
+        /// 有它就能在调用前后各读一次 —— 光标没动，就是没有点。
+        /// </summary>
+        private static int CmdCursor()
+        {
+            Native.POINT p;
+            if (!Native.GetCursorPos(out p))
+                throw new DscError("UiaError", "GetCursorPos 失败");
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true).Key("x").Num(p.X).Key("y").Num(p.Y).End();
+            Console.WriteLine(j.ToString());
+            return 0;
         }
 
         private static int CmdHelp()
@@ -3205,6 +3225,116 @@ namespace Dsc
         }
 
         /// <summary>
+        /// region_diff —— 屏幕上的某块区域，和一张 PNG 里的同一块，**差多少**。
+        /// 用法：region_diff &lt;hwnd&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt; &lt;png&gt; &lt;px&gt; &lt;py&gt; [容差]
+        ///
+        /// 为什么不再只比指纹相等：
+        ///
+        /// 实测同一块区域，截图与之后一次抓屏会差出**一列 1 像素宽、每通道最多差 1**
+        /// 的东西（DPI 缩放下的重采样接缝）。用指纹相等比较，这种差异永远判"变了" ——
+        /// 表现为每次复查都拒绝，而界面其实没变。
+        ///
+        /// 所以这里改成逐像素比，带一个**每通道容差**（默认 2），并回报：
+        ///   diffPixels  超出容差的像素数
+        ///   maxDelta    最大单通道差值（判断"是噪声还是真变了"）
+        /// 调用方用 diffPixels 是否为 0 决定放不放行，用 maxDelta 生成说明文字。
+        /// 注意：容差只能吸收渲染噪声；它不会让"文字改了"或"按钮移位"通过 ——
+        /// 那类变化的差值远大于 2。
+        /// </summary>
+        private static int CmdRegionDiff(string[] args)
+        {
+            if (args.Length < 9) throw new ArgumentException("region_diff 需要 hwnd x y w h png px py [tol]");
+            IntPtr hwnd = new IntPtr(long.Parse(args[1]));
+            RequireNotHalted("region_diff");
+            RequireAllowedWindow(hwnd, "region_diff");
+
+            Rectangle want = ParseRegion(args, 2);
+            string path = args[6];
+            if (!File.Exists(path)) throw new DscError("BadValue", "文件不存在：" + path);
+            int px = int.Parse(args[7]);
+            int py = int.Parse(args[8]);
+            int tol = 2;
+            if (args.Length > 9) int.TryParse(args[9], out tol);
+
+            Native.RECT wr;
+            if (!Native.GetWindowRect(hwnd, out wr))
+                throw new DscError("StaleTarget", "GetWindowRect 失败");
+            if (want.Left < wr.Left || want.Top < wr.Top ||
+                want.Right > wr.Right || want.Bottom > wr.Bottom)
+            {
+                throw new DscError("BadValue",
+                    "区域 (" + want.Left + "," + want.Top + " " + want.Width + "x" + want.Height +
+                    ") 超出窗口 (" + wr.Left + "," + wr.Top + " " + (wr.Right - wr.Left) + "x" +
+                    (wr.Bottom - wr.Top) + ")");
+            }
+
+            long diffPixels = 0;
+            int maxDelta = 0;
+            long total = (long)want.Width * want.Height;
+
+            using (Bitmap live = new Bitmap(want.Width, want.Height, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(live))
+                {
+                    g.CopyFromScreen(want.Left, want.Top, 0, 0,
+                        new Size(want.Width, want.Height), CopyPixelOperation.SourceCopy);
+                }
+                using (Bitmap src = new Bitmap(path))
+                {
+                    if (px < 0 || py < 0 || px + want.Width > src.Width || py + want.Height > src.Height)
+                        throw new DscError("BadValue", "PNG 里放不下这块区域");
+
+                    BitmapData dl = live.LockBits(new Rectangle(0, 0, live.Width, live.Height),
+                        ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                    BitmapData ds = src.LockBits(new Rectangle(0, 0, src.Width, src.Height),
+                        ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        int rowBytes = want.Width * 4;
+                        byte[] rowLive = new byte[rowBytes];
+                        byte[] rowSrc = new byte[rowBytes];
+                        for (int y = 0; y < want.Height; y++)
+                        {
+                            Marshal.Copy(new IntPtr(dl.Scan0.ToInt64() + (long)y * dl.Stride),
+                                rowLive, 0, rowBytes);
+                            Marshal.Copy(new IntPtr(ds.Scan0.ToInt64() + (long)(py + y) * ds.Stride + (long)px * 4),
+                                rowSrc, 0, rowBytes);
+                            for (int x = 0; x < want.Width; x++)
+                            {
+                                int i = x * 4;
+                                int dr = Math.Abs(rowLive[i + 2] - rowSrc[i + 2]);   // B,G,R 顺序
+                                int dg = Math.Abs(rowLive[i + 1] - rowSrc[i + 1]);
+                                int db = Math.Abs(rowLive[i] - rowSrc[i]);
+                                int d = dr > dg ? dr : dg;
+                                if (db > d) d = db;
+                                if (d > maxDelta) maxDelta = d;
+                                if (d > tol) diffPixels++;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        live.UnlockBits(dl);
+                        src.UnlockBits(ds);
+                    }
+                }
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("same").Bool(diffPixels == 0)
+                .Key("diffPixels").Num(diffPixels)
+                .Key("totalPixels").Num(total)
+                .Key("maxDelta").Num(maxDelta)
+                .Key("tol").Num(tol)
+                .Key("rect").Val(want.Left + "," + want.Top + " " + want.Width + "x" + want.Height)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// image_hash —— 一张已保存的 PNG 里某块区域的指纹。        /// <summary>
         /// image_hash —— 一张已保存的 PNG 里某块区域的指纹。
         /// 用法：image_hash &lt;png 路径&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt;（x/y 是**图片内**像素）
         ///

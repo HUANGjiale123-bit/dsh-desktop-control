@@ -64,7 +64,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.44'
+const PLUGIN_VERSION = '2.18.45'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1865,48 +1865,38 @@ function applyInner(ctx, config = {}) {
        */
       const roi = visualRoi(cand, image)
 
-      /* ── 基线必须取自**OCR 实际读的那张图** ──
+      /* ── 点击前复查：屏幕上的那块，还是截图里的那块吗 ──
        *
-       * 曾经为了绕开一个当时没查清的指纹问题，把基线改成"列候选那一刻的屏幕"。
-       * 那是个错误的方向：OCR 的标签来自 T0 的截图，基线却来自 T2 的屏幕，
-       * 于是 T0→T2 之间内容变了也发现不了（屏幕上 B、屏幕上还是 B，B==B 通过），
-       * 最后会**按旧图的名字和位置**去点一个新界面。
+       * 为什么不能只比"指纹相等"：实测同一块区域，截图与之后一次抓屏会差出
+       * **一列 1 像素宽、每通道最多差 1** 的重采样接缝（DPI 缩放）。指纹相等
+       * 会把这种噪声判成"内容变了"，于是复查百分之百误拒。
        *
-       * 现在回到正确做法：基线 = 截图里那块区域（image_hash）。
-       * 当初"同像素不同指纹"的根因已经找到并修掉：HashBitmapRegion 用 LockBits(rect)
-       * 取子矩形时行跨度不可靠，改成锁整图 + 手工偏移后，同一块像素两种取法结果一致。
+       * 所以改成逐像素比 + 每通道容差 2，只看"超容差的像素数"：
+       *   · 渲染噪声（±1）→ diffPixels=0 → 放行；
+       *   · 文字改字/按钮移位/弹层覆盖 → 差值远大于 2 → 拒绝。
+       * 容差**只能**吸收噪声，不会让真实变化通过 —— 这一点由
+       * test-visual-recheck（自造变脸窗口）盯着。
        */
-      const oldHash = await set.runHelper(
-        ['image_hash', rec.filepath, String(roi.x), String(roi.y), String(roi.w), String(roi.h)],
-        'configured',
-      )
-      if (!oldHash.ok) {
-        throw new Error(
-          `复查没做成：读不出截图里那块区域的指纹（${oldHash.error} ${oldHash.message ?? ''}）。` +
-          `  [retry=stop] 不发送输入 —— 没有复查就点，等于赌。`,
-        )
-      }
-
-      // 图片像素 → 桌面像素（截图尺寸与窗口尺寸可能不同，两轴各自换算）
       const liveX = rec.x + Math.floor((roi.x * rec.w) / image.width)
       const liveY = rec.y + Math.floor((roi.y * rec.h) / image.height)
       const liveW = Math.max(1, Math.ceil((roi.w * rec.w) / image.width))
       const liveH = Math.max(1, Math.ceil((roi.h * rec.h) / image.height))
-      const liveHash = await set.runHelper(
-        ['region_hash', String(args.hwnd), String(liveX), String(liveY), String(liveW), String(liveH)],
+
+      const diff = await set.runHelper(
+        ['region_diff', String(args.hwnd), String(liveX), String(liveY), String(liveW), String(liveH),
+          rec.filepath, String(roi.x), String(roi.y), '2'],
         'configured',
       )
-      if (!liveHash.ok) {
+      if (!diff.ok) {
         throw new Error(
-          `复查没做成：抓不到现在那块屏幕像素（${liveHash.error} ${liveHash.message ?? ''}）。` +
-          `  [retry=stop] 不发送输入。`,
+          `复查没做成：比对不了截图与当前画面（${diff.error} ${diff.message ?? ''}）。` +
+          `  [retry=stop] 不发送输入 —— 没有复查就点，等于赌。`,
         )
       }
-
-      if (String(liveHash.hash) !== String(oldHash.hash)) {
+      if (Number(diff.diffPixels) > 0) {
         throw new Error(
           `失败：StaleVisualTarget — 拒绝点击：候选「${cand.label}」那块区域的内容**已经变了**。\n` +
-          `  截图里的指纹 ${oldHash.hash}，现在是 ${liveHash.hash}。\n` +
+          `  ${diff.diffPixels}/${diff.totalPixels} 个像素超出容差（最大单通道差 ${diff.maxDelta}）。\n` +
           `  窗口没移动也会变（滚动、弹层、列表刷新都会）。所以没有发送任何输入。\n` +
           `  [retry=reobserve] 重新截图、重新取候选再点。`,
         )
@@ -1926,7 +1916,7 @@ function applyInner(ctx, config = {}) {
         `已点击候选「${cand.label}」（${args.candidateId}）。`,
         `  图内锚点 (${cand.pointInSourceImage.x.toFixed(1)},${cand.pointInSourceImage.y.toFixed(1)})` +
           ` → 窗口 (${wpx.x},${wpx.y}) → 桌面 (${rec.x + wpx.x},${rec.y + wpx.y})`,
-        `  复查：那块 ${roi.w}x${roi.h} 像素与截图时一致（指纹 ${oldHash.hash}）`,
+        `  复查：那块 ${roi.w}x${roi.h} 像素与截图一致（超出容差的像素 0 个，最大通道差 ${diff.maxDelta}）`,
         `  通过现有链路：白名单 / 几何 / 落点归属都查过了`,
         `  未核实：点击已发出，但应用是否响应要重新观察。`,
       ]

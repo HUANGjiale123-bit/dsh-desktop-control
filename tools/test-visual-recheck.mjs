@@ -153,7 +153,7 @@ try {
         hwnd: win.hwnd, shotId: shot2.shotId, candidateId: beta.id, observe: false,
       }).catch((e) => ({ err: e.message }))
       const t = r.err ?? r.result ?? r.text ?? ''
-      if (/已点击候选/.test(t) && /复查：那块 \d+x\d+ 像素与截图时一致/.test(t)) {
+      if (/已点击候选/.test(t) && /复查：那块 \d+x\d+ 像素与截图一致/.test(t)) {
         ok(`新候选点得动（「${beta.label}」），复查通过`)
       } else {
         bad(`正向对照失败：${t.slice(0, 200)}`)

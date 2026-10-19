@@ -70,6 +70,15 @@ function parseCandidates(text) {
   return out
 }
 
+/** 读光标位置（helper 的 cursor 命令，只读）。用来证明"真的没有输入"。 */
+function cursorPos(helper) {
+  try {
+    const r = spawnSync(helper, ['cursor'], { encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    const j = JSON.parse(r.stdout)
+    return j.ok ? { x: j.x, y: j.y } : null
+  } catch { return null }
+}
+
 const wins = (() => {
   try {
     return JSON.parse(spawnSync(HELPER, ['list_windows'],
@@ -101,6 +110,7 @@ try {
       skip('没取到候选，这一格没验')
     } else {
       writeFileSync(gatePath, 'test-halt')
+      const cursorBefore = cursorPos(HELPER)
       try {
         const r = await clickCand.execute({ hwnd: win.hwnd, shotId, candidateId: target.id, observe: false })
           .catch((e) => ({ err: e.message }))
@@ -108,8 +118,16 @@ try {
         if (/ESC 叫停|Halted/.test(t)) ok('被闸门拦下，报告写明是"用户叫停"而不是技术失败')
         else bad(`闸门拉着却仍然执行了：${t.slice(0, 200)}`)
 
+        /* "没有发送输入"要有**证据**，不能只看报告文字（评审指出：那证明的是文字）。
+         * 真点击一定会把光标移到目标上，所以读两次光标位置对比。 */
+        const cursorAfter = cursorPos(HELPER)
+        if (cursorBefore && cursorAfter &&
+            cursorBefore.x === cursorAfter.x && cursorBefore.y === cursorAfter.y) {
+          ok(`光标没有移动（${cursorBefore.x},${cursorBefore.y}）—— 真的没发输入`)
+        } else {
+          bad(`光标动了：${JSON.stringify(cursorBefore)} → ${JSON.stringify(cursorAfter)}`)
+        }
         if (/已点击候选/.test(t)) bad('闸门拉着时居然点了下去')
-        else ok('没有发生任何输入')
       } finally {
         rmSync(gatePath, { force: true })
       }
@@ -195,8 +213,11 @@ try {
   console.log('── 6. 点了但观察失败：不许重试 ──')
   {
     const PS = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+    // 夹具**自己**把每次点击写进这个文件 —— 数它，而不是数我们报告里的字符串。
+    const clickLog = join(tmp, 'clicks.log')
     const fixture = spawn(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-      '-File', 'tools/fixtures/closing-window.ps1'], { stdio: ['ignore', 'pipe', 'pipe'] })
+      '-File', 'tools/fixtures/closing-window.ps1',
+      '-LogPath', clickLog], { stdio: ['ignore', 'pipe', 'pipe'] })
     let win2 = null
     for (let i = 0; i < 20 && !win2; i++) {
       await new Promise((r) => setTimeout(r, 250))
@@ -239,10 +260,15 @@ try {
         } else {
           bad(`预期之外的返回（试了 ${attempts + 1} 次）：${t.slice(0, 200)}`)
         }
-        hits = (t.match(/已点击候选/g) ?? []).length
-        if (hits === 1) ok('只点了一次（没有因为观察失败而重试）')
-        else if (hits === 0) skip('这次没有产生点击记录')
-        else bad(`点击了 ${hits} 次 —— 观察失败后被重试了`)
+        /* 真点击次数：读夹具自己写的日志。
+         * 之前数的是我们报告里出现几次"已点击候选" —— 那只能证明文字写了几遍，
+         * 不能证明鼠标按了几次（评审原话）。 */
+        const clickLines = existsSync(clickLog)
+          ? readFileSync(clickLog, 'utf8').split('\n').filter((l) => l.trim()).length
+          : 0
+        if (clickLines === 1) ok('夹具记录到 **1 次真实点击**（没有因为看不结果就重试）')
+        else if (clickLines === 0) skip('这次没有产生真实点击')
+        else bad(`真实点击了 ${clickLines} 次 —— 观察失败后被重试了`)
       }
     } finally {
       try { fixture.kill() } catch { /* 它自己也会退 */ }

@@ -47,6 +47,8 @@ const POLICY = {
   CmdScreenshot: 'both',
   // region_hash 抓屏幕上的像素：和 screenshot 同一级别（急停 + 白名单）。
   CmdRegionHash: 'both',
+  // region_diff 同样抓屏 + 读 PNG：和 region_hash 一级。
+  CmdRegionDiff: 'both',
   // image_hash 只读一张本地 PNG，不碰桌面；但急停时同样停 ——
   // 急停的含义是"别再用我的界面内容做任何事"。
   CmdImageHash: 'halt',
@@ -76,6 +78,8 @@ const POLICY = {
   CmdStop: 'none',
   CmdGateProbe: 'none',
   CmdPing: 'none',
+  // cursor 只读光标位置，不注入、不读界面文字 —— 不需要任何守卫。
+  CmdCursor: 'none',
   CmdHelp: 'none',
 }
 

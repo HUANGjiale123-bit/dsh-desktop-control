@@ -1,4 +1,4 @@
-param([int]$X = 700, [int]$Y = 400)
+param([int]$X = 700, [int]$Y = 400, [string]$LogPath = '')
 
 # Fixture: a window that CLOSES ITSELF when its label is clicked.
 #
@@ -28,6 +28,9 @@ $lbl.Font = New-Object System.Drawing.Font('Consolas', 26)
 $lbl.AutoSize = $true
 $lbl.Location = New-Object System.Drawing.Point(20, 40)
 $lbl.Add_Click({
+  # Log the click so a test can COUNT real clicks instead of parsing our own
+  # report text. "clicked exactly once" has to be measured, not asserted.
+  if ($LogPath) { Add-Content -Path $LogPath -Value (Get-Date -Format o) }
   $f.Close()
 })
 $f.Controls.Add($lbl)
