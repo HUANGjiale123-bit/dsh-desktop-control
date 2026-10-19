@@ -241,17 +241,19 @@ helper 这边同一处没跟上。修法：helper 增加 `countsConclusive`，
 
 | 启动链 | `dsc.exe tree 66988` | 桥 |
 |---|---|---|
-| `explorer → DSH → dsc.exe`（插件那条） | **40 个元素** | —（用不到） |
-| `explorer → DSH → bash → powershell → dsc.exe`（agent shell） | **7 个元素** | 39 个 |
+| `explorer → DSH → dsc.exe`（插件的**部署副本**） | **40 个元素** | —（用不到） |
+| `explorer → DSH → bash → powershell → dsc.exe`（仓库副本） | **7 个元素** | 39 个 |
 
-这一条**还没查清**，而且不是取样问题：75 秒内 10 次采样，shell 那条链恒定 7、
-桥恒定 39，不随时间翻转，也不随目标是否前台翻转。两条链里都没有 .NET，
-所以第八轮那个解释套不上。剩下的候选：目标进程侧 UIA provider 的懒激活/回收、
-调用进程加载的是 MSAA→UIA 桥还是原生 provider、以及首次 attach 的时机。
+这一条**当时归因给"启动链"，后来查清是错的**：真正的变量是**进程的完整性级别**。
+同一份 exe，在 `D:\dsh workspace`（带 `Low Mandatory Level` 标签）里执行 →
+Low → 7 个节点；复制到 `%TEMP%` → Medium → 20~40 个节点。
+链条长度、中间有没有 .NET、是不是 DSH 拉起来的，全都不影响。
 
-实用结论不变：**两条链都不能删**。插件那条能直读，但它会因启动方式变瞎；
-桥更稳（39 个节点）但慢 300~800ms。现在的实现是"helper 先说，说不出就换桥"，
-并且把用了哪条写进返回里。
+详见 `定案-低完整性级别不是Chromium的毛病.md`。
+
+实用结论因此要改一处：**桥不是"绕开 .NET"，而是"绕开出问题的执行位置"**
+（python → PowerShell 都在工作区外，因此是 Medium）。插件用安装目录里的 helper
+本来就不受影响。
 
 ## 还没验的（别当成已经成立）
 

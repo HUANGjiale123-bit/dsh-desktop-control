@@ -679,6 +679,14 @@ namespace Dsc
         [DllImport("advapi32.dll", SetLastError = true)]
         private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
 
+        /* 把 SID 转成 "S-1-16-4096" 字符串。
+         * 这两个声明只给 SelfIntegrityRid 用 —— 那条路（读字符串再解析）
+         * 是现场验证过能拿到值的，而 GetSidSubAuthority* 那条恒失败。 */
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool ConvertSidToStringSid(IntPtr sid, out IntPtr str);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr h);
+
         private const uint TOKEN_QUERY = 0x0008;
 
         /// <summary>读进程令牌的完整性级别 RID；读不到返回 -1。</summary>
@@ -948,6 +956,63 @@ namespace Dsc
             return 0;
         }
 
+        /// <summary>
+        /// 本进程的完整性级别 RID（4096=Low，8192=Medium，12288=High）。
+        ///
+        /// ── 为什么必须报出来 ──
+        ///
+        /// 实测（2026-10-19）：同样字节的 dsc.exe，放在工作区里读 SuYou 只拿到
+        /// 7 个节点（Chromium 只给外壳），复制到别的目录就是 20~40 个。
+        /// 差别不是启动链、也不是 .NET 父进程 —— 是**文件的完整性标签**：
+        ///
+        ///     icacls "D:\dsh workspace"
+        ///       Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)
+        ///
+        /// 工作区被 DSH 的沙箱标成低完整性，从那里执行的程序于是也以低完整性运行
+        /// （实测 Low；同样字节放到别处就是 Medium）。低完整性的客户端拿不到
+        /// 这些应用的内容树，FindAll(Children) 只返回外壳。
+        ///
+        /// 所以"树读得残"该先排除"自己级别不够"，而不是又去怀疑 Chromium。
+        /// 把级别放进返回值里，读残了才能一眼看出原因。
+        /// </summary>
+        private static int SelfIntegrityRid()
+        {
+            if (_selfIntegrityRid >= 0) return _selfIntegrityRid;
+            IntPtr tok = IntPtr.Zero, buf = IntPtr.Zero, sidStr = IntPtr.Zero;
+            try
+            {
+                // 用自身的**(伪)句柄**，不是 OpenProcess(自己 pid)：
+                // 低完整性进程去 OpenProcess 自己那一路实测拿不到句柄，
+                // 于是整段返回 -1，把"级别低"报成"未知"——那是自己把线索掐了。
+                if (!OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle,
+                                      TOKEN_QUERY, out tok)) return -1;
+                buf = Marshal.AllocHGlobal(512);
+                int ret;
+                if (!GetTokenInformation(tok, 25 /*TokenIntegrityLevel*/, buf, 512, out ret)) return -1;
+                IntPtr sid = Marshal.ReadIntPtr(buf);
+                if (sid == IntPtr.Zero) return -1;
+
+                // 走 S-1-16-xxxx 字符串再解析末段：这条路径在现场验证过能拿到值
+                // （GetSidSubAuthorityCount 那两个 API 在这台机器上恒失败，
+                //  于是这里换成"能验证成功的那一条"，别为了少一次转换继续趟空）。
+                if (!ConvertSidToStringSid(sid, out sidStr)) return -1;
+                string s = Marshal.PtrToStringUni(sidStr);
+                if (string.IsNullOrEmpty(s)) return -1;
+                int dash = s.LastIndexOf('-');
+                int v;
+                if (dash < 0 || !int.TryParse(s.Substring(dash + 1), out v)) return -1;
+                _selfIntegrityRid = v;
+            }
+            catch { }
+            finally
+            {
+                if (sidStr != IntPtr.Zero) LocalFree(sidStr);
+                if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+                if (tok != IntPtr.Zero) Native.CloseHandle(tok);
+            }
+            return _selfIntegrityRid;
+        }
+
         private static int CmdPing()
         {
             Jw j = new Jw();
@@ -958,6 +1023,8 @@ namespace Dsc
                 .Key("dpiAware").Bool(_dpiAwareness > 0)
                 .Key("dpiAwareness").Val(DpiAwarenessName())
                 .Key("dpiInitOk").Bool(_dpiAwareCallOk)
+                .Key("integrity").Val(IntegrityName(SelfIntegrityRid()))
+                .Key("integrityRid").Num(SelfIntegrityRid())
                 .Key("halted").Bool(IsHalted())
                 .Key("gatePath").Val(GatePath())
                 .Key("clr").Val(Environment.Version.ToString())
@@ -4035,6 +4102,9 @@ namespace Dsc
                 .Key("actionable").Num(actionable)
                 .Key("countsConclusive").Bool(countsConclusive)
                 .Key("usable").Bool(usable)
+                // 读残了的时候，第一个该排除的原因是"自己级别不够"，不是"应用不配合"。
+                .Key("integrity").Val(IntegrityName(SelfIntegrityRid()))
+                .Key("integrityRid").Num(SelfIntegrityRid())
                 .Key("roles").Val(string.Join(", ",
                     new List<string>(SortedRoles(roleCount, 12)).ToArray()))
                 .Key("tree").Val(tree)

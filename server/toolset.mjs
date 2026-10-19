@@ -1486,6 +1486,26 @@ export function createDesktopToolset(options = {}) {
           `想判断就把 maxNodes 调大（例如 200）再读一次。）`
       }
 
+      /* ── 读残了，第一个该排除的是"自己级别不够" ──
+       *
+       * 实测（2026-10-19）：同一份 dsc.exe，放在 DSH 的工作区里运行是 Low 完整性，
+       * 读 SuYou 只有 7 个节点；同样字节复制到 %TEMP% 就是 Medium，读到 20~40 个。
+       * 原因不是启动链、也不是"Chromium 的毛病"——是**文件的完整性标签**
+       * （`D:\dsh workspace` 带 Low 标签，从那里执行的程序也以 Low 运行）。
+       *
+       * 把这条写进提示里：否则下一次还是会去怀疑目标应用。
+       */
+      let integrityNote = ''
+      if (!r.usable && /^low$/i.test(String(r.integrity ?? ''))) {
+        integrityNote =
+          `\n\n⚠ 这次 helper 自己跑在**低完整性级别**（Low）。实测这种情况下它拿不到` +
+          `Chromium / Electron 的内容树，只能看到外壳 —— 这不是应用的问题。\n` +
+          `   常见原因：dsc.exe 被放在带 Low 标签的目录里执行（例如 DSH 的工作区），` +
+          `从那里启动的程序也跟着变成 Low。\n` +
+          `   办法：改用安装目录里的那份（~/.dsh/profiles/<profile>/node_modules/` +
+          `dsh-desktop-control/bin/dsc.exe），或把可执行文件放到普通目录再跑。`
+      }
+
       return {
         text:
           UNTRUSTED_PREFIX +
@@ -1494,6 +1514,7 @@ export function createDesktopToolset(options = {}) {
           r.tree +
           quality +
           sampleNote +
+          integrityNote +
           bridgeNote,
       }
     },
