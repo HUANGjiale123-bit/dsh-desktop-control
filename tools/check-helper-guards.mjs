@@ -52,6 +52,8 @@ const POLICY = {
   // image_hash 只读一张本地 PNG，不碰桌面；但急停时同样停 ——
   // 急停的含义是"别再用我的界面内容做任何事"。
   CmdImageHash: 'halt',
+  // crop 只读写本地 PNG，不碰桌面；但同样是在处理界面内容，急停时要停。
+  CmdCrop: 'halt',
   CmdWhatIs: 'both',
   // a11y_probe 读的是界面内容（元素名字、角色、矩形）—— 和 whatis / tree
   // 同一级别，所以**两道守卫都要**：急停时停，白名单外的应用不读。

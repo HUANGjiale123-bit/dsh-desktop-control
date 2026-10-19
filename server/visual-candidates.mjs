@@ -174,7 +174,7 @@ export function labelMatches(label, query) {
 
 /* ───────────── 候选构造 ───────────── */
 
-function quadBounds(quad) {
+export function quadBounds(quad) {
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity

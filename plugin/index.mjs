@@ -35,7 +35,7 @@ import { createHash, randomUUID } from 'node:crypto'
 // 真正的点击仍然走下面 set.tools.click 那条已经验证过的链。
 import {
   cropFromRegion, viewPointToWindow, candidatesFromOcr, createCandidateStore,
-  labelMatches, pngSize, candidatePointToWindow,
+  labelMatches, pngSize, candidatePointToWindow, quadBounds,
 } from './visual-candidates.mjs'
 import { probeOcr, runOcr, linesToRows } from './ocr-worker.mjs'
 import { createDesktopToolset } from './toolset.mjs'
@@ -64,7 +64,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.47'
+const PLUGIN_VERSION = '2.18.48'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -988,6 +988,7 @@ function applyInner(ctx, config = {}) {
   const NO_LEASE_TOOLS = new Set([
     // 只处理**已经登记过的旧图**与记录，不碰桌面、不点击 —— 不需要执行权。
     'desktop_visual_candidates',
+    'desktop_visual_view',
     'desktop_list_apps',
     'desktop_off',
     'desktop_revoke_grants',
@@ -1763,10 +1764,125 @@ function applyInner(ctx, config = {}) {
     },
   })
 
+  /* ═══════════ 视觉第二批：裁图放大 + 模型报点 ═══════════
+   *
+   * 第一批的候选只解决"这段文字在哪"。小字、图标、画布细节在整窗缩略图里根本看不清，
+   * 模型只能靠猜 —— 所以这里补一条：**把一块区域裁出来放大给模型看**，
+   * 模型在放大图上报 (u,v)，由插件换算回窗口坐标。
+   *
+   * 为什么报的是归一化 u/v 而不是像素：放大倍数、裁剪尺寸、前端预览再缩放都可能变，
+   * 只有"在裁图里占百分之几"是稳定的。换算只做一次，在 viewPointToWindow 里。
+   */
+  register({
+    name: 'desktop_visual_view',
+    description:
+      '把一张已登记截图里的某块区域**裁出来放大**，作为图像交给你看，并给这个视图一个 viewId。\n' +
+      '用途：目标很小（小图标、小字、画布细节）时，先看放大图，再用 desktop_click_candidate 报点。\n' +
+      '报点方式：在**放大图**上看准目标，报归一化坐标 (u,v)，u、v 都是 0~1、左上角为 (0,0)、右下角为 (1,1)。\n' +
+      '工具会同时列出这块区域里 OCR 到的文字及其 (u,v)，可以先用它对照你的目测。\n' +
+      '**边界**：放大只是把它放大，不会让原来看不清的东西变清楚；OCR 列表只给文字，图标仍然要靠你看。',
+    parameters: {
+      hwnd: HWND,
+      shotId: { type: 'string', required: true, description: 'desktop_screenshot 返回的 shotId。' },
+      region: {
+        type: 'object',
+        description: '要裁的区域，归一化 {x,y,w,h}（0~1，相对整张图）。不传就整张图。',
+      },
+      scale: {
+        type: 'integer',
+        description: '放大倍数 1~4，默认 2。太大传不动，工具会自动降到你传的图上限。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          result: { type: 'string', required: true },
+          image: { type: 'object', description: '放大后的裁图' },
+        },
+      },
+      render: (_args, value) =>
+        value.image
+          ? [value.image, { type: 'text', text: value.result }]
+          : [{ type: 'text', text: value.result }],
+    },
+    async execute(args) {
+      const ownerId = currentSessionId()
+      if (isHalted()) {
+        throw new Error('失败：Halted — 用户按了 ESC 叫停，这次没有读任何界面内容。  [retry=stop]')
+      }
+      const rec = shotRecordFor(args.shotId, args.hwnd)
+      const { image } = verifiedImageOf(rec)
+      const crop = cropFromRegion(image, args.region)
+
+      // 放大倍数：先按用户要求，再按"输出不超过 2000px"压回来（传太大既慢又没用）。
+      const wanted = Number.isFinite(Number(args.scale)) ? Math.max(1, Math.min(4, Number(args.scale))) : 2
+      const maxSide = Math.max(crop.w, crop.h)
+      const scale = Math.max(1, Math.min(wanted, Math.floor(2000 / maxSide) || 1))
+
+      const viewId = randomUUID()
+      const outPath = join(dirname(rec.filepath), `view-${viewId}.png`)
+      const r = await set.runHelper(
+        ['crop', rec.filepath, outPath, String(crop.x), String(crop.y),
+          String(crop.w), String(crop.h), String(scale)],
+        'configured',
+      )
+      if (!r.ok) {
+        throw new Error(`裁图没做成：${r.error} ${r.message ?? ''}  [retry=stop]`)
+      }
+
+      visualStore.addView({
+        viewId, shotId: String(args.shotId), crop, scale, ownerId,
+        delivered: { width: Number(r.width), height: Number(r.height) },
+      })
+
+      // 这块区域里有哪些文字 + 它们在图内的 (u,v)：给模型一个对照，减少纯目测的误差。
+      const lines = []
+      lines.push(`视图 ${viewId}（来自观察 ${args.shotId}）`)
+      lines.push(
+        `裁剪 (${crop.x},${crop.y} ${crop.w}x${crop.h})，放大 ${scale}× → ` +
+        `${r.width}x${r.height}`,
+      )
+      const probe = await probeOcr()
+      if (probe.ok) {
+        const wantedLang = typeof config.ocrLanguage === 'string' ? config.ocrLanguage.trim() : ''
+        const lang = (wantedLang && probe.languages.includes(wantedLang))
+          ? wantedLang
+          : (probe.languages.find((l) => /^zh/i.test(l)) ?? probe.languages[0])
+        const ocr = await runOcr(rec.filepath, { lang })
+        if (ocr.ok) {
+          const rows = linesToRows(ocr.lines).filter((row) => intersectsCrop(row.quad, crop))
+          const shown = rows.slice(0, 20)
+          lines.push(`这块区域里 OCR 到 ${rows.length} 行文字` + (rows.length > shown.length ? `（只列前 ${shown.length} 行）` : ''))
+          for (const row of shown) {
+            const b = quadBounds(row.quad)
+            const cu = ((b.x + b.w / 2) - crop.x) / crop.w
+            const cv = ((b.y + b.h / 2) - crop.y) / crop.h
+            if (!(cu >= 0 && cu <= 1 && cv >= 0 && cv <= 1)) continue
+            lines.push(`  "${row.label}"  u=${cu.toFixed(3)} v=${cv.toFixed(3)}`)
+          }
+        }
+      }
+      lines.push('')
+      lines.push(
+        '报点：看准放大图里的目标，报 desktop_click_candidate({hwnd, shotId, viewId, point:{u,v}})。' +
+        'u、v 是**这张裁图内部**的比例（左上 (0,0)，右下 (1,1)），不要按整窗估算。',
+      )
+      lines.push('点之前仍会复查：那块区域和截图时不一样就拒绝，不会盲点。')
+
+      const imageBlock = await imageBlockFor(outPath)
+      return imageBlock
+        ? { result: lines.join('\n'), image: imageBlock }
+        : { result: lines.join('\n') }
+    },
+  })
+
   register({
     name: 'desktop_click_candidate',
     description:
-      '按候选编号点击：位置取自 desktop_visual_candidates 返回的候选，由插件换算成窗口坐标。\n' +
+      '按目标点击。两种给法：candidateId（OCR 候选），或 viewId + point（你在放大图上报的点）。\n' +
+      '位置都由插件换算成窗口坐标，你不用自己算。\n' +
       '**点击前会复查**：把候选那块区域和截图逐像素比（每通道容差 2，吸收缩放接缝这类噪声），' +
       '超出容差的像素不为 0 就拒绝发送输入并让你重新看 —— ' +
       '窗口没动不代表内容没变（滚动、弹层都查得出来）。\n' +
@@ -1779,7 +1895,18 @@ function applyInner(ctx, config = {}) {
         required: true,
         description: '候选来自哪张观察（desktop_visual_candidates 用的那个 shotId）。',
       },
-      candidateId: { type: 'string', required: true, description: '候选编号。' },
+      candidateId: {
+        type: 'string',
+        description: 'OCR 候选编号（与 viewId+point 二选一）。',
+      },
+      viewId: {
+        type: 'string',
+        description: 'desktop_visual_view 返回的视图编号；报点时必须给。',
+      },
+      point: {
+        type: 'object',
+        description: '报点 {u,v}：在这张**放大裁图**内的比例，左上 (0,0)、右下 (1,1)。',
+      },
       observe: OBSERVE,
       settleMs: SETTLE_MS,
     },
@@ -1816,44 +1943,100 @@ function applyInner(ctx, config = {}) {
 
       const rec = shotRecordFor(args.shotId, args.hwnd)
       const { image } = verifiedImageOf(rec)
-      const cand = visualStore.getCandidate(String(args.candidateId))
-      if (!cand) {
-        throw new Error(
-          `找不到候选 "${args.candidateId}"（可能已随截图作废）。` +
-          `  [retry=reobserve] 重新取一次候选。`,
-        )
-      }
-      if (String(cand.shotId) !== String(args.shotId)) {
-        throw new Error(
-          `候选属于观察 ${cand.shotId}，不是 ${args.shotId}。  [retry=disambiguate] 别混用。`,
-        )
-      }
-      const view = visualStore.getView(cand.viewId)
-      if (!view) {
-        throw new Error(`候选的视图记录已失效。  [retry=reobserve] 重新取候选。`)
+      /* ── 两种点击目标 ──
+       *
+       *   1. candidateId：OCR 给出的文字候选（第一批）；
+       *   2. viewId + point：模型在**放大裁图**上目测报的点（第二批）。
+       *
+       * 两条路只差"目标点从哪来"，后面的复查 / 换算 / 点击链完全一样。
+       */
+      let cand
+      if (args.candidateId) {
+        cand = visualStore.getCandidate(String(args.candidateId))
+        if (!cand) {
+          throw new Error(
+            `找不到候选 "${args.candidateId}"（可能已随截图作废）。` +
+            `  [retry=reobserve] 重新取一次候选。`,
+          )
+        }
+        if (String(cand.shotId) !== String(args.shotId)) {
+          throw new Error(
+            `候选属于观察 ${cand.shotId}，不是 ${args.shotId}。  [retry=disambiguate] 别混用。`,
+          )
+        }
+        if (!visualStore.getView(cand.viewId)) {
+          throw new Error(`候选的视图记录已失效。  [retry=reobserve] 重新取候选。`)
+        }
+      } else {
+        if (!args.viewId) {
+          throw new Error(
+            '失败：BadParams — 要么给 candidateId（OCR 候选），要么给 viewId + point（放大图上的报点）。' +
+            '  [retry=disambiguate]',
+          )
+        }
+        const view = visualStore.getView(String(args.viewId))
+        if (!view) {
+          throw new Error(
+            `失败：StaleObservation — 找不到视图 "${args.viewId}"（可能已作废）。  [retry=reobserve] 重新看一次。`,
+          )
+        }
+        if (String(view.shotId) !== String(args.shotId)) {
+          throw new Error(
+            `失败：StaleObservation — 视图属于观察 ${view.shotId}，不是 ${args.shotId}。` +
+            `  [retry=disambiguate] 别混用。`,
+          )
+        }
+        const u = Number(args.point?.u)
+        const v = Number(args.point?.v)
+        if (!Number.isFinite(u) || !Number.isFinite(v) || u < 0 || u >= 1 || v < 0 || v >= 1) {
+          throw new Error(
+            `失败：BadParams — 报点要在 0~1 之间（左上 (0,0)、右下 (1,1)），` +
+            `收到 u=${args.point?.u} v=${args.point?.v}。` +
+            `  [retry=disambiguate] 别按像素报，也别按整窗估。`,
+          )
+        }
+        // 裁图内归一化 → 原图像素：报点唯一的换算，窗口换算是下一步。
+        cand = {
+          label: `报点 u=${u.toFixed(3)} v=${v.toFixed(3)}`,
+          source: 'model_proposal',
+          pointInSourceImage: {
+            x: view.crop.x + u * view.crop.w,
+            y: view.crop.y + v * view.crop.h,
+          },
+          boxInSourceImage: null,
+          viewId: String(args.viewId),
+          shotId: String(args.shotId),
+        }
       }
 
-      /* ── 候选点 → 窗口像素 ──
+      /* ── 目标点 → 窗口像素 ──
        *
-       * ★ 这里**不能**经过 viewPointToWindow。那个函数吃的是"裁图内部的归一化坐标"，
-       *   而候选存的是**整张原图**里的像素点。曾经图省事把全图 u/v 交给它：
-       *   全图区域恰好对（crop 从 0,0 开始、宽高等于全图），一旦 region 是子矩形
-       *   就发生二次映射 —— 实测应点 (1200,400)，实际送到了 (1480,360)。
-       *   所以直接用原图点换算，两轴各自按"截图尺寸 → 窗口尺寸"缩放，只取整一次。
-       *   （viewPointToWindow 留给将来真正裁剪过的局部图。）
+       * 两种来源用**不同**的函数，这一点曾经错过：
+       *   · 候选（OCR）存的是**整张原图**里的像素 → candidatePointToWindow；
+       *   · 报点存的是**裁图内部**的 u/v → viewPointToWindow。
+       * 把全图 u/v 塞给 viewPointToWindow，在 region 是子矩形时会二次映射
+       * （实测应点 (1200,400)、实发 (1480,360)）；反过来同样错。
        */
       let wpx
       try {
-        wpx = candidatePointToWindow(cand, image, { x: rec.x, y: rec.y, w: rec.w, h: rec.h })
+        if (cand.source === 'model_proposal') {
+          wpx = viewPointToWindow(
+            { image, capture: { x: rec.x, y: rec.y, w: rec.w, h: rec.h } },
+            visualStore.getView(cand.viewId),
+            { u: Number(args.point.u), v: Number(args.point.v) },
+          )
+        } else {
+          wpx = candidatePointToWindow(cand, image, { x: rec.x, y: rec.y, w: rec.w, h: rec.h })
+        }
       } catch (e) {
         const code = String(e?.message ?? '')
         if (code === 'OutOfRange') {
           throw new Error(
-            `失败：OutOfRange — 候选点换算后落在窗口外（${rec.w}x${rec.h}）。\n` +
-            `  [retry=reobserve] 重新截图取候选。`,
+            `失败：OutOfRange — 目标点换算后落在窗口外（${rec.w}x${rec.h}）。\n` +
+            `  [retry=reobserve] 重新截图 / 重新看视图。`,
           )
         }
-        throw new Error(`失败：StaleVisualTarget — 候选没有可用的坐标。  [retry=reobserve] 重新取候选。`)
+        throw new Error(`失败：StaleVisualTarget — 目标没有可用的坐标。  [retry=reobserve]`)
       }
 
       /* ── 复查区域 = 候选框 + 少量余量 ──
@@ -2416,6 +2599,7 @@ function applyInner(ctx, config = {}) {
     'StaleSnapshot',       // 界面已经变了（这种本来就该重截）
     'StaleVisualTarget',   // 候选那块像素变了：校验阶段就拒绝，没有发输入
     'StaleObservation',    // 观察本身过期/属别处：连坐标都没算，更没有输入
+    'BadParams',           // 参数就不对：什么都没做，更不可能改布局
     'NotFound',
     'AmbiguousTarget',
     'BadValue', 'BadIndex', 'BadAction', 'OutOfRange',

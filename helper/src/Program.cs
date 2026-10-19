@@ -888,6 +888,7 @@ namespace Dsc
                     case "region_hash": return CmdRegionHash(args);
                     case "region_diff": return CmdRegionDiff(args);
                     case "image_hash": return CmdImageHash(args);
+                    case "crop": return CmdCrop(args);
                     case "whatis": return CmdWhatIs(args);
                     case "hold": return CmdHold(args);
                     case "release": return CmdRelease(args);
@@ -3225,6 +3226,87 @@ namespace Dsc
         }
 
         /// <summary>
+        /// crop —— 从一张 PNG 里裁一块出来，可选按整数倍放大，另存为 PNG。
+        /// 用法：crop &lt;源 PNG&gt; &lt;输出 PNG&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt; [放大倍数]
+        ///
+        /// 为什么要它：视觉候选目前只能告诉模型"文字在这张整窗图的哪个位置"，
+        /// 小字/图标在缩放后的预览里根本看不清。把那一块裁出来放大给模型看，
+        /// 才是"看图定位"该有的样子（外部评审的"第二批"）。
+        ///
+        /// 放大用 NearestNeighbor：这是给**人/模型看像素**用的，不是出图给人欣赏。
+        /// 双线性会把 1px 的笔画糊成 2px 的灰边，反而更难认。
+        /// 只读一张本地 PNG + 写一张 PNG，不碰桌面（不需要窗口白名单）。
+        /// </summary>
+        private static int CmdCrop(string[] args)
+        {
+            if (args.Length < 7) throw new ArgumentException("crop 需要 源 png 输出 png x y w h [倍数]");
+            RequireNotHalted("crop");
+            string srcPath = args[1];
+            string outPath = args[2];
+            if (!File.Exists(srcPath)) throw new DscError("BadValue", "源文件不存在：" + srcPath);
+
+            int x = int.Parse(args[3]);
+            int y = int.Parse(args[4]);
+            int w = int.Parse(args[5]);
+            int h = int.Parse(args[6]);
+            int scale = 1;
+            if (args.Length > 7) int.TryParse(args[7], out scale);
+            if (scale < 1 || scale > 8) throw new DscError("BadValue", "放大倍数只能是 1~8：" + scale);
+            if (w <= 0 || h <= 0) throw new DscError("BadValue", "宽高必须为正：" + w + "x" + h);
+            // 输出上限：再大就既传不动也没意义（模型侧会再缩）。
+            if ((long)w * scale > 4000 || (long)h * scale > 4000)
+                throw new DscError("BadValue", "放大后太大：" + (w * scale) + "x" + (h * scale));
+
+            using (Bitmap src = new Bitmap(srcPath))
+            {
+                if (x < 0 || y < 0 || x + w > src.Width || y + h > src.Height)
+                    throw new DscError("BadValue",
+                        "区域 (" + x + "," + y + " " + w + "x" + h + ") 超出图片 " + src.Width + "x" + src.Height);
+
+                using (Bitmap crop = src.Clone(new Rectangle(x, y, w, h), PixelFormat.Format32bppArgb))
+                {
+                    Bitmap final = crop;
+                    try
+                    {
+                        if (scale > 1)
+                        {
+                            final = new Bitmap(w * scale, h * scale, PixelFormat.Format32bppArgb);
+                            using (Graphics g = Graphics.FromImage(final))
+                            {
+                                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                                g.DrawImage(crop, new Rectangle(0, 0, w * scale, h * scale));
+                            }
+                        }
+
+                        string dir = Path.GetDirectoryName(outPath);
+                        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                            Directory.CreateDirectory(dir);
+                        final.Save(outPath, ImageFormat.Png);
+                    }
+                    finally
+                    {
+                        if (!object.ReferenceEquals(final, crop)) final.Dispose();
+                    }
+                }
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("path").Val(outPath)
+                .Key("sourceRect").Val(x + "," + y + " " + w + "x" + h)
+                .Key("sourceWidth").Num(w)
+                .Key("sourceHeight").Num(h)
+                .Key("scale").Num(scale)
+                .Key("width").Num(w * scale)
+                .Key("height").Num(h * scale)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// region_diff —— 屏幕上的某块区域，和一张 PNG 里的同一块，**差多少**。        /// <summary>
         /// region_diff —— 屏幕上的某块区域，和一张 PNG 里的同一块，**差多少**。
         /// 用法：region_diff &lt;hwnd&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt; &lt;png&gt; &lt;px&gt; &lt;py&gt; [容差]
         ///
