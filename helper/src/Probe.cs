@@ -215,10 +215,23 @@ namespace Dsc
                 Native.GetClassNameW(child, csb, csb.Capacity);
                 string cls = csb.ToString();
                 // Chromium 内容宿主；Tauri / WebView2 也有各自的类名
+                // ── 这些类名都是「内容可能在里面」的地方 ──
+                //
+                // 实测（SuYou / Tauri）：
+                //   顶层 Tauri Window            FromHandle → 6 个节点（只是容器）
+                //   子   WRY_WEBVIEW             FromHandle → **38 个节点**
+                //   子   Chrome_RenderWidgetHostHWND FromHandle → **29 个节点**
+                //   子   Chrome_WidgetWin_1      FromHandle → **37 个节点**
+                //
+                // 而同一批子窗口用 MSAA 的 OpenClient 读，只有 1 个节点 ——
+                // **UIA 能读、MSAA 读不到**，方向正好相反。
                 if (cls.IndexOf("Chrome_RenderWidgetHostHWND", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     cls.IndexOf("Internet Explorer_Server", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     cls.IndexOf("WebView2", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    cls.IndexOf("Chrome Legacy Window", StringComparison.OrdinalIgnoreCase) >= 0)
+                    cls.IndexOf("Chrome Legacy Window", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    cls.IndexOf("Chrome_WidgetWin", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    cls.IndexOf("WRY_WEBVIEW", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    cls.IndexOf("Tauri Window", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     found.Add(child);
                 }
@@ -272,8 +285,80 @@ namespace Dsc
 
             Thread.Sleep(250);
 
-            // ── UIA：Raw View + 多次重查 ──
-            result["uia"] = ProbeUia(hwnd, errors);
+            // ── 候选窗口列表（顶层 + 所有内容子窗口）──
+            //
+            // 必须**在查 UIA 之前**建好：网页内容在子窗口里，
+            // 只对顶层查 UIA 会得到外壳（实测 6 个节点 vs 子窗口 38 个）。
+            var candidates = new List<IntPtr>();
+            candidates.Add(hwnd);
+            var contentHwnds = FindContentWindows(hwnd);
+            foreach (var c in contentHwnds) candidates.Add(c);
+
+            // ── UIA：**对每个候选都跑**，取节点最多的那个 ──
+            //
+            // ── 这是我今天最大的一个错误 ──
+            //
+            // 之前这里只对顶层 hwnd 调 ProbeUia。而网页内容在**子窗口**里：
+            //   顶层 Tauri Window            → 6 个节点
+            //   子   WRY_WEBVIEW             → 38 个节点
+            //   子   Chrome_RenderWidgetHostHWND → 29 个节点
+            //
+            // 我一直用 MSAA 探子窗口（读不到），用 UIA 探顶层（只有外壳），
+            // 两个方向都错了一半。而 FindContentWindows 明明早就找到了那些子窗口。
+            //
+            // 现在对所有候选各跑一次，保留节点最多的，并把每个候选的结果都记下来。
+            var uiaByCandidate = new List<Dictionary<string, object>>();
+            Dictionary<string, object> bestUia = null;
+            IntPtr bestUiaHwnd = hwnd;
+            int bestUiaNodes = -1;
+            // ── 先发 WM_GETOBJECT，把 Chromium 的无障碍树"叫醒" ──
+            //
+            // 实测对比：
+            //   只 FromHandle(子窗口)                → WRY_WEBVIEW 4 个节点
+            //   先 SendMessage(WM_GETOBJECT, OBJID_CLIENT) 再 FromHandle → **38 个**
+            //
+            // 同一个进程、同一个窗口，差的只是这一条消息。
+            // 而一旦发过，后续查询就持续有内容（Chromium 内部记了状态）。
+            //
+            // 这是微软文档里说的那条路由：客户端通过 AccessibleObjectFromWindow
+            // 等 API 发起时，系统就会向服务端发 WM_GETOBJECT。我们这里直接发，
+            // 是因为要对**每个子窗口**都发一遍 —— 而 FromHandle 只发它自己那个。
+            foreach (var cand in candidates)
+            {
+                try
+                {
+                    IntPtr ignored;
+                    IntPtr r = Native.SendMessageTimeout(
+                        cand, 0x003D /* WM_GETOBJECT */, IntPtr.Zero,
+                        new IntPtr(-4) /* OBJID_CLIENT */, 0x0002 /* SMTO_ABORTIFHUNG */,
+                        800, out ignored);
+                }
+                catch { }
+            }
+            Thread.Sleep(600);
+
+            foreach (var cand in candidates)
+            {
+                var ui = ProbeUia(cand, errors);
+                var rec = new Dictionary<string, object>();
+                rec["hwnd"] = cand.ToInt64();
+                var sbx = new System.Text.StringBuilder(256);
+                Native.GetClassNameW(cand, sbx, sbx.Capacity);
+                rec["className"] = sbx.ToString();
+                object tmp = ui.ContainsKey("nodeCountAfter") ? ui["nodeCountAfter"] : null;
+                int cnt = tmp is int ? (int)tmp : 0;
+                rec["nodeCount"] = cnt;
+                uiaByCandidate.Add(rec);
+                if (cnt > bestUiaNodes)
+                {
+                    bestUiaNodes = cnt;
+                    bestUia = ui;
+                    bestUiaHwnd = cand;
+                }
+            }
+            result["uiaByCandidate"] = uiaByCandidate;
+            result["uiaChosenHwnd"] = bestUiaHwnd.ToInt64();
+            result["uia"] = bestUia ?? ProbeUia(hwnd, errors);
 
             // ── MSAA：先顶层，再逐个内容 HWND，取信息量最大的那个 ──
             //
@@ -281,10 +366,6 @@ namespace Dsc
             // 给的是浏览器外壳（菜单栏/工具栏/输入法），实测 3000 个节点
             // 只有 2 个矩形。网页在子窗口里。
             var msaa = new Dictionary<string, object>();
-            var candidates = new List<IntPtr>();
-            candidates.Add(hwnd);
-            var contentHwnds = FindContentWindows(hwnd);
-            foreach (var c in contentHwnds) candidates.Add(c);
 
             // 把所有子窗口的类名也报出来：找不到内容宿主时，这份名单
             // 是唯一能说明"为什么没找到"的东西。

@@ -58,6 +58,19 @@ namespace Dsc
         [DllImport("user32.dll")]
         public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
+        /// <summary>
+        /// 发一条带超时的窗口消息。
+        ///
+        /// 用它而不是 SendMessage，是因为目标可能卡住 —— 而探测不能让整个
+        /// helper 陪它一起卡。WM_GETOBJECT 这条尤其：它会**唤醒** Chromium 的
+        /// 无障碍树（实测节点数从 4 变成 38），但如果 provider 没响应，
+        /// SendMessage 会永久阻塞。
+        /// </summary>
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern IntPtr SendMessageTimeout(
+            IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam,
+            uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
         [DllImport("user32.dll")]
         public static extern bool IsWindowVisible(IntPtr hWnd);
 
@@ -787,6 +800,23 @@ namespace Dsc
             }
         }
 
+        /// <summary>
+        /// 主线程标 STA。
+        ///
+        /// ── 为什么 ──
+        ///
+        /// 实测对比（同一时刻、同一窗口）：
+        ///   PowerShell（STA）  FromHandle(WRY_WEBVIEW).FindAll → **38 个节点**
+        ///   本程序（默认 MTA） 同样的调用              → **4 个节点**
+        ///
+        /// 同一个 UIAutomationClient、同一个 provider，差的只是线程 apartment。
+        /// Chromium 的 UIA provider 在 MTA 下只给了外壳。
+        ///
+        /// 微软对 UIA 客户端的建议是用 MTA，但**那是对"不要跨 apartment 裸传
+        /// COM 引用"说的**，不保证每个 provider 在两边行为一致。实测这里 STA 更好，
+        /// 而 dsc.exe 是短进程、没有 UI 线程竞争，STA 没有代价。
+        /// </summary>
+        [System.STAThread]
         private static int Main(string[] args)
         {
             _argsRaw = args;
