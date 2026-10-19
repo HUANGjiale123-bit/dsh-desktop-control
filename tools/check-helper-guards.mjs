@@ -49,6 +49,11 @@ const POLICY = {
   // a11y_probe 读的是界面内容（元素名字、角色、矩形）—— 和 whatis / tree
   // 同一级别，所以**两道守卫都要**：急停时停，白名单外的应用不读。
   CmdA11yProbe: 'both',
+  // ps_read 起一个 PowerShell 子进程读 UIA 树 —— 读的是界面内容，
+  // 和白名单外的应用一个级别，所以同样两道守卫都要。
+  // 它还会**执行脚本**，虽然脚本由 helper 自己生成、不接受调用方传入，
+  // 但"能启进程"这件事本身也不该在急停状态下发生。
+  CmdPsRead: 'both',
   CmdHold: 'both',
   CmdDragPath: 'both',
   // release **刻意**既不检查急停也不检查白名单：
