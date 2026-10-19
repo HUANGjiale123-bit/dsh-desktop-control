@@ -64,7 +64,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.45'
+const PLUGIN_VERSION = '2.18.46'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1575,7 +1575,7 @@ function applyInner(ctx, config = {}) {
       },
       maxItems: {
         type: 'integer',
-        description: '最多列出多少条（默认 24）。超出会明确标记"已截断"。',
+        description: '最多列出多少条（默认 12）。超出会明确标记"已截断"。',
       },
     },
     output: {
@@ -1767,8 +1767,9 @@ function applyInner(ctx, config = {}) {
     name: 'desktop_click_candidate',
     description:
       '按候选编号点击：位置取自 desktop_visual_candidates 返回的候选，由插件换算成窗口坐标。\n' +
-      '**点击前会复查**：先比对该候选区域的像素指纹（截图那一刻 vs 现在），' +
-      '不一致就拒绝发送输入并让你重新看 —— 窗口没动不代表内容没变（滚动、弹层都查得出来）。\n' +
+      '**点击前会复查**：把候选那块区域和截图逐像素比（每通道容差 2，吸收缩放接缝这类噪声），' +
+      '超出容差的像素不为 0 就拒绝发送输入并让你重新看 —— ' +
+      '窗口没动不代表内容没变（滚动、弹层都查得出来）。\n' +
       '点击仍然走现有的那条链：窗口几何校验、白名单、急停闸门、落点归属检查，一个都不少。\n' +
       '第一版只做单次左键。',
     parameters: {
