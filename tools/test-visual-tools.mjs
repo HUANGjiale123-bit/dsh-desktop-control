@@ -224,7 +224,7 @@ try {
         } else {
         const r = await clickCand.execute({ hwnd: win.hwnd, shotId: shotB, candidateId: target.id, observe: false })
           .catch((e) => ({ err: e.message }))
-        const t = r.err ?? r.result ?? ''
+        const t = r.err ?? r.result ?? r.text ?? ''
         if (/已经变了/.test(t) && /没有发送任何输入/.test(t)) {
           ok('切页后旧候选被拒绝（像素复查拦住了），没有发送输入')
         } else if (/已点击候选/.test(t)) {
