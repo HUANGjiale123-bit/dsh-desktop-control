@@ -30,6 +30,12 @@ class ExactCopy
     [DllImport("ole32.dll")]
     static extern int OleInitialize(IntPtr pvReserved);
 
+    [DllImport("ole32.dll")]
+    static extern int CoInitializeSecurity(
+        IntPtr pSecDesc, int cAuthSvc, IntPtr asAuthSvc, IntPtr pReserved1,
+        uint dwAuthnLevel, uint dwImpLevel, IntPtr pAuthList,
+        uint dwCapabilities, IntPtr pReserved3);
+
     [STAThread]
     static void Main(string[] args)
     {
@@ -42,6 +48,21 @@ class ExactCopy
             int hr = OleInitialize(IntPtr.Zero);
             Console.WriteLine("OleInitialize hr=0x" + hr.ToString("X8"));
         } catch (Exception e) { Console.WriteLine("OleInitialize 失败: " + e.Message); }
+
+        // ── 假设 ⑨：CoInitializeSecurity ──
+        //
+        // WM_GETOBJECT 的跨进程响应是 COM 封送。如果进程的安全设置不允许
+        // 对方把接口指针给我，providers 就会返回 0 —— 现象完全对得上。
+        //
+        // 参数取最宽松：认证级别 NONE(1)、模拟级别 IMPERSONATE(3)、无能力位(0)。
+        try {
+            int hrSec = CoInitializeSecurity(
+                IntPtr.Zero, -1, IntPtr.Zero, IntPtr.Zero,
+                1 /* RPC_C_AUTHN_LEVEL_NONE */,
+                3 /* RPC_C_IMP_LEVEL_IMPERSONATE */,
+                IntPtr.Zero, 0 /* EOAC_NONE */, IntPtr.Zero);
+            Console.WriteLine("CoInitializeSecurity hr=0x" + hrSec.ToString("X8"));
+        } catch (Exception e) { Console.WriteLine("CoInitializeSecurity 失败: " + e.Message); }
 
         // 真正**用一下** System.Windows.Forms —— 加载它会连带初始化 OLE/COM。
         // 这正是 PowerShell 有、而我只引用 UIAutomationClient 时没有的一步。
