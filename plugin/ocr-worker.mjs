@@ -27,10 +27,21 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pngSize } from './visual-candidates.mjs'
 
-const PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+/* ── 两个**测试钩子**（只影响本模块，不影响任何生产默认值）──
+ *
+ *   DSC_POWERSHELL   换成另一个可执行文件，用来验"解释器本身不可用"这条路；
+ *   DSC_OCR_SCRIPT   换成另一个脚本，用来验"协议不符/输出是垃圾/卡死超时"。
+ *
+ * 为什么要有：第 7 条验收要求"worker 缺依赖 / 管道断 / 协议不符 / 父进程结束
+ * → 有界失败，不拖垮插件"。这些状态在正常机器上根本复现不出来，
+ * 而"没法复现"就等于"没验证"。留两个环境变量，就能把失败面真跑一遍。
+ */
+const PS = process.env.DSC_POWERSHELL ||
+  'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 
 /** 脚本位置：插件打包后与 worker 同目录；仓库里在 server/ 下。 */
 function scriptPath() {
+  if (process.env.DSC_OCR_SCRIPT) return process.env.DSC_OCR_SCRIPT
   const here = dirname(fileURLToPath(import.meta.url))
   const cand = [join(here, 'win-ocr.ps1'), join(here, '..', 'server', 'win-ocr.ps1')]
   for (const c of cand) if (existsSync(c)) return c
@@ -51,7 +62,13 @@ function runPowerShell(script, args, timeoutMs) {
   const r = spawnSync(PS, [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, ...args,
   ], { encoding: 'utf8', windowsHide: true, timeout: timeoutMs })
-  if (r.error) return { ok: false, error: `Spawn: ${r.error.message}` }
+  if (r.error) {
+    // ETIMEDOUT 是超时被杀，单独标出来：它和"程序不存在"是两种完全不同的局面，
+    // 混在一句 Spawn: ... 里，上层没法判断该不该重试。
+    const code = String(r.error.code ?? '')
+    if (code === 'ETIMEDOUT') return { ok: false, error: 'Timeout', message: 'OCR 超时被终止' }
+    return { ok: false, error: `Spawn: ${r.error.message}` }
+  }
   const res = decode(r.stdout)
   if (!res.ok && r.stderr) res.stderr = String(r.stderr).slice(0, 300)
   return res
@@ -89,10 +106,15 @@ export function probeOcr() {
  */
 export function runOcr(imagePath, opts = {}) {
   const script = scriptPath()
-  if (!script) return { ok: false, error: 'NoOcrScript' }
+  // 脚本必须真实存在：不存在就明确说"没有后端"，而不是让 PowerShell 去报一个
+  // 含糊的"文件找不到"，再被我们自己翻译成"执行失败"。
+  if (!script || !existsSync(script)) return { ok: false, error: 'NoOcrScript' }
   if (!imagePath || !existsSync(imagePath)) return { ok: false, error: 'ImageNotFound' }
 
-  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 20000
+  const envTimeout = Number(process.env.DSC_OCR_TIMEOUT_MS)
+  const timeoutMs = Number.isFinite(opts.timeoutMs)
+    ? opts.timeoutMs
+    : (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 20000)
   /* 路径必须归一成反斜杠绝对路径。
    *
    * 实测：WinRT 的 `StorageFile.GetFileFromPathAsync` 不接受正斜杠写法

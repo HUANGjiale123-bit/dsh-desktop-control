@@ -3199,9 +3199,6 @@ namespace Dsc
                 .Key("hash").Val(hash)
                 .Key("rect").Val(want.Left + "," + want.Top + " " + want.Width + "x" + want.Height)
                 .Key("pixels").Num((long)want.Width * want.Height)
-                // 诊断用：GDI+ 解码后的像素格式。两张视觉相同的 PNG 若格式不同，
-                // 转成 32bppArgb 的路径也不同 —— 这正是"同像素、不同指纹"的候选解释。
-                .Key("format").Val(srcFormat)
              .End();
             Console.WriteLine(j.ToString());
             return 0;
@@ -3225,12 +3222,10 @@ namespace Dsc
             Rectangle want = ParseRegion(args, 2);
             string hash;
             int imgW, imgH;
-            string srcFormat = "?";
             using (Bitmap src = new Bitmap(path))
             {
                 imgW = src.Width;
                 imgH = src.Height;
-                srcFormat = src.PixelFormat.ToString();
                 if (want.Left < 0 || want.Top < 0 || want.Right > src.Width || want.Bottom > src.Height)
                 {
                     throw new DscError("BadValue",
