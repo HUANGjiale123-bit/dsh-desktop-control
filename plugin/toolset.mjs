@@ -1365,6 +1365,26 @@ export function createDesktopToolset(options = {}) {
       const eff = effectiveAllowlist()
       const grantRows = [...grants().keys()]
 
+      /* ── 多显示器：把"没验过"说在前面 ──
+       *
+       * 开发机只有一块屏，所以"窗口被拖到另一块屏 / 两块屏缩放不同"这条路径
+       * **从来没有实测数据**。代码是按 Per-Monitor V2 写的，但没有数据就不该
+       * 被当成"支持"——所以这里按实际屏数说清楚，并给一条自查办法。
+       *
+       * 有多屏的用户看到这段，就知道该自己核对：先 desktop_whatis 看那一点属于谁，
+       * 再点。这比事后解释"为什么点偏了"便宜得多。
+       */
+      const monitors = Number(r.monitors ?? 0)
+      const monitorNote = monitors > 1
+        ? `\n\n⚠ 检测到 **${monitors} 块屏**：多显示器 / 跨屏不同缩放这条路径**没有实测数据**` +
+          `（开发机只有一块屏）。坐标本身是按物理像素算的，理论上跟着窗口所在屏走，` +
+          `但请不要当成已验证——点之前先用 desktop_whatis 核对落点属于谁。` +
+          `你若有多屏，欢迎自行补测并把结论写回 docs/。`
+        : monitors === 1
+          ? `\n\n（本机 1 块屏。多显示器 / 跨屏不同缩放没有实测数据——有多屏的人请自行用 ` +
+            `desktop_whatis 核对落点，别当成已验证。）`
+          : ''
+
       // 文案必须反映**真实**的准入规则，否则用户会按错的模型操作。
       // 早期版本写"白名单为空——只能观察"，那在只有静态白名单时是对的；
       // 加了会话级授权之后就不对了，会让人以为功能坏了。
@@ -1373,6 +1393,7 @@ export function createDesktopToolset(options = {}) {
         // 拍摄时的窗口矩形是否还成立）。原先只有拼好的文本，
         // 上层只能再起一个进程重新列一次。
         windows: r.windows ?? [],
+        monitors,
         text:
           `本机可见窗口 ${rows.length} 个（坐标为物理像素）：\n` +
           rows.join('\n') +
@@ -1384,7 +1405,8 @@ export function createDesktopToolset(options = {}) {
                 ? `（其中 ${grantRows.join(', ')} 是本次会话授权的，会话结束即失效）`
                 : '（来自配置里的静态白名单，属持久放行）')
             : '\n\n当前没有已放行的应用。**读取界面内容（读树、截图）和变更性操作都会先询问你**——' +
-              '同意后仅对当前会话的该应用有效，不会写入配置。'),
+              '同意后仅对当前会话的该应用有效，不会写入配置。') +
+          monitorNote,
       }
     },
 

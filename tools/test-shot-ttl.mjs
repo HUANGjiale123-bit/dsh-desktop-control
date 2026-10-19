@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { tempHelper } from './fixture.mjs'
 
 let pass = 0
 let fail = 0
@@ -46,7 +47,7 @@ const ctx = {
 }
 const mod = await import(pathToFileURL(join(tmp, 'index.mjs')).href + '?' + Math.random())
 await mod.apply(ctx, {
-  helperPath: 'helper/bin/dsc.exe',
+  helperPath: tempHelper(),
   escPath: 'helper/bin/dsc-esc.exe',
   gatePath: join(tmp, 'halt'),
   shotDir: join(tmp, 'shots'),

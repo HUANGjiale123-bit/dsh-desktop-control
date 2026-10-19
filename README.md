@@ -94,7 +94,17 @@ UIA 读取链（`server/uia-bridge.py`：python → PowerShell），实测 SuYou
 都查这个文件，拦住所有变更性动作（连观察类命令也一并停）。
 `desktop_off` 只收指示层界面，**不拉闸**。
 
-**4. 尚未实现**：`visual-candidates`（在截图上标出候选元素、
+**4. 多显示器 / 跨屏不同缩放：没有实测数据。**
+
+开发机只有一块屏（`\\.\DISPLAY1`），窗口被拖到另一块屏、或两块屏缩放不同这类情况
+**没验过**。代码按 Per-Monitor V2 写，坐标是物理像素，理论上跟着窗口所在屏走 ——
+但"理论上"不算支持。
+
+`desktop_list_windows` 会回报屏数：多屏时它会把这条提醒直接写进返回文本，
+`desktop_click` 的工具说明里也写着。**有多屏的人请自己用 `desktop_whatis` 核对落点**，
+别把这块当成已验证。
+
+**5. 尚未实现**：`visual-candidates`（在截图上标出候选元素、
 带 `observationId` / `imageSha256` / 坐标仿射关系的那套）。
 其余早先列为"未实现"的（`launch_app`、`drag`、滚轮、截图坐标锚定）都已实现。
 

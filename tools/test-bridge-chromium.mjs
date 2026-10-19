@@ -21,6 +21,7 @@ const bad = (m) => { results.push(`  ✗ ${m}`); fail++ }
 
 const toolsetPath = pathToFileURL(path.resolve('server/toolset.mjs')).href
 const { createDesktopToolset } = await import(toolsetPath)
+const { tempHelper, integrityOf } = await import('./fixture.mjs')
 const probe = createDesktopToolset({})
 
 // 找一个 SuYou 或者任何 Chromium 系窗口
@@ -88,6 +89,52 @@ results.push('── 2. 对照：dsc.exe 直读同一窗口读到几个 ──')
     const n = Number(m[1])
     if (n >= 10) ok(`直读+桥的最终结果有 ${n} 个节点`)
     else bad(`节点数太少：${n}`)
+  }
+}
+
+/* ══ 3. 换一个 **Medium** 的 helper：同一个窗口应当由 dsc.exe 直读，不经过桥 ══
+ *
+ * 这一格是 2026-10-19 之后加的。之前只测了"桥能读"，而那条路径之所以被走到，
+ * 是因为测试跑在工作区里 → helper 是 Low 完整性 → Chromium 只给它外壳。
+ * 用户环境里 helper 是 Medium，根本不会走桥 —— 也就是说这个文件过去验的是
+ * **开发机的残废路径**，而不是用户实际那条。
+ *
+ * 现在两边都验：Low → 桥；Medium → 直读。哪一个坏了都要能红。
+ */
+results.push('')
+results.push('── 3. Medium 的 helper 应当直读（不走桥）──')
+{
+  const helperPath = tempHelper()
+  const level = integrityOf(helperPath)
+  results.push(`    helper 副本：${helperPath}（integrity=${level}）`)
+
+  if (level === 'Low') {
+    bad('临时副本仍然是 Low —— 这台机器的临时目录也被打了标签，这一格没法验')
+  } else {
+    const direct = createDesktopToolset({
+      helperPath,
+      allowedApps: path.basename(String(target.exe ?? '')),
+    })
+    const r = await direct.tools.readWindow({ hwnd: target.hwnd, maxNodes: 100 })
+    const text = r.text ?? ''
+    // 注意：直读的文本里写的是"共 N 个元素"，而桥的说明里是"拿到 N 个节点"。
+    // 只认"个节点"会拿到 -1（第一版就踩了），两种都要认。
+    const m = text.match(/共 (\d+) 个元素/) ?? text.match(/(\d+)\s*个节点/)
+    const n = m ? Number(m[1]) : -1
+
+    if (r.isError) {
+      bad(`Medium helper 读树报错：${text.split('\n')[0]}`)
+    } else if (n >= 20) {
+      ok(`Medium helper 直读到 ${n} 个节点（用户实际走的就是这条）`)
+    } else {
+      bad(`Medium helper 只读到 ${n} 个节点 —— 直读路径退化了`)
+    }
+
+    if (/这棵树来自 UIA 桥/.test(text)) {
+      bad('Medium helper 仍然走了桥 —— 说明直读被判"不可用"，需要查为什么')
+    } else {
+      ok('没有走桥（说明是 dsc.exe 自己读的）')
+    }
   }
 }
 

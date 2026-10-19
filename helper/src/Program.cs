@@ -58,6 +58,11 @@ namespace Dsc
         [DllImport("user32.dll")]
         public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
+        /* 显示器枚举：只用来数数量（多屏路径没有实测数据，见 MonitorCount）。 */
+        public delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, ref RECT lpRect, IntPtr data);
+        [DllImport("user32.dll")]
+        public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc proc, IntPtr data);
+
         /// <summary>
         /// 发一条带超时的窗口消息。
         ///
@@ -3988,9 +3993,32 @@ namespace Dsc
                     .Key("foreground").Bool(h == fg)
                  .End();
             }
-            j.EndArr().End();
+            j.EndArr().Key("monitors").Num(MonitorCount()).End();
             Console.WriteLine(j.ToString());
             return 0;
+        }
+
+        /// <summary>
+        /// 显示器数量。
+        ///
+        /// 为什么要报：**多显示器 / 跨屏不同缩放这条路径从来没验过** ——
+        /// 开发机只有一块屏（`\\.\DISPLAY1`）。把数量交给调用方，
+        /// 多屏环境才能据此提醒"这块没有实测数据，别当成支持"。
+        /// </summary>
+        private static int MonitorCount()
+        {
+            int n = 0;
+            try
+            {
+                Native.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+                    delegate(IntPtr hMon, IntPtr hdc, ref Native.RECT rect, IntPtr data)
+                    {
+                        n++;
+                        return true;
+                    }, IntPtr.Zero);
+            }
+            catch { }
+            return n;
         }
 
         /// <summary>读取窗口的无障碍树，元素以稳定 id 标注，供后续动作寻址。</summary>

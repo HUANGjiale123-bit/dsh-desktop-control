@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'no
 import { spawn, spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { tempHelper, assertNotLow } from './fixture.mjs'
 
 let pass = 0
 let fail = 0
@@ -117,6 +118,11 @@ function setWindowPos(hwnd, x, y, w, h, flags = SWP_NOZORDER_NOACT) {
 
 /* ── 把插件层装起来（和 test-shot-invalidate 用的是同一套桩） ── */
 
+// ★ 用 %TEMP% 里的 helper 副本：工作区里的那份是 Low 完整性，注入会被拒 ——
+//   那样「窗口移动 + space=window」这一格永远只能"看起来跳过"。
+const HELPER = tempHelper()
+assertNotLow(HELPER)
+
 const tmp = mkdtempSync(join(process.cwd(), '.cache', 'shotmatrix-'))
 for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs']) {
   writeFileSync(join(tmp, f), readFileSync(join('plugin', f)))
@@ -136,7 +142,7 @@ const ctx = {
 }
 const mod = await import(pathToFileURL(join(tmp, 'index.mjs')).href + '?' + Math.random())
 await mod.apply(ctx, {
-  helperPath: 'helper/bin/dsc.exe',
+  helperPath: HELPER,
   escPath: 'helper/bin/dsc-esc.exe',
   gatePath: join(tmp, 'halt'),
   shotDir: join(tmp, 'shots'),

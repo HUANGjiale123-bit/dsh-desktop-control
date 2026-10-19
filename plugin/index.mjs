@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.36'
+const PLUGIN_VERSION = '2.18.37'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1335,6 +1335,8 @@ function applyInner(ctx, config = {}) {
       '而坐标在部分应用上不可靠——实测腾讯视频（Electron）的搜索按钮，' +
       '用无障碍树给出的矩形算出的坐标连点两次毫无反应，改用元素描述符或回车立刻生效。' +
       '只有在没有可描述元素时（例如画布、视频画面）才用坐标点击。' +
+      '多显示器 / 跨屏不同缩放**没有实测数据**（开发机只有一块屏）——' +
+      '如果你有多块屏，点之前先用 desktop_whatis 核对落点属于谁，别把这块当成已验证。' +
       '这是变更性操作，会真实移动并点击你的鼠标。' +
       allowNote,
     parameters: {
