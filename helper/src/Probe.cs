@@ -206,7 +206,7 @@ namespace Dsc
          * 一个窗口可能有多个（主页面 + 弹窗 + 嵌入内容），所以逐个试、
          * 取信息量最大的那个，而不是假定只有一个。
          */
-        private static List<IntPtr> FindContentWindows(IntPtr root)
+        internal static List<IntPtr> FindContentWindows(IntPtr root)
         {
             var found = new List<IntPtr>();
             Native.EnumChildWindows(root, delegate(IntPtr child, IntPtr lp)

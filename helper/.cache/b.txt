@@ -1,0 +1,2 @@
+[父进程] 不调 SetProcessDPIAware
+[模式] 继承 stdout

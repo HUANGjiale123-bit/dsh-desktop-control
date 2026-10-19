@@ -878,6 +878,7 @@ namespace Dsc
                     case "resolve_app": return CmdResolveApp(args);
                     case "launch": return CmdLaunch(args);
                     case "a11y_probe": return CmdA11yProbe(args);
+                    case "ps_read": return CmdPsRead(args);
                     case "selftest_walk": return WalkSelfTest.Run();
                     default: return CmdHelp();
                 }
@@ -1334,6 +1335,34 @@ namespace Dsc
         }
 
         /** 把 Probe.Run 的嵌套字典/列表转成 JSON。Jw 没有通用转换，这里补一个。 */
+        /// <summary>
+        /// ps_read &lt;hwnd&gt; [--max N] —— 由 dsc.exe 亲自起一个 PowerShell 子进程读 UIA 树。
+        ///
+        /// 存在的理由只有一个：外部复核要求「由插件实际使用的启动路径创建一个干净的
+        /// PowerShell 子进程」，证明插件的子进程也能读到，而不是拿手工打开的 PowerShell
+        /// 的成功当证据。dsc.exe 是 DSH 的沙箱子进程，它的 token / 作业对象 / 环境变量
+        /// 都和我手工那个不一样 —— 这正是要验证的变量。
+        /// </summary>
+        private static int CmdPsRead(string[] args)
+        {
+            RequireNotHalted("ps_read");
+            IntPtr hwnd = ParseHwnd(args, "ps_read");
+            RequireAllowedWindow(hwnd, "ps_read");
+
+            int maxNodes = 40;
+            for (int i = 0; i < args.Length - 1; i++)
+                if (args[i] == "--max") int.TryParse(args[i + 1], out maxNodes);
+
+            var kids = new List<long>();
+            kids.Add(hwnd.ToInt64());
+            var contentHwnds = Probe.FindContentWindows(hwnd);
+            foreach (IntPtr c in contentHwnds) kids.Add(c.ToInt64());
+
+            Dictionary<string, object> r = PsRead.Run(hwnd.ToInt64(), kids, maxNodes, 25000);
+            Console.WriteLine(ToJson(r));
+            return 0;
+        }
+
         private static string ToJson(object v)
         {
             if (v == null) return "null";

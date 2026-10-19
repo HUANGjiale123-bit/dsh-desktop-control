@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.21'
+const PLUGIN_VERSION = '2.18.22'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1345,12 +1345,14 @@ function applyInner(ctx, config = {}) {
       },
       space: {
         type: 'string',
-        enum: ['desktop', 'window'],
+        enum: ['desktop', 'window', 'normalized'],
         description:
-          '坐标空间，默认 desktop。' +
-          '**如果你手上的坐标来自 desktop_screenshot 的图内像素，请传 "window"** —— ' +
-          '那样插件会自己加窗口原点，不用你算。' +
-          '故意不把这个设成默认：静默改变坐标含义比让人多写一个参数危险。',
+          '坐标空间，默认 desktop（桌面绝对坐标）。' +
+          '**图内像素坐标传 "window"** —— 插件自己加窗口原点，不用你算。' +
+          '**不确定图片被显示成多大时传 "normalized"**：x、y 给 0..1 的比例，' +
+          '左上角是 (0,0)、右下角是 (1,1)。比例不随缩放变化，所以不需要知道图片尺寸 —— ' +
+          '两轴独立换算，不会因为只记一个宽度比例而在纵向偏掉。' +
+          '故意不把 window 设成默认：静默改变坐标含义比让人多写一个参数危险。',
       },
       button: { type: 'string', enum: ['left', 'right', 'middle'], description: '鼠标键，默认 left。' },
       count: {
@@ -2151,7 +2153,7 @@ function applyInner(ctx, config = {}) {
       y: { type: 'integer', description: 'Y（同上）。' },
       space: {
         type: 'string',
-        enum: ['desktop', 'window'],
+        enum: ['desktop', 'window', 'normalized'],
         description: '坐标空间，默认 desktop。图内坐标传 window，插件自己加窗口原点。',
       },
       observe: OBSERVE,
@@ -2191,7 +2193,7 @@ function applyInner(ctx, config = {}) {
       y2: { type: 'integer', description: '终点 Y。' },
       space: {
         type: 'string',
-        enum: ['desktop', 'window'],
+        enum: ['desktop', 'window', 'normalized'],
         description: '坐标空间，默认 desktop。',
       },
       steps: {
@@ -2243,7 +2245,7 @@ function applyInner(ctx, config = {}) {
       hwnd: { ...HWND, description: '目标窗口句柄。' },
       x: { type: 'integer', description: 'X（space="desktop" 为桌面绝对，=window 为图内）。' },
       y: { type: 'integer', description: 'Y（同上）。' },
-      space: { type: 'string', enum: ['desktop', 'window'], description: '坐标空间，默认 desktop。' },
+      space: { type: 'string', enum: ['desktop', 'window', 'normalized'], description: '坐标空间，默认 desktop。' },
       button: { type: 'string', enum: ['left', 'right', 'middle'], description: '按哪个键，默认 left。' },
     },
     output: {

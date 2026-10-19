@@ -1,0 +1,3 @@
+[父进程] 不调 SetProcessDPIAware
+[子进程 stdout 前 400 字]
+[{"hwnd":66988,"items":[{"name":"","t":158,"h":999,"type":"ControlType.Pane","w":666,"l":1253},{"name":"","t":158,"h":999,"type":"ControlType.Pane","w":666,"l":1253},{"name":"速游","t":158,"h":999,"type":"ControlType.Pane","w":666,"l":1253}],"nodes":5},{"hwnd":66998,"items":[{"name":"","t":158,"h":999,"type":"ControlType.Pane","w":666,"l":1253},{"name":"速游","t":158,"h":999,"type":"ControlType.Pane",

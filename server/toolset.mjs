@@ -693,11 +693,35 @@ export function createDesktopToolset(options = {}) {
     const w = pre.ok
       ? (pre.windows ?? []).find((t) => String(t.hwnd) === String(hwnd))
       : undefined
-    if (space === 'window' && !w) {
-      return { err: `失败：无法取得窗口 ${hwnd} 的矩形，无法把图内坐标换算成桌面坐标。` }
+    if ((space === 'window' || space === 'normalized') && !w) {
+      return { err: `失败：无法取得窗口 ${hwnd} 的矩形，无法换算坐标。` }
     }
-    const px = space === 'window' ? w.x + x : x
-    const py = space === 'window' ? w.y + y : y
+
+    // ── normalized：相对位置 ──
+    //
+    // 这是**不依赖任何宿主内部接口**的坐标契约：调用方给 0..1 的比例，
+    // 我们按窗口矩形换算。它对"图片被缩放到多少"完全不敏感 ——
+    // 因为比例不随缩放变化。
+    //
+    // 上一版文档说"工具不知道图被显示成多大，只能猜"，那是把两件事混了：
+    // 前端预览尺寸和模型实际收到的请求图像尺寸是不同字段，而**相对位置两者都绕开**。
+    let nx = x, ny = y
+    if (space === 'normalized') {
+      if (typeof x !== 'number' || typeof y !== 'number' ||
+          x < 0 || x > 1 || y < 0 || y > 1) {
+        return {
+          err:
+            `失败：space:"normalized" 要求 x、y 是 0..1 之间的比例（左上角 0,0；右下角 1,1），` +
+            `收到的是 (${x},${y})。\n` +
+            `若你手上是图内像素坐标，请用 space:"window"；若已经是桌面坐标，用默认的 space:"desktop"。`,
+        }
+      }
+      nx = Math.round(x * w.width)
+      ny = Math.round(y * w.height)
+    }
+
+    const px = (space === 'window' || space === 'normalized') ? w.x + nx : x
+    const py = (space === 'window' || space === 'normalized') ? w.y + ny : y
     if (w) {
       const inside = px >= w.x && px < w.x + w.width && py >= w.y && py < w.y + w.height
       if (!inside) {
@@ -1198,7 +1222,8 @@ export function createDesktopToolset(options = {}) {
        * 所以保留 desktop 为默认，另给一个显式选项，并且**在返回里回显
        * 最终落到的桌面坐标**——传错了能立刻看出来。
        */
-      const useWindowSpace = space === 'window'
+      // window 和 normalized 都需要窗口矩形；normalized 还要再乘一次宽高
+      const useWindowSpace = space === 'window' || space === 'normalized'
 
       /* 先做范围检查，再走授权。
        *
@@ -1272,9 +1297,29 @@ export function createDesktopToolset(options = {}) {
         }
       }
 
-      // 图内坐标 → 桌面坐标（纯平移，没有缩放）
-      const dx = useWindowSpace ? w0.x + x : x
-      const dy = useWindowSpace ? w0.y + y : y
+      // 坐标 → 桌面坐标。
+      //
+      // window：纯平移，加窗口原点。
+      // normalized：先把 0..1 的比例乘成窗口内像素，再平移。
+      //   两轴分别算 —— 只记一个宽度比例会漏掉高度方向的独立舍入。
+      let ix = x, iy = y
+      if (space === 'normalized') {
+        if (typeof x !== 'number' || typeof y !== 'number' ||
+            x < 0 || x > 1 || y < 0 || y > 1) {
+          return {
+            isError: true,
+            text:
+              `失败：space:"normalized" 要求 x、y 是 0..1 之间的比例` +
+              `（左上角 0,0；右下角 1,1），收到的是 (${x},${y})。
+` +
+              `若你手上是图内像素坐标，用 space:"window"；若已是桌面坐标，用默认的 space:"desktop"。`,
+          }
+        }
+        ix = Math.round(x * w0.width)
+        iy = Math.round(y * w0.height)
+      }
+      const dx = useWindowSpace ? w0.x + ix : x
+      const dy = useWindowSpace ? w0.y + iy : y
 
       if (w0) {
         const inside = dx >= w0.x && dx < w0.x + w0.width && dy >= w0.y && dy < w0.y + w0.height
