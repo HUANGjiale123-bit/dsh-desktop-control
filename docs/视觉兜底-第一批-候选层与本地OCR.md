@@ -649,3 +649,74 @@ OCR 输入：裁图（坐标已偏移 0,844）   或   OCR 输入：整图
   - 整图里的标题"首页"和底部标签页"首页"是**两个东西**，比对同名文字会得出假结论 → 去掉这条脆断言。
 
 **41 个测试文件全绿。**
+
+
+---
+
+# 阈值扫描 + trace 持久化（2.18.50）
+
+## 1. 容差是**测**出来的
+
+评审说："先建立同一目标的两类样本……把阈值扫描当作离线实验，这些数字是搜索点，不是发布参数。"
+
+为此给 helper 加了 `image_diff <pngA> <pngB> x y w h [tol]`（**纯文件**，不碰屏幕），
+再用 `tools/fixtures/make-tolerance-samples.ps1` 生成 8 组确定性样本对：
+
+- **PASS**（语义没变）：原图、±1 噪声、±2 噪声、单列 +1（就是实测到的那个接缝）
+- **REJECT**（必须拒）：改字、整体位移 2px、遮挡条、整体变暗 8、勾选框里多一道勾
+
+`tools/test-tolerance-sweep.mjs` 对每个容差数一遍：
+
+```
+容差 | 误拒 | 漏放 | PASS 最大差异像素 | REJECT 最小差异像素
+  0  |   3  |   0  |      8418        |       28
+  1  |   1  |   0  |      8418        |       28
+  2  |   0  |   0  |         0        |       28     ← 出厂
+  3  |   0  |   0  |         0        |       28
+  4  |   0  |   0  |         0        |       28
+  6  |   0  |   0  |         0        |       28
+  8  |   0  |   1  |         0        |        0
+ 12  |   0  |   1  |         0        |        0
+ 20  |   0  |   1  |         0        |        0
+```
+
+结论写进代码注释（`VISUAL_TOL = 2`）：
+
+- 容差 0 **一定误拒**（3 个噪声样本）—— 这就是当初"纯等价比不了"的量化证据；
+- **安全带是 2..6**，代码取下沿 2：漏放比误拒贵（漏放会把点击送到一个已经变了的界面）；
+- **容差 8 开始漏放**：勾选框里多出来的那道勾，最大通道差只有 7 —— 说明"小但重要"的变化
+  确实存在，容差不能为了少误拒而一路放大。
+
+## 2. trace 持久化
+
+评审建议：manifest 可以缓，但"sourceShotId、before/after、candidateId、实际落点、复查结果"要存。
+
+现在落在 `<shotDir>/trace.jsonl`（JSON Lines，超过 2MB 轮转成 `trace.1.jsonl`）：
+
+```json
+{"ts":"2026-10-19T14:10:31.123Z","session":"s1","kind":"candidates","ok":true,
+ "shotId":"shot-66988-…","viewId":"…","count":12,"ocrInput":"crop",
+ "ocrBackend":"windows-ocr","engineLanguage":"zh-Hans-CN","ocrMs":104,"wallMs":593,
+ "sourceImage":"…\win-66988-….png","firstCandidate":"…"}
+{"ts":"…","kind":"click","ok":true,"candidateId":"…","label":"剩 余 流 量",
+ "source":"ocr","imagePoint":{"x":413,"y":508},"windowPoint":{"x":413,"y":508},
+ "desktopPoint":{"x":636,"y":647},
+ "recheck":{"diffPixels":0,"total":2548,"maxDelta":0,"tol":2},"roi":{"x":…}}
+{"ts":"…","kind":"click","ok":false,"code":"StaleObservation",
+ "error":"失败：StaleObservation — 找不到视图 …"}
+```
+
+三条约束写进注释：
+
+- **绝不影响主流程**：写失败吞掉，只 warn 一次；
+- **只记路径与数字**，不写图片内容（测试断言里检查没有 PNG base64）；
+- 每行自带 `ts` 与 `session`，跨会话可分辨。
+
+**失败也记**——拒绝的原因比成功更值得回放。
+
+## 3. 测试
+
+- `tools/test-tolerance-sweep.mjs`：4 项断言（容差 0 必误拒、出厂容差 0 漏放、出厂容差噪声全放行、存在安全区间）
+- `tools/test-visual-trace.mjs`：11 项（成功/拒绝都落盘、JSONL 合法、带复查结果与来源图片、不写图片内容）
+
+**43 个测试文件全绿。**

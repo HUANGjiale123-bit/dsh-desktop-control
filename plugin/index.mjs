@@ -18,7 +18,10 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync,
+  appendFileSync, renameSync,
+} from 'node:fs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -64,7 +67,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.49'
+const PLUGIN_VERSION = '2.18.50'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1466,6 +1469,67 @@ function applyInner(ctx, config = {}) {
    */
   const VISUAL_MIN_TARGET_PX = 8
 
+  /* 复查的每通道容差。**这是测出来的，不是猜的。**
+   *
+   * tools/test-tolerance-sweep.mjs 用 8 组构造好的样本对扫了一遍：
+   *
+   *   容差 0 → 3 个"只有噪声"的样本被误拒（含实测到的单列 +1 接缝）
+   *   容差 1 → 1 个误拒
+   *   容差 2..6 → 误拒 0、漏放 0   ← 安全带
+   *   容差 8+ → 漏放 1（勾选框里多出来的那道勾，最大通道差只有 7）
+   *
+   * 取下沿 2 而不是中点：漏放（该拒没拒）会让点击落在一个已经变了的界面上，
+   * 比误拒（让人重看一眼）贵得多。
+   */
+  const VISUAL_TOL = 2
+
+  /* ═══════════ 视觉路径的落盘记录（trace） ═══════════
+   *
+   * 外部评审建议：manifest 可以缓，但"sourceShotId、before/after、candidateId、
+   * 实际落点、复查结果"要存下来。理由很实际 —— 出问题时现在只能靠模型自己复述，
+   * 而模型复述的是它**以为**发生的事。
+   *
+   * 格式：JSON Lines，一行一个事件，追加写。字段刻意扁平，方便 grep 和 jq。
+   * 位置：默认 <shotDir>/trace.jsonl；超过 2MB 轮转成 trace.1.jsonl（只留一代）。
+   *
+   * 三条硬约束：
+   *   · **绝不影响主流程**：任何写失败都吞掉，不能因为日志写不进去而让点击失败；
+   *   · 只记路径与数字，不把图片内容写进来；
+   *   · 每行自带 ts 与 session，跨会话也能分清。
+   */
+  const TRACE_MAX_BYTES = 2 * 1024 * 1024
+  let traceWarned = false
+
+  function recordTrace(event) {
+    try {
+      mkdirSync(set.shotDir ?? '.', { recursive: true })
+      const file = join(set.shotDir ?? '.', 'trace.jsonl')
+      try {
+        if (statSync(file).size > TRACE_MAX_BYTES) {
+          renameSync(file, join(set.shotDir ?? '.', 'trace.1.jsonl'))
+        }
+      } catch { /* 文件还不存在：正常 */ }
+      const line = JSON.stringify({
+        ts: new Date().toISOString(),
+        session: currentSessionId(),
+        ...event,
+      })
+      appendFileSync(file, line + '\n')
+    } catch (e) {
+      if (!traceWarned) {
+        traceWarned = true
+        ctx.logger?.warn?.(`[desktop-control] trace 写入失败（不影响操作）：${e?.message ?? e}`)
+      }
+    }
+  }
+
+  /** 从错误文本里取机器可读的码，取不到就 null。只给 trace 用。 */
+  function traceCode(text) {
+    const m = /失败：([A-Za-z]+)/.exec(String(text ?? ''))
+    return m ? m[1] : null
+  }
+
+
   function visualRoi(cand, image) {
     const box = cand.boxInSourceImage ?? {
       x: cand.pointInSourceImage.x - VISUAL_MARGIN,
@@ -1752,6 +1816,17 @@ function applyInner(ctx, config = {}) {
       visualStore.addView(view)
       visualStore.addCandidates(candidates)
 
+      recordTrace({
+        kind: 'candidates', ok: true,
+        hwnd: args.hwnd, shotId: String(args.shotId), viewId,
+        region: args.region ?? null, query: args.query ?? null,
+        count: candidates.length, ocrInput: ocrPath === rec.filepath ? 'image' : 'crop',
+        ocrBackend: ocr.backend, engineLanguage: ocr.engineLanguage ?? null,
+        ocrMs: ocr.elapsedMs ?? null, wallMs: ocrWallMs,
+        sourceImage: rec.filepath,
+        firstCandidate: candidates[0]?.candidateId ?? null,
+      })
+
       const lines = []
       lines.push(
         `观察 ${args.shotId}（图片 ${image.width}x${image.height}，` +
@@ -1963,6 +2038,7 @@ function applyInner(ctx, config = {}) {
           : [{ type: 'text', text: value.result }],
     },
     async execute(args, exec) {
+      try {
       /* 急停要在**最前面**查。
        *
        * 用户按 ESC 的意图是"别再碰我的电脑"。如果这里不查，流程会一路走到
@@ -2126,7 +2202,7 @@ function applyInner(ctx, config = {}) {
 
       const diff = await set.runHelper(
         ['region_diff', String(args.hwnd), String(liveX), String(liveY), String(liveW), String(liveH),
-          rec.filepath, String(roi.x), String(roi.y), '2'],
+          rec.filepath, String(roi.x), String(roi.y), String(VISUAL_TOL)],
         'configured',
       )
       if (!diff.ok) {
@@ -2162,7 +2238,29 @@ function applyInner(ctx, config = {}) {
         `  通过现有链路：白名单 / 几何 / 落点归属都查过了`,
         `  未核实：点击已发出，但应用是否响应要重新观察。`,
       ]
+      recordTrace({
+        kind: 'click', ok: true,
+        hwnd: args.hwnd, shotId: String(args.shotId),
+        candidateId: args.candidateId ?? null, viewId: args.viewId ?? null,
+        label: cand.label, source: cand.source ?? 'ocr',
+        sourceImage: rec.filepath,
+        imagePoint: { x: Math.round(cand.pointInSourceImage.x), y: Math.round(cand.pointInSourceImage.y) },
+        windowPoint: wpx, desktopPoint: { x: rec.x + wpx.x, y: rec.y + wpx.y },
+        recheck: { diffPixels: diff.diffPixels, total: diff.totalPixels, maxDelta: diff.maxDelta, tol: diff.tol },
+        roi,
+      })
       return observeAfter(args.hwnd, lines.join('\n'), args.observe, args.settleMs)
+      } catch (e) {
+        // 失败也要留痕：拒绝的原因、以及**没有发送输入**这件事，比成功更值得回放。
+        recordTrace({
+          kind: 'click', ok: false,
+          hwnd: args?.hwnd, shotId: String(args?.shotId ?? ''),
+          candidateId: args?.candidateId ?? null, viewId: args?.viewId ?? null,
+          point: args?.point ?? null,
+          code: traceCode(e?.message), error: String(e?.message ?? '').slice(0, 400),
+        })
+        throw e
+      }
     },
   })
 

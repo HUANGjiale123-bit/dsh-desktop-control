@@ -889,6 +889,7 @@ namespace Dsc
                     case "region_diff": return CmdRegionDiff(args);
                     case "image_hash": return CmdImageHash(args);
                     case "crop": return CmdCrop(args);
+                    case "image_diff": return CmdImageDiff(args);
                     case "whatis": return CmdWhatIs(args);
                     case "hold": return CmdHold(args);
                     case "release": return CmdRelease(args);
@@ -3306,6 +3307,88 @@ namespace Dsc
         }
 
         /// <summary>
+        /// image_diff —— 两张 PNG 里同一块区域差多少（**纯文件，不碰屏幕**）。
+        /// 用法：image_diff &lt;pngA&gt; &lt;pngB&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt; [容差]
+        ///
+        /// 用途是**测阈值**：要回答"容差取多少"，就得拿一批"应该放行"和"必须拒绝"
+        /// 的样本对，扫一遍每个容差下的误拒 / 漏放。那批样本是离线生成的，
+        /// 不能依赖屏幕（否则每跑一次都要真窗口、还可能被动画污染）。
+        /// region_diff 用的是同一套比较逻辑，只是一个来自屏幕、一个来自文件。
+        /// </summary>
+        private static int CmdImageDiff(string[] args)
+        {
+            if (args.Length < 7) throw new ArgumentException("image_diff 需要 pngA pngB x y w h [容差]");
+            RequireNotHalted("image_diff");
+            string pathA = args[1];
+            string pathB = args[2];
+            if (!File.Exists(pathA)) throw new DscError("BadValue", "文件不存在：" + pathA);
+            if (!File.Exists(pathB)) throw new DscError("BadValue", "文件不存在：" + pathB);
+
+            Rectangle want = ParseRegion(args, 3);
+            int tol = 2;
+            if (args.Length > 7) int.TryParse(args[7], out tol);
+
+            long diffPixels = 0;
+            int maxDelta = 0;
+            long total = (long)want.Width * want.Height;
+
+            using (Bitmap a = new Bitmap(pathA))
+            using (Bitmap b = new Bitmap(pathB))
+            {
+                if (want.Left < 0 || want.Top < 0 ||
+                    want.Right > a.Width || want.Bottom > a.Height ||
+                    want.Right > b.Width || want.Bottom > b.Height)
+                    throw new DscError("BadValue", "区域超出某一张图的范围");
+
+                BitmapData da = a.LockBits(new Rectangle(0, 0, a.Width, a.Height),
+                    ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                BitmapData db = b.LockBits(new Rectangle(0, 0, b.Width, b.Height),
+                    ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                try
+                {
+                    int rowBytes = want.Width * 4;
+                    byte[] ra = new byte[rowBytes];
+                    byte[] rb = new byte[rowBytes];
+                    for (int y = 0; y < want.Height; y++)
+                    {
+                        Marshal.Copy(new IntPtr(da.Scan0.ToInt64() + (long)(want.Top + y) * da.Stride + (long)want.Left * 4),
+                            ra, 0, rowBytes);
+                        Marshal.Copy(new IntPtr(db.Scan0.ToInt64() + (long)(want.Top + y) * db.Stride + (long)want.Left * 4),
+                            rb, 0, rowBytes);
+                        for (int x = 0; x < want.Width; x++)
+                        {
+                            int i = x * 4;
+                            int d1 = Math.Abs(ra[i + 2] - rb[i + 2]);
+                            int d2 = Math.Abs(ra[i + 1] - rb[i + 1]);
+                            int d3 = Math.Abs(ra[i] - rb[i]);
+                            int d = d1 > d2 ? d1 : d2;
+                            if (d3 > d) d = d3;
+                            if (d > maxDelta) maxDelta = d;
+                            if (d > tol) diffPixels++;
+                        }
+                    }
+                }
+                finally
+                {
+                    a.UnlockBits(da);
+                    b.UnlockBits(db);
+                }
+            }
+
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(true)
+                .Key("same").Bool(diffPixels == 0)
+                .Key("diffPixels").Num(diffPixels)
+                .Key("totalPixels").Num(total)
+                .Key("maxDelta").Num(maxDelta)
+                .Key("tol").Num(tol)
+             .End();
+            Console.WriteLine(j.ToString());
+            return 0;
+        }
+
+        /// <summary>
+        /// region_diff —— 屏幕上的某块区域，和一张 PNG 里的同一块，**差多少**。        /// <summary>
         /// region_diff —— 屏幕上的某块区域，和一张 PNG 里的同一块，**差多少**。        /// <summary>
         /// region_diff —— 屏幕上的某块区域，和一张 PNG 里的同一块，**差多少**。
         /// 用法：region_diff &lt;hwnd&gt; &lt;x&gt; &lt;y&gt; &lt;w&gt; &lt;h&gt; &lt;png&gt; &lt;px&gt; &lt;py&gt; [容差]
