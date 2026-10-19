@@ -1611,7 +1611,7 @@ export function createDesktopToolset(options = {}) {
           return {
             isError: true,
             text:
-              `失败：截图拍摄时窗口是 ${expectedGeom.w}x${expectedGeom.h}，` +
+              `失败：StaleSnapshot — 截图拍摄时窗口是 ${expectedGeom.w}x${expectedGeom.h}，` +
               `现在是 ${w0.width}x${w0.height}。\n` +
               `窗口尺寸变了，界面布局几乎肯定也变了，旧坐标不再可靠。请重新截图。`,
           }
@@ -1630,7 +1630,7 @@ export function createDesktopToolset(options = {}) {
             return {
               isError: true,
               text:
-                `失败：截图拍摄时窗口在 (${expectedGeom.x},${expectedGeom.y})，` +
+                `失败：StaleSnapshot — 截图拍摄时窗口在 (${expectedGeom.x},${expectedGeom.y})，` +
                 `现在在 (${w0.x},${w0.y})。
 ` +
                 `你用的是 space="desktop"（桌面绝对坐标），窗口一移这个坐标就指向别处了，` +

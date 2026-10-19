@@ -56,7 +56,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.31'
+const PLUGIN_VERSION = '2.18.32'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1075,8 +1075,20 @@ function applyInner(ctx, config = {}) {
               throw e
             } finally {
               trace.total = Math.round((performance.now() - startedAt) * 10) / 10
-              // 只作废动作**前**的截图；observeAfter 新登记的保留
-              if (staleShots) forgetShotIds(staleShots)
+              // 只作废动作**前**的截图；observeAfter 新登记的保留。
+              //
+              // ★ 但"被拒绝"的那次不该作废 —— 什么都没发生。
+              //
+              // 原来的行为是：只要是变更性工具，不管成没成，收尾时一律把旧截图
+              // 全部作废。于是出现自相矛盾的一段对话：
+              //   插件："窗口移了……你可以改用 space=\"window\"（原点按当前矩形算）"
+              //   调用方改成 space="window" 重试 → "找不到截图记录"
+              // 插件给的建议自己走不通 —— 因为那条建议依赖的就是刚被烧掉的 shotId。
+              //
+              // 判据是"有没有可能已经产生输入"：
+              //   · 被拒绝 / 被取消 → 明确没碰桌面 → 保留
+              //   · 超时、UnknownOutcome、未知错误 → 可能已经输入 → 作废（保守）
+              if (staleShots && actionMightHaveChangedLayout(trace)) forgetShotIds(staleShots)
               // 结束时刷新锚点：这样"空闲"从**操作完成**开始算。
               touchActivity()
               // ★ 只释放自己拿到的锁。
@@ -1769,7 +1781,17 @@ function applyInner(ctx, config = {}) {
    * 现在截图会给一个 shotId，点击可以带上它。插件据此比对窗口矩形，
    * 变了就**明确警告**（而不是猜）。只保留最近若干条，避免无限增长。
    */
-  const SHOT_TTL_MS = 5 * 60 * 1000
+  /* 截图坐标的保鲜期。
+   *
+   * 默认 5 分钟。允许用 DSC_SHOT_TTL_MS 覆盖，唯一的正当理由是**测试**：
+   * "过期必须被拒绝"这条判据只有等 5 分钟才能触发，那等于没人验。
+   * 留一个 0 也合法的旋钮，就能在几十毫秒里把这条路径跑一遍。
+   * （和 DSC_HALT_TTL_SECONDS、DSC_PYTHON、DSC_HELPER 是同一类开关。）
+   */
+  const SHOT_TTL_MS = (() => {
+    const v = Number(process.env.DSC_SHOT_TTL_MS)
+    return Number.isFinite(v) && v >= 0 ? v : 5 * 60 * 1000
+  })()
   const SHOT_MAX = 24
   const recentShots = new Map()
 
@@ -1820,6 +1842,51 @@ function applyInner(ctx, config = {}) {
     let n = 0
     for (const id of ids) if (recentShots.delete(id)) n++
     return n
+  }
+
+  /* 哪些失败可以确定"这一次没有产生任何输入"。
+   *
+   * 依据是各命令的守卫顺序：都是**先校验、后注入**。属于这些码的失败，
+   * 光标和键盘都还没动过，界面布局也就没变 —— 旧的截图坐标依旧成立，
+   * 不该因为一次被拒绝的尝试就作废。
+   *
+   * 反过来，Timeout / UnknownOutcome / 未知错误一律当作"可能已经输入"，
+   * 宁可多作废一次（代价是重截一张图），也不要在布局可能变了之后
+   * 拿旧坐标继续点。
+   */
+  const NO_INPUT_CODES = new Set([
+    'Halted',              // 闸门拉着
+    'NotAuthorized',       // 没授权 / 用户拒绝
+    'WhitelistEmpty',      // 白名单为空
+    'HelperMissing',       // 程序不在（安装问题）
+    'Busy',                // 没拿到执行权
+    'Cancelled',           // 调用方取消
+    'Refused',             // 激活失败 / 落点不属于目标 / 光标移不过去
+    'StaleTarget',         // 目标窗口没了
+    'StaleSnapshot',       // 界面已经变了（这种本来就该重截）
+    'NotFound',
+    'AmbiguousTarget',
+    'BadValue', 'BadIndex', 'BadAction', 'OutOfRange',
+    'ActionNotAvailable', 'NotSettable', 'RangeUnavailable', 'ReadOnly',
+  ])
+
+  /**
+   * 这次调用之后，动作**之前**的那些截图还能不能信。
+   *
+   * 返回 true 表示"可能已经改变布局"→ 作废旧观察；false 表示"什么都没发生"→ 保留。
+   *
+   * 为什么这件事需要判据：原来只要是变更性工具就一律作废，连"被拒绝"也作废。
+   * 结果是插件自己的建议走不通 —— 它一边说"改用 space=\"window\" 重试"，
+   * 一边把那条建议要用的 shotId 删掉了。
+   */
+  function actionMightHaveChangedLayout(trace) {
+    const outcome = String(trace?.outcome ?? '')
+    // 拒绝（没拿到执行权）与取消：动作根本没开始
+    if (outcome === 'rejected' || outcome === 'cancelled') return false
+    // 校验阶段就失败的错误码：也没开始
+    if (outcome === 'error' && NO_INPUT_CODES.has(String(trace?.errorCode ?? ''))) return false
+    // 其余（成功、超时、结果未知、未知错误）都按"可能已经动过"处理
+    return true
   }
 
   function invalidateShotsFor(hwnd) {
