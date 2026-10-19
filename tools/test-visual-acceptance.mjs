@@ -124,6 +124,36 @@ try {
     }
   }
 
+  /* ── 5b. 急停也要盖住"读旧图"这条路 ──
+   *
+   * 取候选不经过 helper，所以底层闸门管不到它 —— 之前按了 ESC 照样 OCR、
+   * 照样把界面文字返回来。这里验的是它自己查闸门。
+   */
+  console.log()
+  console.log('── 5b. 闸门拉着时，连旧图都不许读 ──')
+  {
+    const s = await shotTool.execute({ hwnd: win.hwnd })
+    writeFileSync(gatePath, 'test-halt')
+    try {
+      const r = await candTool.execute({ hwnd: win.hwnd, shotId: s.shotId })
+        .catch((e) => ({ err: e.message }))
+      const t = r.err ?? r.result ?? r.text ?? ''
+      if (/Halted/.test(t) && /没有读任何界面内容/.test(t)) {
+        ok('visual_candidates 在急停时拒绝，并说明没有读界面内容')
+      } else {
+        bad(`急停时仍然读了界面：${t.slice(0, 200)}`)
+      }
+      // 有任何界面文字漏出来都算失败
+      if (/候选|OCR/.test(t.replace(/没有读任何界面内容/g, ''))) {
+        bad('急停的返回里仍然夹带了界面内容')
+      } else {
+        ok('返回里没有夹带任何界面文字')
+      }
+    } finally {
+      rmSync(gatePath, { force: true })
+    }
+  }
+
   /* ── 4. OCR 期间观察失效 → 不登记 ──
    *
    * 这一条**没法在集成层面稳定复现**：OCR 只要 100~300ms，而"作废观察"的
@@ -181,29 +211,38 @@ try {
       if (!win2) {
         skip('造不出"点了就关"的窗口，这一格没验')
       } else {
-        const s = await shotTool.execute({ hwnd: win2.hwnd })
-        const l = await candTool.execute({ hwnd: win2.hwnd, shotId: s.shotId })
-        const target = parseCandidates(l.result ?? '')
-          .find((c) => /BUTTON/i.test(c.label.replace(/\s+/g, '')))
-        if (!target) {
-          skip(`临时窗口里没取到 BUTTON 候选：${(l.result ?? '').slice(0, 120)}`)
-        } else {
+        /* 窗口刚出现时可能在重绘，旧图会"对不上"（StaleVisualTarget）。
+         * 那不是这一格要验的东西 —— 这一格要验的是"点了但看不到结果"。
+         * 所以拿一张新图重试，最多三次；三次都因为重绘被拒才报问题。
+         */
+        let t = ''
+        let hits = 0
+        let attempts = 0
+        for (; attempts < 3; attempts++) {
+          const s = await shotTool.execute({ hwnd: win2.hwnd })
+          if (!s?.shotId) break
+          const l = await candTool.execute({ hwnd: win2.hwnd, shotId: s.shotId })
+          const target = parseCandidates(l.result ?? '')
+            .find((c) => /BUTTON/i.test(c.label.replace(/\s+/g, '')))
+          if (!target) break
           const r = await clickCand.execute({
             hwnd: win2.hwnd, shotId: s.shotId, candidateId: target.id, observe: true,
           }).catch((e) => ({ err: e.message }))
-          const t = r.err ?? r.result ?? r.text ?? ''
-          if (/动作已执行/.test(t) && /截图失败/.test(t)) {
-            ok('报告分得清"点了"和"没看到结果"（动作已执行 + 自动截图失败）')
-          } else if (/已点击候选/.test(t) && !/截图失败/.test(t)) {
-            skip(`观察没失败（窗口还活着），这一格没验：${t.slice(0, 120)}`)
-          } else {
-            bad(`预期之外的返回：${t.slice(0, 200)}`)
-          }
-          const hits = (t.match(/已点击候选/g) ?? []).length
-          if (hits === 1) ok('只点了一次（没有因为观察失败而重试）')
-          else if (hits === 0) skip('这次没有产生点击记录')
-          else bad(`点击了 ${hits} 次 —— 观察失败后被重试了`)
+          t = r.err ?? r.result ?? r.text ?? ''
+          if (!/Stale|Unstable/.test(t)) break
+          await new Promise((r2) => setTimeout(r2, 400))
         }
+        if (/动作已执行/.test(t) && /截图失败/.test(t)) {
+          ok('报告分得清"点了"和"没看到结果"（动作已执行 + 自动截图失败）')
+        } else if (/已点击候选/.test(t) && !/截图失败/.test(t)) {
+          skip(`观察没失败（窗口还活着），这一格没验：${t.slice(0, 120)}`)
+        } else {
+          bad(`预期之外的返回（试了 ${attempts + 1} 次）：${t.slice(0, 200)}`)
+        }
+        hits = (t.match(/已点击候选/g) ?? []).length
+        if (hits === 1) ok('只点了一次（没有因为观察失败而重试）')
+        else if (hits === 0) skip('这次没有产生点击记录')
+        else bad(`点击了 ${hits} 次 —— 观察失败后被重试了`)
       }
     } finally {
       try { fixture.kill() } catch { /* 它自己也会退 */ }

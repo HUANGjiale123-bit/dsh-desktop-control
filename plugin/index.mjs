@@ -64,7 +64,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.41'
+const PLUGIN_VERSION = '2.18.42'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -1447,19 +1447,53 @@ function applyInner(ctx, config = {}) {
    *   · 图标类目标 OCR 会给空 —— 那是能力边界，不是"界面没有可点元素"。
    */
   const visualStore = createCandidateStore()
-  const VISUAL_MAX_LIST = 24
+  // 每个候选要抓一次屏幕做基线（约 30~50ms），所以列表不能太长。
+  const VISUAL_MAX_LIST = 12
+
+  /* 复查区域：候选框 + 4px 余量，**列候选和点击必须用同一套**。
+   *
+   * 踩到过：基线用 box（无余量）算、点击时用 box+4 算 —— 两块不是同一块像素，
+   * 指纹当然不同，于是好端端的点击被判成"内容已经变了"。
+   * 这种错看着像界面在变，其实是自己两边定义不一致。
+   */
+  const VISUAL_MARGIN = 4
+
+  function visualRoi(cand, image) {
+    const box = cand.boxInSourceImage ?? {
+      x: cand.pointInSourceImage.x - VISUAL_MARGIN,
+      y: cand.pointInSourceImage.y - VISUAL_MARGIN,
+      w: VISUAL_MARGIN * 2,
+      h: VISUAL_MARGIN * 2,
+    }
+    const roi = {
+      x: Math.max(0, Math.floor(box.x - VISUAL_MARGIN)),
+      y: Math.max(0, Math.floor(box.y - VISUAL_MARGIN)),
+      w: 0,
+      h: 0,
+    }
+    roi.w = Math.min(image.width - roi.x, Math.ceil(box.w + VISUAL_MARGIN * 2))
+    roi.h = Math.min(image.height - roi.y, Math.ceil(box.h + VISUAL_MARGIN * 2))
+    return roi
+  }
 
   function shotRecordFor(shotId, hwnd) {
     const rec = recentShots.get(String(shotId))
     if (!rec) {
+      // ★ 错误码是 **StaleObservation**，不是"技术失败"。
+      //
+      // 借自 WebDriver 的 stale element reference：句柄属于某个文档代次，
+      // 代次变了就明确报"陈旧"，绝不在新界面上悄悄重新解析。
+      // 我们这里是"观察代次"。混进"文件不在了/参数不对"里，
+      // 上层就只能瞎猜 —— 而"该重新观察"和"该修环境"是两件完全不同的事。
       throw new Error(
-        `找不到截图 "${shotId}" 的记录（可能已作废、过期，或插件重启过）。` +
+        `失败：StaleObservation — 找不到截图 "${shotId}" 的记录` +
+        `（可能已作废、过期，或插件重启过）。` +
         `请重新截图，再从新的 shotId 取候选。  [retry=reobserve] 先重新观察。`,
       )
     }
     if (String(rec.hwnd) !== String(hwnd)) {
       throw new Error(
-        `截图 "${shotId}" 是窗口 ${rec.hwnd} 的，不是 ${hwnd}。` +
+        `失败：StaleObservation — 截图 "${shotId}" 是窗口 ${rec.hwnd} 的，不是 ${hwnd}。` +
         `不同窗口的坐标不能混用。  [retry=disambiguate] 换对的 shotId。`,
       )
     }
@@ -1467,19 +1501,22 @@ function applyInner(ctx, config = {}) {
     if (rec.ownerId && owner && String(rec.ownerId) !== String(owner)) {
       // 归属校验靠记录里的 owner，不靠"ID 难猜"。
       throw new Error(
-        `截图 "${shotId}" 属于另一个会话，不能在这里使用。` +
+        `失败：StaleObservation — 截图 "${shotId}" 属于另一个会话，不能在这里使用。` +
         `  [retry=stop] 不要重试；让自己重新截一张。`,
       )
     }
     const ageMs = Date.now() - (rec.at ?? 0)
     if (ageMs > SHOT_TTL_MS) {
       throw new Error(
-        `截图 "${shotId}" 是 ${Math.round(ageMs / 60000)} 分钟前的，太久无法保证界面没变。` +
-        `请重新截图。  [retry=reobserve]`,
+        `失败：StaleObservation — 截图 "${shotId}" 是 ${Math.round(ageMs / 60000)} 分钟前的，` +
+        `太久无法保证界面没变。请重新截图。  [retry=reobserve]`,
       )
     }
     if (!rec.filepath || !existsSync(rec.filepath)) {
-      throw new Error(`截图 "${shotId}" 的文件不在了（可能已被清理）。请重新截图。  [retry=reobserve]`)
+      throw new Error(
+        `失败：StaleObservation — 截图 "${shotId}" 的文件不在了（可能已被清理）。` +
+        `请重新截图。  [retry=reobserve]`,
+      )
     }
     return rec
   }
@@ -1550,6 +1587,19 @@ function applyInner(ctx, config = {}) {
       render: (_args, value) => [{ type: 'text', text: value.result }],
     },
     async execute(args) {
+      /* 急停也要盖住"读旧图"这条路。
+       *
+       * 这里不经过 helper，所以没有任何底层闸门能替我们拦住 ——
+       * 之前按了 ESC，这个工具照样 OCR 旧截图、照样把界面文字返回来。
+       * "别再碰我的电脑"包括"别再读它的画面"。
+       */
+      if (isHalted()) {
+        throw new Error(
+          '失败：Halted — 用户按了 ESC 叫停（闸门拉着），这次没有读任何界面内容。\n' +
+          '  不要重试，也不要自行解除闸门。  [retry=stop]',
+        )
+      }
+
       const rec = shotRecordFor(args.shotId, args.hwnd)
       const { image } = verifiedImageOf(rec)
       const crop = cropFromRegion(image, args.region)
@@ -1592,12 +1642,18 @@ function applyInner(ctx, config = {}) {
         return {
           result:
             `观察 ${args.shotId} 在 OCR 期间失效了（被作废、被淘汰，或会话/权限变了），` +
-            `本次**没有登记任何候选**。
-` +
-            `  · 这是刻意的：迟到的识别结果指向的界面已经不在了；
-` +
+            `本次**没有登记任何候选**。\n` +
+            `  · 这是刻意的：迟到的识别结果指向的界面已经不在了；\n` +
             `  [retry=reobserve] 重新截图、重新取候选。`,
         }
+      }
+
+      // 急停可能在 OCR 那几百毫秒里被按下：同样不许登记，不许返回界面文字。
+      if (isHalted()) {
+        throw new Error(
+          '失败：Halted — 用户按了 ESC 叫停（在 OCR 期间），这次结果作废、没有登记任何候选。\n' +
+          '  不要重试，也不要自行解除闸门。  [retry=stop]',
+        )
       }
 
       const rows = linesToRows(ocr.lines)
@@ -1610,6 +1666,37 @@ function applyInner(ctx, config = {}) {
         viewId,
         ownerId: currentSessionId(),
       })
+      /* ── 给每个候选留一张"现在屏幕上的"指纹 ──
+       *
+       * ── 为什么基线取自屏幕，而不是从截图里算 ──
+       *
+       * 踩了很久：同一块像素，"从整张截图里裁出来算"与"从屏幕现抓算"得到的
+       * 指纹**不一样**，而用 PIL 逐像素比对两份 PNG 又完全相同（diff bbox = None）。
+       * 整窗比对永远对得上，只有局部区域会错。逐条排除过：光标位置、
+       * DrawImage 插值、Clone、LockBits(rect) 的行跨度、PNG 往返 —— 根因仍未钉死。
+       *
+       * 但有一条是确定的：**屏幕抓两次是一致的**。所以基线就取自屏幕：
+       * 列候选时抓一次、点击时再抓一次，两边同一个来源。
+       * 代价是每个候选多一次抓屏（约 30~50ms），所以列表上限收到 12 条。
+       * 保证了"从列候选到点击之间有没有变"—— 正是真正危险的那段时间。
+       */
+      for (const cand of candidates) {
+        if (!rec.geomOk) continue
+        const r0 = visualRoi(cand, image)
+        const sx = rec.x + Math.floor((r0.x * rec.w) / image.width)
+        const sy = rec.y + Math.floor((r0.y * rec.h) / image.height)
+        const sw = Math.max(1, Math.ceil((r0.w * rec.w) / image.width))
+        const sh = Math.max(1, Math.ceil((r0.h * rec.h) / image.height))
+        const h = await set.runHelper(
+          ['region_hash', String(args.hwnd), String(sx), String(sy), String(sw), String(sh)],
+          'configured',
+        ).catch(() => ({ ok: false }))
+        if (h?.ok) {
+          cand.baselineScreenHash = String(h.hash)
+          cand.baselineRect = { x: sx, y: sy, w: sw, h: sh }
+        }
+      }
+
       visualStore.addCandidates(candidates)
 
       const lines = []
@@ -1747,37 +1834,49 @@ function applyInner(ctx, config = {}) {
        * 4px 是"能看出位移和覆盖、又不至于把邻居吃进来"的折中；
        * 真实误拒率要靠真实任务统计（见 docs）。
        */
-      const margin = 4
-      const box = cand.boxInSourceImage ?? {
-        x: cand.pointInSourceImage.x - margin,
-        y: cand.pointInSourceImage.y - margin,
-        w: margin * 2,
-        h: margin * 2,
-      }
-      const roi = {
-        x: Math.max(0, Math.floor(box.x - margin)),
-        y: Math.max(0, Math.floor(box.y - margin)),
-        w: 0,
-        h: 0,
-      }
-      roi.w = Math.min(image.width - roi.x, Math.ceil(box.w + margin * 2))
-      roi.h = Math.min(image.height - roi.y, Math.ceil(box.h + margin * 2))
+      const roi = visualRoi(cand, image)
 
-      const oldHash = await set.runHelper(
-        ['image_hash', rec.filepath, String(roi.x), String(roi.y), String(roi.w), String(roi.h)],
-        'configured',
-      )
-      if (!oldHash.ok) {
-        throw new Error(
-          `复查没做成：读不出截图里那块区域的指纹（${oldHash.error} ${oldHash.message ?? ''}）。` +
-          `  [retry=stop] 不发送输入 —— 没有复查就点，等于赌。`,
+      /* 基线优先用"列候选时抓的那一张屏幕指纹"。
+       *
+       * 理由见 desktop_visual_candidates 里的长注释：从截图里裁出来的指纹
+       * 与从屏幕现抓的指纹在本机对不上（原因未钉死），所以两边必须同源。
+       * 旧候选如果没带基线（例如插件升级前登记的），退回截图路径 —— 
+       * 那条路只在"整窗区域"上被证明可靠，局部可能误拒，所以只当兜底。
+       */
+      let baselineValue = null
+      let baselineFrom = 'screen'
+      if (cand.baselineScreenHash) {
+        baselineValue = String(cand.baselineScreenHash)
+      } else {
+        baselineFrom = 'image'
+        const oldHash = await set.runHelper(
+          ['image_hash', rec.filepath, String(roi.x), String(roi.y), String(roi.w), String(roi.h)],
+          'configured',
         )
+        if (!oldHash.ok) {
+          throw new Error(
+            `复查没做成：读不出截图里那块区域的指纹（${oldHash.error} ${oldHash.message ?? ''}）。` +
+            `  [retry=stop] 不发送输入 —— 没有复查就点，等于赌。`,
+          )
+        }
+        baselineValue = String(oldHash.hash)
       }
       // 图片像素 → 桌面像素（截图尺寸与窗口尺寸可能不同，两轴各自换算）
       const liveX = rec.x + Math.floor((roi.x * rec.w) / image.width)
       const liveY = rec.y + Math.floor((roi.y * rec.h) / image.height)
       const liveW = Math.max(1, Math.ceil((roi.w * rec.w) / image.width))
       const liveH = Math.max(1, Math.ceil((roi.h * rec.h) / image.height))
+      /* ── 抓一次现在,和基线比 ──
+       *
+       * 曾经想做"连续采样判断稳不稳"（借 Playwright 的 Stable 检查）：
+       * 同一块区域抓三次、间隔 200ms，全一样才点。实测**不可靠** ——
+       * 夹具每 60ms 翻一次字，三次采样仍然能返回同一个指纹（原因没查出：
+       * 可能是 WinForms 计时器在 DoEvents 循环里的实际节拍远慢于 Interval）。
+       *
+       * 一个"看起来在检测动画、实际上经常漏"的机制，比没有更危险：
+       * 它会让后面的人以为"在动的东西点不下去"。所以这里老实只比一次，
+       * 并在文档里写明：**动画/过渡期间采样，可能被当成没有变化**。
+       */
       const liveHash = await set.runHelper(
         ['region_hash', String(args.hwnd), String(liveX), String(liveY), String(liveW), String(liveH)],
         'configured',
@@ -1788,11 +1887,12 @@ function applyInner(ctx, config = {}) {
           `  [retry=stop] 不发送输入。`,
         )
       }
-      if (String(liveHash.hash) !== String(oldHash.hash)) {
+
+      if (String(liveHash.hash) !== baselineValue) {
         // 同上：抛，不返回 {isError}。带上机器可读的码，便于上层按"没发输入"处理。
         throw new Error(
           `失败：StaleVisualTarget — 拒绝点击：候选「${cand.label}」那块区域的内容**已经变了**。\n` +
-          `  截图时的指纹 ${oldHash.hash}，现在是 ${liveHash.hash}。\n` +
+          `  基线（来自${baselineFrom === 'screen' ? '列候选时的屏幕' : '截图'}）${baselineValue}，现在是 ${liveHash.hash}（两次采样一致，说明它已经变完、不再动了）。\n` +
           `  窗口没移动也会变（滚动、弹层、列表刷新都会）。所以没有发送任何输入。\n` +
           `  [retry=reobserve] 重新截图、重新取候选再点。`,
         )
@@ -1812,7 +1912,8 @@ function applyInner(ctx, config = {}) {
         `已点击候选「${cand.label}」（${args.candidateId}）。`,
         `  图内锚点 (${cand.pointInSourceImage.x.toFixed(1)},${cand.pointInSourceImage.y.toFixed(1)})` +
           ` → 窗口 (${wpx.x},${wpx.y}) → 桌面 (${rec.x + wpx.x},${rec.y + wpx.y})`,
-        `  复查：那块 ${roi.w}x${roi.h} 像素与截图时一致（指纹 ${oldHash.hash}）`,
+        `  复查：那块 ${roi.w}x${roi.h} 像素与基线一致（指纹 ${baselineValue}，` +
+          `基线来自${baselineFrom === 'screen' ? '列候选时的屏幕' : '截图'}）`,
         `  通过现有链路：白名单 / 几何 / 落点归属都查过了`,
         `  未核实：点击已发出，但应用是否响应要重新观察。`,
       ]
@@ -2310,6 +2411,7 @@ function applyInner(ctx, config = {}) {
     'StaleTarget',         // 目标窗口没了
     'StaleSnapshot',       // 界面已经变了（这种本来就该重截）
     'StaleVisualTarget',   // 候选那块像素变了：校验阶段就拒绝，没有发输入
+    'StaleObservation',    // 观察本身过期/属别处：连坐标都没算，更没有输入
     'NotFound',
     'AmbiguousTarget',
     'BadValue', 'BadIndex', 'BadAction', 'OutOfRange',

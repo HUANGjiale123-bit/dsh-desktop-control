@@ -3075,7 +3075,23 @@ namespace Dsc
         /// </summary>
         private static string HashBitmapRegion(Bitmap bmp, Rectangle rect)
         {
-            BitmapData d = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            /* ★ 锁**整张**位图，自己按 rect 偏移取行 —— 不要用 LockBits(rect)。
+             *
+             * 这条是实测踩出来的，而且非常隐蔽：
+             *
+             *   「同一块像素」用两种方式算，结果不一致 ——
+             *     · 大图里截一小块（LockBits 带矩形）→ 指纹 A
+             *     · 同一块单独存成 PNG 再算（整图）  → 指纹 B
+             *   而用 PIL 逐像素比对这两份 PNG，diff bbox 是 None（**完全相同**）。
+             *
+             * 于是整窗比对永远是对的（rect 就是整图），只有"局部区域"会错 ——
+             * 表现就是每次复查都判"内容已经变了"，把责任推给界面。
+             *
+             * 结论：LockBits 带矩形时返回的 Scan0/Stride 组合不可靠（GDI+ 可能返回
+             * 临时缓冲区的指针，而行跨度仍是原图的）。锁整图 + 手工偏移是唯一稳的写法。
+             */
+            BitmapData d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+                ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
             try
             {
                 int rowBytes = rect.Width * 4;
@@ -3083,7 +3099,8 @@ namespace Dsc
                 ulong hash = 14695981039346656037UL;   // FNV-1a 64 初值
                 for (int y = 0; y < rect.Height; y++)
                 {
-                    IntPtr p = new IntPtr(d.Scan0.ToInt64() + (long)y * d.Stride);
+                    long offset = (long)(rect.Y + y) * d.Stride + (long)rect.X * 4;
+                    IntPtr p = new IntPtr(d.Scan0.ToInt64() + offset);
                     Marshal.Copy(p, row, 0, rowBytes);
                     for (int i = 0; i < rowBytes; i++)
                     {
@@ -3141,7 +3158,21 @@ namespace Dsc
                     (wr.Bottom - wr.Top) + ")");
             }
 
+            /* ★ 抓完先落成 PNG，再走"读图"那条路算指纹。
+             *
+             * 为什么不直接对内存里的位图算：实测同一条屏幕区域，
+             * 内存位图算出的指纹与"同一块像素存成 PNG 再算"**不一致**，
+             * 而用 PowerShell 独立抓同一块、和截图逐像素比对则是**完全相同**（diff bbox=None）。
+             * 也就是说：像素没问题，问题在"对刚 CopyFromScreen 出来的位图做 LockBits"这条路。
+             * 两条命令各算各的 → 永远对不上 → 每次复查都误报"内容已经变了"。
+             *
+             * 所以这里让两条命令走**同一条**：抓屏 → 存 PNG → 读 PNG → 算指纹。
+             * 多一次磁盘往返（区域通常几百 KB 以内），换的是"两边定义一致"。
+             * 根因（内存位图的 LockBits 行为）留待以后再查，代码里不假装已经查清。
+             */
             string hash;
+            string tmp = Path.Combine(Path.GetTempPath(),
+                "dsc-region-" + Guid.NewGuid().ToString("n") + ".png");
             using (Bitmap bmp = new Bitmap(want.Width, want.Height, PixelFormat.Format32bppArgb))
             {
                 using (Graphics g = Graphics.FromImage(bmp))
@@ -3149,7 +3180,18 @@ namespace Dsc
                     g.CopyFromScreen(want.Left, want.Top, 0, 0,
                         new Size(want.Width, want.Height), CopyPixelOperation.SourceCopy);
                 }
-                hash = HashBitmapRegion(bmp, new Rectangle(0, 0, want.Width, want.Height));
+                bmp.Save(tmp, ImageFormat.Png);
+            }
+            try
+            {
+                using (Bitmap loaded = new Bitmap(tmp))
+                {
+                    hash = HashBitmapRegion(loaded, new Rectangle(0, 0, loaded.Width, loaded.Height));
+                }
+            }
+            finally
+            {
+                try { File.Delete(tmp); } catch { }
             }
 
             Jw j = new Jw();
@@ -3157,6 +3199,9 @@ namespace Dsc
                 .Key("hash").Val(hash)
                 .Key("rect").Val(want.Left + "," + want.Top + " " + want.Width + "x" + want.Height)
                 .Key("pixels").Num((long)want.Width * want.Height)
+                // 诊断用：GDI+ 解码后的像素格式。两张视觉相同的 PNG 若格式不同，
+                // 转成 32bppArgb 的路径也不同 —— 这正是"同像素、不同指纹"的候选解释。
+                .Key("format").Val(srcFormat)
              .End();
             Console.WriteLine(j.ToString());
             return 0;
@@ -3180,25 +3225,31 @@ namespace Dsc
             Rectangle want = ParseRegion(args, 2);
             string hash;
             int imgW, imgH;
+            string srcFormat = "?";
             using (Bitmap src = new Bitmap(path))
             {
                 imgW = src.Width;
                 imgH = src.Height;
+                srcFormat = src.PixelFormat.ToString();
                 if (want.Left < 0 || want.Top < 0 || want.Right > src.Width || want.Bottom > src.Height)
                 {
                     throw new DscError("BadValue",
                         "区域 (" + want.Left + "," + want.Top + " " + want.Width + "x" + want.Height +
                         ") 超出图片 " + imgW + "x" + imgH);
                 }
-                using (Bitmap crop = new Bitmap(want.Width, want.Height, PixelFormat.Format32bppArgb))
-                {
-                    using (Graphics g = Graphics.FromImage(crop))
-                    {
-                        g.DrawImage(src, new Rectangle(0, 0, want.Width, want.Height),
-                            want, GraphicsUnit.Pixel);
-                    }
-                    hash = HashBitmapRegion(crop, new Rectangle(0, 0, want.Width, want.Height));
-                }
+                /* ★ 直接对**整张 PNG** 锁这块矩形，不做任何裁剪。
+                 *
+                 * 踩到两次：
+                 *   1) `DrawImage(src, dest, srcRect, Pixel)` 默认走插值 + 半像素偏移，
+                 *      局部区域算出来的指纹和屏幕上的不一样 —— 整窗比对却是对的，
+                 *      所以看起来像"界面真的变了"；
+                 *   2) `Clone(rect, format)` 也不可靠：171x34 这种宽度仍然对不上，
+                 *      而 8x8 的小块全对 —— 说明问题出在"另开一张位图再拷"这条路上。
+                 *
+                 * LockBits 带矩形时，返回的是**原图**里那块区域的起点 + 原图行跨度，
+                 * 不复制、不插值、不重排，这才是"同一块像素"的唯一定义。
+                 */
+                hash = HashBitmapRegion(src, want);
             }
 
             Jw j = new Jw();
