@@ -183,6 +183,28 @@ if (!win32Ready()) {
   process.exit(1)
 }
 
+/* ── 这个测试**会动用户的窗口**，所以必须亮出指示层 ──
+ *
+ * 踩到的缺口：本文件直接调插件业务层（createDesktopToolset + 工具 execute），
+ * 绕过了注册工具那一层的 `ensureIndicator()` —— 于是搬窗口、点鼠标的全程，
+ * 屏幕上一点提示都没有。用户看到的是"自己的窗口莫名其妙跳了一下"。
+ *
+ * 指示层是"有人正在操作你的电脑"的声明，凡是会动桌面的自动化都该亮，
+ * 不管它是模型点的还是脚本点的。
+ */
+const indicateTool = byName.get('desktop_indicate')
+const offTool = byName.get('desktop_off')
+async function withIndicator(fn) {
+  try {
+    await indicateTool?.execute({ label: '正在跑窗口几何测试' })
+  } catch { /* 指示层起不来不该挡住测试本身 */ }
+  try {
+    return await fn()
+  } finally {
+    try { await offTool?.execute({}) } catch { /* ignore */ }
+  }
+}
+
 /* 靶子上的一个**无害点**：SuYou 的「剩余流量」标签。
  * 只在移动窗口那个"放行"格子里真的会点一下，所以要挑点了没副作用的元素。
  *
@@ -220,6 +242,7 @@ const shotNow = async () => {
 }
 const msgOf = (r) => String(r?.err ?? r?.result ?? r?.text ?? '')
 
+await withIndicator(async () => {
 try {
   /* ══ 0. 基线：能拿到 shotId ══ */
   console.log()
@@ -410,8 +433,9 @@ try {
 } finally {
   // 无论哪一格炸了，都必须把窗口放回去。
   setWindowPos(win.hwnd, ORIG.x, ORIG.y, ORIG.w, ORIG.h)
-  rmSync(tmp, { recursive: true, force: true })
 }
+})
+rmSync(tmp, { recursive: true, force: true })
 
 console.log()
 console.log('══════════════════════════════')
