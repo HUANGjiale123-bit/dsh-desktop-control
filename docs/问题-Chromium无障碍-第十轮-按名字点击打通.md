@@ -129,6 +129,38 @@ stdout 那条早就修过（`UnicodeEncodeError`），stdin 这条一直没修 �
 
 `tools/test-bridge-click.mjs`：**21 项通过**（含上面这次往返，测试自己会把界面点回首页）。
 
+## 重启后的实机验证（走真插件，不是脚本）
+
+把 2.18.31 同步到 profile 并重启 DSH 之后，直接用插件自己的工具验：
+
+| 调用 | 结果 |
+|---|---|
+| `desktop_list_windows` | SuYou 仍在 hwnd=66988（pid 10376） |
+| `desktop_read_window({hwnd:66988, maxNodes:40})` | **40 个元素**，带 `aid=`、`focusable`、`Secondary Actions`、`[value:settable]` |
+| `desktop_click_element({descriptor:'role=Button/name=我 的'})` | `InvokePattern` 成功，报告"光标已移到元素上"，截图确认切到"我的"页 |
+| `desktop_click_element({descriptor:'role=Button/name=首 页'})` | 切回首页 |
+
+**这次点击正好踩在旧 bug 的触发条件上**：`SetCursorPos` 真的成功了
+（报告里是"光标已移到元素上"，不是"没有移动鼠标"），旧代码在那种情况下会把
+`method` 拼成 `"InvokePattern，光标已移到…"`，于是继续走坐标分支再点一次。
+现在返回值是 `method=InvokePattern`、`cursorMoved=true`，页面只切换了一次 ——
+这就是那个"点两次"的修在真实环境里的验证。
+
+### 附带发现：dsc.exe 看不看得见，还取决于**谁启动它**
+
+同一时刻、同一台机器上：
+
+| 启动链 | `dsc.exe tree 66988` | 桥 |
+|---|---|---|
+| `explorer → DSH → dsc.exe`（插件那条） | **40 个元素**，能按名字点 | —（没被用到） |
+| `explorer → DSH → bash → powershell → dsc.exe`（agent shell 那条） | **7 个元素**（Pane=5, TitleBar=1, Window=1） | 39 个 |
+
+所以"Chromium 读不到"不是目标应用的单方面属性，**调用方的进程上下文也参与决定**。
+机制没查清（第八轮那个 .NET 链效应只能解释一部分，这两条链里都没有 .NET）。
+
+实用结论：**两条链都不能删**。插件那条现在能直读，但它会因为启动方式而变瞎；
+桥那条更稳（39 个节点），慢 300~800ms。现在的实现正是"helper 先说，说不出就换桥"。
+
 ## 还没验的（别当成已经成立）
 
 1. **坐标点击那条分支没有端到端验过。** 桥给出正确矩形、`dsc.exe click` 也收到了
