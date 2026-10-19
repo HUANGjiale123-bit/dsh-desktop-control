@@ -2650,10 +2650,42 @@ namespace Dsc
 
                 if (hasInvoke)
                 {
+                    /* ── 先把光标移到元素上，再 Invoke ──
+                     *
+                     * 纯 InvokePattern 不动鼠标，这对**可靠性**是优点
+                     * （不受遮挡和缩放影响），但对**用户**是缺点：
+                     * 屏幕上什么都不发生，界面自己变了 —— 用户既看不到
+                     * AI 点的是哪里，也分不清是自己误触还是 AI 干的。
+                     *
+                     * 所以这里补一次光标移动，只为了让人看见。
+                     * 它有明确的失败可能（没输入权限、元素已消失、
+                     * 矩形是空的），但**失败绝不影响后面的 Invoke** ——
+                     * 视觉反馈是附加项，不是前提。移动失败只记进 method 说明。
+                     */
+                    string cursorNote = "";
+                    try
+                    {
+                        System.Windows.Rect br = found.Current.BoundingRectangle;
+                        if (br.Width > 0 && br.Height > 0 &&
+                            !double.IsInfinity(br.Left) && !double.IsInfinity(br.Top))
+                        {
+                            int fcx = (int)Math.Round(br.Left + br.Width / 2);
+                            int fcy = (int)Math.Round(br.Top + br.Height / 2);
+                            if (Native.SetCursorPos(fcx, fcy))
+                                cursorNote = "，光标已移到元素中心 (" + fcx + "," + fcy + ")";
+                            else
+                                cursorNote = "，光标移动失败（不影响触发）";
+                        }
+                    }
+                    catch
+                    {
+                        cursorNote = "，光标移动失败（不影响触发）";
+                    }
+
                     try
                     {
                         ((InvokePattern)ip).Invoke();
-                        method = "InvokePattern";
+                        method = "InvokePattern" + cursorNote;
                     }
                     catch (Exception ex)
                     {
