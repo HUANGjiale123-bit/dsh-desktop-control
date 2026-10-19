@@ -43,6 +43,11 @@ cp "$REPO/server/apps.mjs" "$SRC/apps.mjs"
 # 而失效的表现只是"读到的节点少"，不会报错 —— 正是这个脚本底部
 # 那段注释说的那类事故。
 cp "$REPO/server/uia-bridge.py" "$SRC/uia-bridge.py"
+# 视觉兜底（候选注册 + OCR 后端）：这三个是新增模块，漏拷的后果和桥一样——
+# 功能静默消失（readWindow 少了视觉路径，而工具照常返回"读不到"）。
+cp "$REPO/server/visual-candidates.mjs" "$SRC/visual-candidates.mjs"
+cp "$REPO/server/ocr-worker.mjs" "$SRC/ocr-worker.mjs"
+cp "$REPO/server/win-ocr.ps1" "$SRC/win-ocr.ps1"
 echo "① server/toolset.mjs → plugin/toolset.mjs"
 
 # ② 辅助程序：helper/bin → plugin/bin
@@ -84,7 +89,7 @@ copy_if_changed() {
 # uia-bridge.py 必须一起拷：Chromium 系的读取桥靠它。
 # 漏了它的表现不是报错，而是"读到的节点变少"—— 静默降级，最难查的那种。
 sync_failed=0
-for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py; do
+for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py visual-candidates.mjs ocr-worker.mjs win-ocr.ps1; do
   copy_if_changed "$SRC/$f" "$DEST/$f" || sync_failed=1
 done
 for exe in dsc.exe dsc-esc.exe; do
@@ -98,7 +103,7 @@ echo
 # ④ 校验：源与目标逐文件比对
 echo "校验（源 ↔ 目标）："
 fail=0
-for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py bin/dsc.exe bin/dsc-esc.exe; do
+for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py visual-candidates.mjs ocr-worker.mjs win-ocr.ps1 bin/dsc.exe bin/dsc-esc.exe; do
   a=$(md5sum "$SRC/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   b=$(md5sum "$DEST/$f" 2>/dev/null | cut -d' ' -f1 || echo missing)
   if [ "$a" = "$b" ] && [ "$a" != "missing" ]; then

@@ -199,7 +199,12 @@ results.push('── 4. desktop_click_element 走桥，真的点动界面 ──
 
     const rMine = await set.tools.clickElement({ hwnd: HWND, descriptor: 'role=Button/name=我 的' })
     const tMine = rMine.text ?? ''
-    if (rMine.isError) {
+    if (rMine.isError && /无法把窗口|激活到前台/.test(tMine)) {
+      // 前台被别的程序占着时 helper 会拒绝激活 —— 那是**保护**，不是缺陷：
+      // 硬把前台从别人手里抢过来，等于让用户的键盘接着去别处打字。
+      // 这一格验的是"桥能不能按名字找到并点中"，不是"能不能抢前台"，所以跳过。
+      note(`前台被别的窗口占着，helper 拒绝激活（这一格未验证）：${tMine.split('\n')[0].slice(0, 60)}`)
+    } else if (rMine.isError) {
       bad(`点「我 的」失败：${tMine.split('\n')[0]}`)
     } else {
       if (tMine.includes('undefined')) bad(`报告里出现 undefined：${tMine.split('\n')[0]}`)
@@ -221,7 +226,9 @@ results.push('── 4. desktop_click_element 走桥，真的点动界面 ──
     }
 
     const rHome = await set.tools.clickElement({ hwnd: HWND, descriptor: 'role=Button/name=首 页' })
-    if (rHome.isError) {
+    if (rHome.isError && /无法把窗口|激活到前台/.test(rHome.text ?? '')) {
+      note(`点回「首 页」时前台又被占：${(rHome.text ?? '').split('\n')[0].slice(0, 60)}`)
+    } else if (rHome.isError) {
       bad(`点回「首 页」失败：${(rHome.text ?? '').split('\n')[0]}`)
     } else {
       await new Promise((r) => setTimeout(r, 900))
