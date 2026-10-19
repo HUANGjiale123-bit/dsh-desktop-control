@@ -4002,9 +4002,27 @@ namespace Dsc
                 if (roleCount.TryGetValue(r, out c)) actionable += c;
             }
 
-            // 树是否值得用：要么有可交互元素，要么有带名字的节点。
-            // 两个都少就意味着这棵树描述不了界面。
-            bool usable = actionable >= 5 || named >= 12;
+            /* 树是否值得用：要么有可交互元素，要么有带名字的节点。
+             *
+             * ★ 但样本太小时不许下结论。
+             *
+             * 踩到：named / actionable 是数 snap.Map 得来的，而 Map 只装**列出的**
+             * 那些节点（BoundedWalk 在 maxNodes 处就停了）。于是"这棵树有没有信息量"
+             * 变成了 maxNodes 的函数：
+             *     同一个窗口 maxNodes=8  → 前 8 个恰好全是 Pane → named=0 → 判"不可用"
+             *     同一个窗口 maxNodes=60 → named=44 → 判"可用"
+             * 后果有两个，都不是"少说一句"级别的：
+             *   ① 插件据此去换 UIA 桥 —— 明明是自己的取样太小，却当成"Chromium 又瞎了"；
+             *   ② 提示模型"这棵树信息很少，改用截图"，把一棵能用的树劝退了。
+             * 桥那边修过同一个毛病（28e90d7：它数的是自己印出来的行数），
+             * 这里是镜像位置的同一个 bug —— 一处修了，另一处没跟上。
+             *
+             * 判据：只有"走满了上限但样本仍然太少"时才不敢下结论。
+             * 截断发生在 300 个节点上时不适用 —— 300 行里只有 5 个有名字，
+             * 那是个可信的结论，不是取样问题。
+             */
+            bool countsConclusive = !snap.Truncated || snap.Listed >= 64;
+            bool usable = countsConclusive ? (actionable >= 5 || named >= 12) : true;
 
             Jw j = new Jw();
             j.Obj().Key("ok").Bool(true)
@@ -4015,6 +4033,7 @@ namespace Dsc
                 .Key("truncated").Bool(snap.Truncated)
                 .Key("named").Num(named)
                 .Key("actionable").Num(actionable)
+                .Key("countsConclusive").Bool(countsConclusive)
                 .Key("usable").Bool(usable)
                 .Key("roles").Val(string.Join(", ",
                     new List<string>(SortedRoles(roleCount, 12)).ToArray()))

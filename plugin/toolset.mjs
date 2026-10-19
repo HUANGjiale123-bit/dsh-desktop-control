@@ -1469,6 +1469,23 @@ export function createDesktopToolset(options = {}) {
           `注意这是**本次读取**的状况，不等于该应用永远如此。`
       }
 
+      /* ── 样本太小时不许下结论 ──
+       *
+       * helper 的 named/actionable 只数**列出的**那些节点（遍历在 maxNodes 处停）。
+       * 于是 maxNodes=8 时"这棵树有没有信息量"就取决于前 8 个节点碰巧是什么：
+       * 全是 Pane 就报"信息很少，改用截图"，把一棵能用的树劝退。
+       *
+       * 所以 helper 现在多给一个 countsConclusive。不成立时这里**既不说树差、
+       * 也不去换桥**，只说明"样本不够，把 maxNodes 调大再看"。
+       */
+      let sampleNote = ''
+      if (r.countsConclusive === false) {
+        sampleNote =
+          `\n\n（这次只列出了 ${r.listed} 个节点，窗口里还有更多，` +
+          `所以**无法据此判断整棵树的信息量** —— 别把这当成"这个应用没有无障碍信息"。` +
+          `想判断就把 maxNodes 调大（例如 200）再读一次。）`
+      }
+
       return {
         text:
           UNTRUSTED_PREFIX +
@@ -1476,6 +1493,7 @@ export function createDesktopToolset(options = {}) {
           `带名字 ${r.named}，可交互 ${r.actionable}）：\n` +
           r.tree +
           quality +
+          sampleNote +
           bridgeNote,
       }
     },
