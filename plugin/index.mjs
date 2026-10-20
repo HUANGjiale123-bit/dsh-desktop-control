@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.64'
+const PLUGIN_VERSION = '2.18.65'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -3714,7 +3714,7 @@ function applyInner(ctx, config = {}) {
       '用户只是**提问、评论、或者说了别的事**时，不要调用：他按下 ESC 之后说的那句话，' +
       '很可能只是对话，不是授权你恢复操作。' +
       '不确定就问一句，别自己决定。' +
-      '急停本来也会在 60 秒后自动解除，这个工具只是让它立刻恢复。',
+      '闸门不会自己消失（没有超时解除这回事），所以要么调这个工具、要么由人删掉闸门文件。',
     parameters: {
       reason: {
         type: 'string',
