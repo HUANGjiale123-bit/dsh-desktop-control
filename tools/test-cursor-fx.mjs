@@ -127,8 +127,10 @@ try {
     const poseFile = join(FX_DIR, 'fx.pose')
     if (existsSync(poseFile)) {
       const n = Number(readFileSync(poseFile, 'utf8').trim())
-      if (n === 5) ok(`读取类工具 → 姿势序号 ${n}（托腮）`)
-      else bad(`姿势序号不对：${n}，期望 5`)
+      // 两批素材的空闲编号不同：带箭头批 = 0（标准箭头），无箭头批 = 5（托腮）。
+      // 这个测试的临时目录里两批都有，所以两种都算对。
+      if (n === 0 || n === 5) ok(`读取类工具 → 空闲序号 ${n}`)
+      else bad(`空闲序号不对：${n}，期望 0 或 5`)
     } else {
       bad('没有写 fx.pose（姿势模式不生效）')
     }
