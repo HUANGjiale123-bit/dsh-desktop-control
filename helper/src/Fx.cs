@@ -494,6 +494,7 @@ namespace DscFx
                 string blankedFile = System.IO.Path.Combine(watchDir, "fx.blanked");
                 string stopFile = System.IO.Path.Combine(watchDir, "fx.stop");
                 string poseFile = System.IO.Path.Combine(watchDir, "fx.pose");
+                string beatFile = System.IO.Path.Combine(watchDir, "fx.heartbeat");
                 const double IdleTimeoutSec = 30.0;
                 bool blanked = false;
                 bool visible = false;
@@ -513,6 +514,34 @@ namespace DscFx
                         bool moved = false;
                         statFrames++;
                         var swFrame = System.Diagnostics.Stopwatch.StartNew();
+                        // ── 插件还活着吗 ──
+                        //
+                        // 插件每 5 秒写一次 fx.heartbeat。它被卸载/进程消失后心跳会停，
+                        // 我们在 25 秒内自己退出并恢复光标 —— 不依赖插件"记得"杀我们。
+                        // 实测过的场景：卸插件时插件已不在，两个子进程成了孤儿，
+                        // 用户得手动 taskkill，而且顺序错了还会互相拉起。
+                        bool pluginGone = false;
+                        try
+                        {
+                            if (System.IO.File.Exists(beatFile))
+                                pluginGone = (DateTime.UtcNow - System.IO.File.GetLastWriteTimeUtc(beatFile)).TotalSeconds > 25;
+                        }
+                        catch { }
+
+                        if (pluginGone)
+                        {
+                            if (blanked) RestoreSystemCursors();
+                            try { System.IO.File.Delete(blankedFile); } catch { }
+                            LogPick(watchDir, "退出：插件心跳已停止（插件已卸载或退出）");
+                            DestroyWindow(hwnd);
+                            foreach (Pose pose0 in poses)
+                            {
+                                if (pose0.HBitmap != IntPtr.Zero) DeleteObject(pose0.HBitmap);
+                                pose0.Sprite.Dispose();
+                            }
+                            return 0;
+                        }
+
                         if (active)
                         {
                             if (!poseMode && !blanked)

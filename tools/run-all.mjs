@@ -35,6 +35,7 @@ const FAST_EXCLUDE = new RegExp('^test-(' + [
   'shot-chain', 'shot-ttl', 'shot-invalidate', // 都要真窗口
   'isourwindow', 'tree-sample', 'image-block',
   'menu-click',      // 要真 GUI 菜单 + 焦点，批量跑时偶发不稳
+  'cursor-orphan',   // 要等 25 秒看进程自己退出，且会真的接管光标
 ].join('|') + ')')
 
 const files = readdirSync('tools')

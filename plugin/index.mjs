@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.67'
+const PLUGIN_VERSION = '2.18.68'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -674,6 +674,7 @@ function applyInner(ctx, config = {}) {
     lastActionAt: 0,
     poseTimer: null,
     guard: null,
+    beatTimer: null,
     asset: null,
     anchor: null,
 
@@ -804,6 +805,15 @@ function applyInner(ctx, config = {}) {
       try {
         this.bash()
         writeFileSync(join(this.dir, 'fx.active'), String(Date.now()))
+        writeFileSync(join(this.dir, 'fx.heartbeat'), String(Date.now()))
+        // 每 5 秒续一次心跳。插件被卸载后没人续，dsc-fx 会在 25 秒内自己退出并
+        // 恢复光标，dsc-guard 也会在 30 秒内退出——不需要谁记得去 kill 它们。
+        if (!this.beatTimer) {
+          this.beatTimer = setInterval(() => {
+            try { writeFileSync(join(this.dir, 'fx.heartbeat'), String(Date.now())) } catch { }
+          }, 5000)
+          this.beatTimer.unref?.()
+        }
         // 姿势序号（对应 poses 目录排序）：
         //   8 = p09 双手使劲拉  → 拖拽/滚轮
         //   1 = p02 举手欢呼    → 点击
@@ -853,9 +863,15 @@ function applyInner(ctx, config = {}) {
     /** 收工：先叫它自己退（它会恢复光标），再兜底调一次 cursor_restore。 */
     stop() {
       if (!this.enabled) return
+      try { if (this.beatTimer) { clearInterval(this.beatTimer); this.beatTimer = null } } catch { }
+      try { if (this.dir) rmSync(join(this.dir, 'fx.heartbeat'), { force: true }) } catch { }
       try { if (this.dir) writeFileSync(join(this.dir, 'fx.stop'), '1') } catch { }
       try { if (this.child) this.child.kill() } catch { }
       try { if (this.guard) this.guard.kill() } catch { }
+      // 兜底：句柄可能已经失效（HMR / 重装），按进程名再收一次。
+      // 顺序无所谓——两个进程现在都会自己退出，不再互相拉起。
+      try { spawn('taskkill', ['/IM', 'dsc-fx.exe', '/F'], { windowsHide: true }) } catch { }
+      try { spawn('taskkill', ['/IM', 'dsc-guard.exe', '/F'], { windowsHide: true }) } catch { }
     },
   }
 

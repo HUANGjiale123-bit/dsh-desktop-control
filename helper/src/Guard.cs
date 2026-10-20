@@ -81,13 +81,33 @@ namespace DscGuard
             string dir = args[1];
             string blanked = Path.Combine(dir, "fx.blanked");
             string stop = Path.Combine(dir, "fx.stop");
+            string beat = Path.Combine(dir, "fx.heartbeat");
 
             Log(dir, "guard 启动 pid=" + Process.GetCurrentProcess().Id);
 
             int idleRounds = 0;
+            int noFxRounds = 0;
             while (true)
             {
+                // 宿主（插件）心跳停了就是"插件已经没了"：先恢复光标，再退出。
+                // 这条比"等 dsc-fx 消失再数 24 秒"快得多，卸载体验更好。
+                bool hostGone = false;
+                try
+                {
+                    if (File.Exists(beat))
+                        hostGone = (DateTime.UtcNow - File.GetLastWriteTimeUtc(beat)).TotalSeconds > 25;
+                }
+                catch { }
+
                 bool marker = File.Exists(blanked);
+                if (hostGone)
+                {
+                    if (marker) SystemParametersInfoW(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+                    try { if (marker) File.Delete(blanked); } catch { }
+                    Log(dir, "guard 退出（宿主心跳已停止，插件已卸载或退出）");
+                    return 0;
+                }
+
                 if (marker)
                 {
                     idleRounds = 0;
@@ -104,11 +124,34 @@ namespace DscGuard
                 else
                 {
                     idleRounds++;
+
                     // 没有 marker 且收到 stop → 收工。给 5 秒缓冲，避免和装饰进程
                     // 的创建顺序抢跑（插件可能先起 guard 再起 fx）。
                     if (File.Exists(stop) && idleRounds > 12)
                     {
                         Log(dir, "guard 退出（收到 fx.stop）");
+                        return 0;
+                    }
+
+                    // 另一个退出条件：装饰进程不在了、也没有要恢复的光标，
+                    // 连续 30 秒都是这样 → 自己退出。插件被卸载时不会有人给我们写
+                    // fx.stop，不靠这条就会永远挂着（实测：卸载后留下孤儿进程）。
+                    bool fxRunning = false;
+                    try
+                    {
+                        foreach (var p in Process.GetProcessesByName("dsc-fx"))
+                        {
+                            fxRunning = true;
+                            break;
+                        }
+                    }
+                    catch { fxRunning = true; }   // 查不到就当它还在，不冒险
+                    if (fxRunning) noFxRounds = 0; else noFxRounds++;
+                    // 400ms × 60 ≈ 24 秒。fx 自己在 25 秒内退出，所以最迟约 50 秒
+                    // 两个进程都会消失；卸载时不再需要手动 taskkill。
+                    if (noFxRounds > 60)
+                    {
+                        Log(dir, "guard 退出（装饰进程已不在，且无需恢复）");
                         return 0;
                     }
                 }
