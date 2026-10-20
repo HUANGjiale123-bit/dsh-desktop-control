@@ -229,21 +229,52 @@ namespace DscFx
             info.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
             if (!GetCursorInfo(ref info) || info.hCursor == IntPtr.Zero) return -1;
 
-            using (Bitmap bmp = new Bitmap(48, 48, PixelFormat.Format32bppArgb))
-            using (Graphics g = Graphics.FromImage(bmp))
+            if (_probe == null)
             {
-                g.Clear(Color.Transparent);
-                IntPtr hdc = g.GetHdc();
-                try { DrawIconEx(hdc, 0, 0, info.hCursor, 48, 48, 0, IntPtr.Zero, DI_NORMAL); }
-                finally { g.ReleaseHdc(hdc); }
-
-                for (int i = 0; i < SLOT_IDS.Length; i++)
-                {
-                    Color c = bmp.GetPixel(i * 2, 0);
-                    if (c.A > 0) return i;
-                }
-                return -1;
+                _probe = new Bitmap(48, 48, PixelFormat.Format32bppArgb);
+                _probeG = Graphics.FromImage(_probe);
             }
+
+            _probeG.Clear(Color.Transparent);
+            IntPtr hdc = _probeG.GetHdc();
+            try { DrawIconEx(hdc, 0, 0, info.hCursor, 48, 48, 0, IntPtr.Zero, DI_NORMAL); }
+            finally { _probeG.ReleaseHdc(hdc); }
+
+            for (int i = 0; i < SLOT_IDS.Length; i++)
+            {
+                Color c = _probe.GetPixel(i * 2, 0);
+                if (c.A > 0) return i;
+            }
+            return -1;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RTL_OSVERSIONINFOEX
+        {
+            public uint dwOSVersionInfoSize;
+            public uint dwMajorVersion;
+            public uint dwMinorVersion;
+            public uint dwBuildNumber;
+            public uint dwPlatformId;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string szCSDVersion;
+        }
+
+        [DllImport("ntdll.dll", SetLastError = true)]
+        private static extern int RtlGetVersion(ref RTL_OSVERSIONINFOEX info);
+
+        private static int BuildNumber()
+        {
+            RTL_OSVERSIONINFOEX v = new RTL_OSVERSIONINFOEX();
+            v.dwOSVersionInfoSize = (uint)Marshal.SizeOf(typeof(RTL_OSVERSIONINFOEX));
+            if (RtlGetVersion(ref v) != 0) return 0;
+            return (int)v.dwBuildNumber;
+        }
+
+        private static bool IsBuildAtLeast(int build)
+        {
+            int b = BuildNumber();
+            return b > 0 && b >= build;
         }
 
         private static bool RestoreSystemCursors()
@@ -256,6 +287,19 @@ namespace DscFx
         private static bool poseMode = false;
         private static bool followCursor = false;
         private static int lastPick = -99;
+        private static int lastX = int.MinValue;
+        private static int lastY = int.MinValue;
+
+        // 探针位图与 Graphics 只建一次：每帧 new 一个 48×48 Bitmap + Graphics
+        // 会持续产生 GC 压力（实测单核占用 5.9%，其中一部分就是它）。
+        private static Bitmap _probe;
+        private static Graphics _probeG;
+        private static int frame = 0;
+        private static int statFrames = 0;
+        private static int statDraws = 0;
+        private static int statSlots = 0;
+        private static DateTime lastSlotCheck = DateTime.MinValue;
+        private static int pendingSlot = -99;
         private static int lastSlot = -99;
 
         /// <summary>形状切换记一行日志：验证"文字里是 I 形、按钮上是手形"靠它。</summary>
@@ -461,6 +505,8 @@ namespace DscFx
                         }
                         catch { }
 
+                        bool moved = false;
+                        statFrames++;
                         if (active)
                         {
                             if (!poseMode && !blanked)
@@ -480,8 +526,23 @@ namespace DscFx
                             bool yield = false;
                             if (followCursor)
                             {
-                                int slot = ReadSlot();
-                                if (slot != lastSlot) { lastSlot = slot; LogPick(watchDir, "slot " + slot); }
+                                // 形状检测降频：每 6 帧（≈100ms）查一次。
+                                // 每帧都做 DrawIconEx + GetHdc/ReleaseHdc，实测单核 6.7%，
+                                // 而光标形状的变化远没有 60Hz 那么频繁。
+                                frame++;
+                                // 按**时间**降频 + 去抖：识别结果会抖（实测静止时光标在
+                                // 12/1/11/0 之间跳），每抖一次就重绘+写日志，CPU 全耗在这。
+                                // 现在：每 150ms 查一次，且**连续两次一致**才真正切换形状。
+                                int slot = lastSlot;
+                                if ((DateTime.UtcNow - lastSlotCheck).TotalMilliseconds > 150)
+                                {
+                                    lastSlotCheck = DateTime.UtcNow;
+                                    int fresh = ReadSlot();
+                                    statSlots++;
+                                    if (fresh == pendingSlot) slot = fresh;
+                                    else pendingSlot = fresh;
+                                }
+                                if (slot != lastSlot) { lastSlot = slot; }
                                 if (slot < 0) yield = true;
                                 else
                                 {
@@ -508,7 +569,18 @@ namespace DscFx
                             else
                             {
                                 POINT p;
-                                if (GetCursorPos(out p)) DrawAt(hwnd, poses[pick], p.X, p.Y, false);
+                                if (GetCursorPos(out p))
+                                {
+                                    // 光标没动、形状没变就不必再 UpdateLayeredWindow ——
+                                    // 它每帧都要走一次 DWM 合成，是占用的主要来源。
+                                    if (lastPick != pick || p.X != lastX || p.Y != lastY)
+                                    {
+                                        DrawAt(hwnd, poses[pick], p.X, p.Y, false);
+                                        statDraws++;
+                                        moved = (p.X != lastX || p.Y != lastY);
+                                        lastX = p.X; lastY = p.Y;
+                                    }
+                                }
                                 if (lastPick != pick) { lastPick = pick; LogPick(watchDir, "pose " + pick); }
                             }
                         }
@@ -518,7 +590,9 @@ namespace DscFx
                             if (blanked) { RestoreSystemCursors(); blanked = false; try { System.IO.File.Delete(blankedFile); } catch { } }
                         }
 
-                        Thread.Sleep(16);
+                        // 自适应休眠：光标在动时保持流畅（8ms），静止时降到 40ms。
+                        // 静止时仍然每 6 帧查一次形状（≈240ms），足够跟上系统的光标切换。
+                        Thread.Sleep(moved ? 8 : 40);
                     }
                 }
                 finally
