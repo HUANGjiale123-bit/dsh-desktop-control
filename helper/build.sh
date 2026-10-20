@@ -113,6 +113,12 @@ echo "编译 dsc-esc.exe （逃生条 + 边缘光带 + 唯一的 ESC 钩子）..
 echo "完成: bin/dsc-esc.exe ($(stat -c%s bin/dsc-esc.exe) bytes)"
 
 echo
+echo "编译 dsc-fx.exe （光标装饰探针：分层窗口 + 点击穿透）..."
+( cd src && "$CSC" -nologo -target:winexe -platform:x64 -out:../bin/dsc-fx.exe -win32manifest:app.manifest -r:System.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll Fx.cs )
+
+echo "完成: bin/dsc-fx.exe ($(stat -c%s bin/dsc-fx.exe) bytes)"
+
+echo
 
 echo
 echo "自检:"

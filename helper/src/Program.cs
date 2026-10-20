@@ -29,6 +29,23 @@ namespace Dsc
 {
     internal static class Native
     {
+        private const int SPI_SETCURSORS = 0x0057;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SystemParametersInfoW(int action, int param, IntPtr data, int winIni);
+
+        /// <summary>
+        /// 从用户注册表方案重新加载系统光标。
+        ///
+        /// 这是"光标恢复"的唯一入口：鱼进程可能被强杀、DSH 可能崩溃，
+        /// 任何一条路径都需要一个**还活着**的进程把光标变回来。
+        /// 我们从不写注册表，所以这个动作幂等，重复调用没有副作用。
+        /// </summary>
+        internal static bool RestoreSystemCursors()
+        {
+            return SystemParametersInfoW(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+        }
+
         [DllImport("user32.dll")]
         public static extern bool SetProcessDPIAware();
 
@@ -901,6 +918,7 @@ namespace Dsc
                     case "halt": return CmdHalt(args);
                     case "stop": return CmdStop(args);
                     case "cursor": return CmdCursor();
+                    case "cursor_restore": return CmdCursorRestore();
                     case "ping": return CmdPing();
                     case "allowcheck": return CmdAllowCheck(args);
                     case "gate_probe": return CmdGateProbe();
@@ -937,6 +955,16 @@ namespace Dsc
         /// （评审指出得对：文字只能证明报告怎么写，不能证明鼠标动没动）。
         /// 有它就能在调用前后各读一次 —— 光标没动，就是没有点。
         /// </summary>
+        /// <summary>把系统光标恢复成用户自己的方案。任何进程都能调，幂等。</summary>
+        private static int CmdCursorRestore()
+        {
+            bool ok = Native.RestoreSystemCursors();
+            Jw j = new Jw();
+            j.Obj().Key("ok").Bool(ok).End();
+            Console.WriteLine(j.ToString());
+            return ok ? 0 : 1;
+        }
+
         private static int CmdCursor()
         {
             Native.POINT p;

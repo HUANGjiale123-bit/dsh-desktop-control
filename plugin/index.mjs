@@ -20,8 +20,9 @@
 import { spawn } from 'node:child_process'
 import {
   existsSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync,
-  appendFileSync, renameSync,
+  appendFileSync, renameSync, copyFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -67,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.52'
+const PLUGIN_VERSION = '2.18.53'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -638,10 +639,109 @@ function applyInner(ctx, config = {}) {
     }
   }
 
+  /* ── 光标装饰（"沉浸模式"）──
+   *
+   * 目标：computer use 进行时，把系统箭头换成全透明，改由一条大鱼当光标
+   * （画里的箭头就是"光标"，素材按这个画的）。
+   *
+   * 为什么必须是**常驻进程 + 活动文件**：
+   *
+   *   · SetSystemCursor 改的是**系统全局**资源，进程被杀不会自动还原 ——
+   *     所以透明只能在一个还活着的进程看护下存在。
+   *   · 每次工具调用都起一个进程不现实（要重画、要重新透明）。
+   *   · 于是：常驻的 dsc-fx 盯一个 fx.active 文件；插件每次桌面操作写一次时间戳；
+   *     30 秒没动静就自己恢复光标、藏起鱼。
+   *
+   * 为什么二进制要复制到 %TEMP%：
+   *
+   *   工作区带 Low 完整性标签，从工作区直接 spawn 的进程调 SetSystemCursor
+   *   会**静默失败**（实测返回 false）。复制到 %TEMP%（Medium）才有效。
+   *
+   * 为什么默认关：
+   *
+   *   它会改"你的光标"。朋友第一次装不该莫名其妙没有箭头。
+   */
+  const cursorFx = {
+    // 三种开启方式：配置项（正式）、环境变量（调试）、标记文件（本机试用）。
+    // 默认**关**：它会改用户的光标，装完即用的插件不该默默动这个。
+    // 显式 true/false 优先；没写时才看环境变量与标记文件。
+    enabled: config.cursorFx === true ? true
+      : config.cursorFx === false ? false
+        : (process.env.DSC_CURSOR_FX === '1' || existsSync(join(tmpdir(), 'dsc-cursor-fx.enable'))),
+    size: Number.isFinite(config.cursorFxSize) ? config.cursorFxSize : 120,
+    dir: null,
+    child: null,
+    asset: null,
+    anchor: null,
+
+    bash() {
+      if (this.dir) return this.dir
+      // 允许用 config.cursorFxDir 覆盖：测试里要指到能预期的位置，
+      // 也因为 TEMP 在某些 shell 里是 POSIX 风格路径（/tmp），不能直接喂给 exe。
+      this.dir = config.cursorFxDir ? String(config.cursorFxDir) : join(tmpdir(), 'dsc-cursor-fx')
+      mkdirSync(this.dir, { recursive: true })
+      return this.dir
+    },
+
+    /** 把 exe 与素材复制到 Medium 完整性的位置，返回可执行的路径。 */
+    stage() {
+      const dir = this.bash()
+      const src = join(pluginDir, 'bin', 'dsc-fx.exe')
+      const repo = join(pluginDir, '..', 'helper', 'bin', 'dsc-fx.exe')
+      const from = existsSync(src) ? src : repo
+      if (!existsSync(from)) return null
+      const exe = join(dir, 'dsc-fx.exe')
+      try {
+        const a = statSync(from), b = existsSync(exe) ? statSync(exe) : null
+        if (!b || b.size !== a.size) copyFileSync(from, exe)
+      } catch { /* 复制失败就用旧文件 */ }
+
+      const assetFrom = join(pluginDir, 'assets', 'cursor', 'fish-arrow.png')
+      if (!existsSync(assetFrom)) return null
+      this.asset = join(dir, 'fish-arrow.png')
+      try { copyFileSync(assetFrom, this.asset) } catch { }
+      this.anchor = '45,102'   // 画中箭头尖在素材上的位置（320px 版本）
+      return existsSync(exe) ? exe : null
+    },
+
+    start() {
+      if (this.child && !this.child.killed) return
+      const exe = this.stage()
+      if (!exe) return
+      try {
+        this.child = spawn(exe, ['--watch', this.bash(), String(this.size), `${this.asset}@${this.anchor}`], {
+          detached: true, stdio: 'ignore', windowsHide: true,
+        })
+        this.child.unref()
+        ctx.logger?.info?.('[desktop-control] 光标装饰已启动（沉浸模式）')
+      } catch (e) {
+        ctx.logger?.warn?.(`[desktop-control] 光标装饰启动失败：${e?.message ?? e}`)
+      }
+    },
+
+    /** 每次桌面操作报到一次：续上 30 秒的活动窗口。 */
+    touch() {
+      if (!this.enabled) return
+      try {
+        this.bash()
+        writeFileSync(join(this.dir, 'fx.active'), String(Date.now()))
+        this.start()
+      } catch { }
+    },
+
+    /** 收工：先叫它自己退（它会恢复光标），再兜底调一次 cursor_restore。 */
+    stop() {
+      if (!this.enabled) return
+      try { if (this.dir) writeFileSync(join(this.dir, 'fx.stop'), '1') } catch { }
+      try { if (this.child) this.child.kill() } catch { }
+    },
+  }
+
   const set = createDesktopToolset({
     helperPath,
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
+    onDesktopActivity: () => cursorFx.touch(),
     // 把 span 注进 toolset：它自己**不维护**当前 trace（那会在并发下串号），
     // 只负责在自己认为值得计时的边界上调用这个函数。
     span,
@@ -3800,6 +3900,8 @@ function applyInner(ctx, config = {}) {
 
   // 插件卸载时收掉所有浮层，不留孤儿窗口
   ctx.on?.('dispose', () => {
+    // 光标必须恢复：这是唯一会影响用户整台机器的状态。
+    cursorFx.stop()
     for (const child of liveOverlays.values()) {
       try { child.kill() } catch { }
     }

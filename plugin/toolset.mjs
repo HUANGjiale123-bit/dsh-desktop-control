@@ -556,6 +556,9 @@ export function createDesktopToolset(options = {}) {
   }
 
   function runHelper(args, allow, timeoutMs = 30000) {
+    // 每次真正碰桌面之前先"报到"：光标装饰据此判断这段 computer use 还在进行。
+    // 放在这里而不是每个工具里，是因为所有桌面动作都经过这一个函数。
+    try { options.onDesktopActivity?.() } catch { }
     return span(`helper.${args[0]}`, () => runHelperInner(args, allow, timeoutMs))
   }
 
