@@ -30,9 +30,22 @@
 1. 在 DSH 的插件管理里从本地文件安装本 tgz
 2. **重启 DSH**
 
-> 手动装（`pnpm add`）的人额外注意：DSH 只加载 profile `package.json` 里
-> `dsh.profile.bundles` 数组中的包。只装进 `node_modules` 不会激活，
-> 表现为所有 `desktop_*` 工具报 `unknown tool`。
+**不推荐手改配置文件**。DSH 只加载 profile `package.json` 里 `dsh.profile.bundles`
+数组中的包；手动 `pnpm add` 只装进 `node_modules` 不会激活（表现为所有 `desktop_*`
+工具报 `unknown tool`）。更糟的是，那个数组是手写 JSON——**写坏一个逗号，整个 DSH
+起不来**。
+
+如果你必须手改，按这个顺序，**不要跳步**：
+
+1. 备份：`copy package.json package.json.bak`
+2. 只往 `dsh.profile.bundles` 加一项 `"dsh-desktop-control"`（注意最后一项后面不能有逗号）
+3. 立刻校验：`node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('OK')"`
+4. 没打印 `OK` 就还原：`copy package.json.bak package.json`
+5. 重启 DSH
+
+**弄坏了怎么救**：关掉 DSH → 还原 `package.json.bak`（或删掉多加的那一行并检查逗号）
+→ 校验 JSON → 重启。实在不行，把 profile 目录**改名**（不要删）成 `<名字>.broken`，
+DSH 会重建一个干净的 profile；确认没问题后再决定要不要清掉旧的。
 
 需要 DSH 的 Node ≥ 18；Windows 10/11。
 
