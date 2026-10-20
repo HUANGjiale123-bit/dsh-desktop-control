@@ -18,8 +18,14 @@ import { homedir } from 'node:os'
 
 const rows = []
 const add = (section, item, value, note = '') => rows.push({ section, item, value, note })
-const run = (cmd, args, opts = {}) =>
-  spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 20000, ...opts })
+let sandboxBlocked = false
+const run = (cmd, args, opts = {}) => {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 20000, ...opts })
+  // 受限沙箱里 piped stdio 会 EPERM（第三方验收报告 C 项）。
+  // 不静默：最后统一提示"请到普通终端跑"。
+  if (r.error && (r.error.code === 'EPERM' || /EPERM/.test(String(r.error.message)))) sandboxBlocked = true
+  return r
+}
 
 // ── 找到已安装的插件（优先 profile 里的那一份，那才是真正在跑的）──
 const profileRoot = join(homedir(), '.dsh', 'profiles')
@@ -133,5 +139,11 @@ for (const r of rows) {
   console.log(`  ${pad(r.item, 12)} ${r.value}${r.note ? '   ' + r.note : ''}`)
 }
 console.log('```')
+console.log()
+if (sandboxBlocked) {
+  console.log()
+  console.log('⚠ 部分命令在受限沙箱里无法执行（spawn EPERM），上面的数据可能不完整。')
+  console.log('  请在一个**普通终端**（不是 DSH 的沙箱终端）里重新运行本脚本。')
+}
 console.log()
 console.log('（这段整段贴回来即可。人眼要判断的项见 docs/第二台机器验收清单.md）')

@@ -34,6 +34,7 @@ const FAST_EXCLUDE = new RegExp('^test-(' + [
   'coord-normalized-e2e',
   'shot-chain', 'shot-ttl', 'shot-invalidate', // 都要真窗口
   'isourwindow', 'tree-sample', 'image-block',
+  'menu-click',      // 要真 GUI 菜单 + 焦点，批量跑时偶发不稳
 ].join('|') + ')')
 
 const files = readdirSync('tools')

@@ -1953,19 +1953,34 @@ namespace Dsc
             }
             bool right = clickButton == "right";
 
-            // 有目标窗口时先激活它。激活不只是为了注入能被接受，
-            // 也是为了**把目标提到前台，让"落点属于谁"这件事变得可判断**。
-            if (target != IntPtr.Zero)
-            {
-                RequireAllowedWindow(target, "click");
-                RequireActivated(target, "click");
-            }
-
+            // ── 先看清楚落点是谁，再决定要不要激活 ──
+            //
+            // 原顺序是"先激活目标、再 WindowFromPoint"，但激活会**关掉弹出菜单**：
+            // 记事本的「文件/编辑」菜单是同一进程的**另一个顶层窗口**，
+            // 激活主窗口的瞬间菜单就消失了，接下来拿菜单坐标去比对，
+            // 得到的是"坐标属于 notepad.exe 的另一个窗口" → 拒绝。
+            // 第三方验收里"菜单项点不了"就是这么来的（报告 A 项）。
+            //
+            // 所以：同进程的窗口按**同一个应用**对待，且这种情况下不激活
+            // （激活本身就会把菜单关掉），直接按坐标注入。
             IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
             IntPtr root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
             uint hitPid = 0;
             if (root != IntPtr.Zero) Native.GetWindowThreadProcessId(root, out hitPid);
+            uint targetPid = 0;
+            if (target != IntPtr.Zero) Native.GetWindowThreadProcessId(target, out targetPid);
             string hitExe = BaseName(ProcessPath(hitPid));
+
+            // 同进程、但不是目标窗口本身 → 典型就是菜单/下拉/工具提示这类弹出窗口。
+            bool sameProcessPopup = target != IntPtr.Zero && root != IntPtr.Zero
+                && root != target && targetPid != 0 && hitPid == targetPid;
+
+            if (target != IntPtr.Zero)
+            {
+                RequireAllowedWindow(target, "click");
+                // 只有在"落点就是目标窗口"时才要求激活；同进程弹出窗口不激活。
+                if (!sameProcessPopup) RequireActivated(target, "click");
+            }
 
             Console.Error.WriteLine("[click 诊断] 目标=(" + x + "," + y + ")" +
                 " 指定窗口=" + target +
@@ -1977,7 +1992,7 @@ namespace Dsc
             if (hit == IntPtr.Zero)
                 throw new DscError("StaleTarget", "坐标 (" + x + "," + y + ") 处没有窗口，拒绝点击。");
 
-            if (target != IntPtr.Zero && root != target)
+            if (target != IntPtr.Zero && root != target && !sameProcessPopup)
             {
                 // 激活之后落点仍不属于目标 → 有东西盖着它。
                 //
