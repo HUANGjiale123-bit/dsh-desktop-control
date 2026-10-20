@@ -45,6 +45,7 @@ for (const sub of ['poses', 'poses-arrow']) {
 }
 mkdirSync(join(tmp, 'bin'), { recursive: true })
 writeFileSync(join(tmp, 'bin', 'dsc-fx.exe'), readFileSync(join('helper', 'bin', 'dsc-fx.exe')))
+writeFileSync(join(tmp, 'bin', 'dsc-guard.exe'), readFileSync(join('helper', 'bin', 'dsc-guard.exe')))
 
 function killFx() {
   spawnSync('taskkill', ['/IM', 'dsc-fx.exe', '/F'], { windowsHide: true })
@@ -106,6 +107,10 @@ try {
     const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq dsc-fx.exe'], { encoding: 'utf8', windowsHide: true })
     if (/dsc-fx\.exe/.test(String(r.stdout))) ok('装饰进程已启动')
     else bad(`装饰进程没起来（日志：${logs.slice(-3).join(' | ')}）`)
+
+    const g = spawnSync('tasklist', ['/FI', 'IMAGENAME eq dsc-guard.exe'], { encoding: 'utf8', windowsHide: true })
+    if (/dsc-guard\.exe/.test(String(g.stdout))) ok('看门狗已启动')
+    else bad('看门狗没起来')
 
     // 再调一次：不应该起第二个进程
     await by.get('desktop_list_windows').execute({}).catch(() => {})

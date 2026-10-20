@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.59'
+const PLUGIN_VERSION = '2.18.60'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -673,6 +673,7 @@ function applyInner(ctx, config = {}) {
     child: null,
     lastActionAt: 0,
     poseTimer: null,
+    guard: null,
     asset: null,
     anchor: null,
 
@@ -703,6 +704,14 @@ function applyInner(ctx, config = {}) {
       this.asset = join(dir, 'fish-arrow.png')
       try { copyFileSync(assetFrom, this.asset) } catch { }
       this.anchor = '45,102'   // 画中箭头尖在素材上的位置（320px 版本）
+      // 看门狗也复制到同一个 Medium 目录（它也要调 SPI_SETCURSORS）
+      const guardSrc = join(pluginDir, 'bin', 'dsc-guard.exe')
+      const guardRepo = join(pluginDir, '..', 'helper', 'bin', 'dsc-guard.exe')
+      const guardFrom = existsSync(guardSrc) ? guardSrc : guardRepo
+      if (existsSync(guardFrom)) {
+        try { copyFileSync(guardFrom, join(dir, 'dsc-guard.exe')) } catch { }
+      }
+
       return existsSync(exe) ? exe : null
     },
 
@@ -773,6 +782,16 @@ function applyInner(ctx, config = {}) {
         this.child.unref()
         // 进程一退出就把句柄清掉，下一次调用能重新拉起。
         this.child.on('exit', () => { this.child = null })
+        // 看门狗：装饰进程被杀/崩溃时把系统光标恢复回来。
+        // 它必须**独立**于装饰进程存活，所以是另一个进程。
+        if (!this.guard || this.guard.exitCode !== null) {
+          const guardExe = join(dir, 'dsc-guard.exe')
+          if (existsSync(guardExe)) {
+            this.guard = spawn(guardExe, ['--watch', dir], { detached: true, stdio: 'ignore', windowsHide: true })
+            this.guard.unref()
+            this.guard.on('exit', () => { this.guard = null })
+          }
+        }
         ctx.logger?.info?.(`[desktop-control] 光标装饰已启动（${mode} 模式，${files.length} 张素材）`)
       } catch (e) {
         ctx.logger?.warn?.(`[desktop-control] 光标装饰启动失败：${e?.message ?? e}`)
@@ -836,6 +855,7 @@ function applyInner(ctx, config = {}) {
       if (!this.enabled) return
       try { if (this.dir) writeFileSync(join(this.dir, 'fx.stop'), '1') } catch { }
       try { if (this.child) this.child.kill() } catch { }
+      try { if (this.guard) this.guard.kill() } catch { }
     },
   }
 

@@ -119,6 +119,11 @@ echo "编译 dsc-fx.exe （光标装饰探针：分层窗口 + 点击穿透）..
 echo "完成: bin/dsc-fx.exe ($(stat -c%s bin/dsc-fx.exe) bytes)"
 
 echo
+echo "编译 dsc-guard.exe （光标看门狗：装饰进程死了就恢复系统光标）..."
+( cd src && "$CSC" -nologo -target:winexe -platform:x64 -out:../bin/dsc-guard.exe -win32manifest:app.manifest -r:System.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll Guard.cs )
+echo "完成: bin/dsc-guard.exe ($(stat -c%s bin/dsc-guard.exe) bytes)"
+
+echo
 
 echo
 echo "自检:"

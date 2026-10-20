@@ -51,7 +51,7 @@ cp "$REPO/server/win-ocr.ps1" "$SRC/win-ocr.ps1"
 echo "① server/toolset.mjs → plugin/toolset.mjs"
 
 # ② 辅助程序：helper/bin → plugin/bin
-for exe in dsc.exe dsc-esc.exe dsc-fx.exe; do
+for exe in dsc.exe dsc-esc.exe dsc-fx.exe dsc-guard.exe; do
   if [ -f "$REPO/helper/bin/$exe" ]; then
     mkdir -p "$SRC/bin"
     cp "$REPO/helper/bin/$exe" "$SRC/bin/$exe"
@@ -92,7 +92,7 @@ sync_failed=0
 for f in index.mjs toolset.mjs tooldsl.mjs apps.mjs cordis.patch.yml package.json uia-bridge.py visual-candidates.mjs ocr-worker.mjs win-ocr.ps1; do
   copy_if_changed "$SRC/$f" "$DEST/$f" || sync_failed=1
 done
-for exe in dsc.exe dsc-esc.exe dsc-fx.exe; do
+for exe in dsc.exe dsc-esc.exe dsc-fx.exe dsc-guard.exe; do
   if [ -f "$SRC/bin/$exe" ]; then
     copy_if_changed "$SRC/bin/$exe" "$DEST/bin/$exe" || sync_failed=1
   fi
