@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.55'
+const PLUGIN_VERSION = '2.18.56'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -671,6 +671,7 @@ function applyInner(ctx, config = {}) {
     size: Number.isFinite(config.cursorFxSize) ? config.cursorFxSize : 120,
     dir: null,
     child: null,
+    lastActionAt: 0,
     asset: null,
     anchor: null,
 
@@ -705,7 +706,9 @@ function applyInner(ctx, config = {}) {
     },
 
     start() {
-      if (this.child && !this.child.killed) return
+      // 判断"还活着"不能只看 child.killed：那个标志只反映**我们**调过 kill()。
+      // 外面 taskkill 掉的进程 killed 仍是 false，于是永远不再重启（踩过）。
+      if (this.child && this.child.exitCode === null && !this.child.killed) return
       const exe = this.stage()
       if (!exe) return
       // 模式：配置项优先；没配时看标记文件的内容（写 "pose" 就是姿势模式）。
@@ -767,6 +770,8 @@ function applyInner(ctx, config = {}) {
       try {
         this.child = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true })
         this.child.unref()
+        // 进程一退出就把句柄清掉，下一次调用能重新拉起。
+        this.child.on('exit', () => { this.child = null })
         ctx.logger?.info?.(`[desktop-control] 光标装饰已启动（${mode} 模式，${files.length} 张素材）`)
       } catch (e) {
         ctx.logger?.warn?.(`[desktop-control] 光标装饰启动失败：${e?.message ?? e}`)
@@ -785,11 +790,19 @@ function applyInner(ctx, config = {}) {
         //   2 = p03 挥手        → 输入/按键
         //   5 = p06 坐着托腮    → 读取类与默认
         const t = String(tool ?? '')
+        // 动作类命令才写姿势；点击之后插件会顺手截一张"动作后的画面"，
+        // 那次调用如果也写姿势，界面会先举手再立刻变回托腮（实测踩过）。
+        const isAction = /click|drag|wheel|type|press_key|set_value/.test(t)
         const pose = /drag|wheel/.test(t) ? 8
           : /click/.test(t) ? 1
             : /type|press_key|set_value/.test(t) ? 2
               : 5
-        writeFileSync(join(this.dir, 'fx.pose'), String(pose))
+        if (isAction) {
+          this.lastActionAt = Date.now()
+          writeFileSync(join(this.dir, 'fx.pose'), String(pose))
+        } else if (Date.now() - this.lastActionAt > 1500) {
+          writeFileSync(join(this.dir, 'fx.pose'), '5')
+        }
         this.start()
       } catch { }
     },

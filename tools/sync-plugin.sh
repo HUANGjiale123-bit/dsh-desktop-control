@@ -103,9 +103,12 @@ mkdir -p "$DEST/assets/cursor/poses"
 if [ -f "$SRC/assets/cursor/fish-arrow.png" ]; then
   copy_if_changed "$SRC/assets/cursor/fish-arrow.png" "$DEST/assets/cursor/fish-arrow.png" || sync_failed=1
 fi
-for f in "$SRC/assets/cursor/poses"/*; do
-  [ -f "$f" ] || continue
-  copy_if_changed "$f" "$DEST/assets/cursor/poses/$(basename "$f")" || sync_failed=1
+for sub in poses poses-arrow; do
+  mkdir -p "$DEST/assets/cursor/$sub"
+  for f in "$SRC/assets/cursor/$sub"/*; do
+    [ -f "$f" ] || continue
+    copy_if_changed "$f" "$DEST/assets/cursor/$sub/$(basename "$f")" || sync_failed=1
+  done
 done
 echo "③ 已同步到 $DEST"
 echo
