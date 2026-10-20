@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.66'
+const PLUGIN_VERSION = '2.18.67'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -3948,6 +3948,41 @@ function applyInner(ctx, config = {}) {
         if (others > 0) lines.push('  其它会话授权: ' + others + ' 个会话（互相隔离，不能借用）')
       }
       lines.push('  生效名单  : ' + (set.effectiveAllowlist().join(', ') || '（空）'))
+      lines.push('')
+
+      // ── 光标装饰状态 ──
+      //
+      // 复核报告的建议：彩蛋的运行状态只在真实 %TEMP%\dsc-cursor-fx\ 里，
+      // 而 diagnose 完全没有这一节 —— agent 想自查只能翻沙箱。
+      // 这里把它读出来：开关文件、运行状态、当前姿态、看门狗日志尾部。
+      lines.push('== 光标装饰 ==')
+      {
+        const fxDir = join(tmpdir(), 'dsc-cursor-fx')
+        const marker = join(tmpdir(), 'dsc-cursor-fx.enable')
+        lines.push('  开关文件  : ' + (existsSync(marker)
+          ? `有（内容 ${JSON.stringify(readFileSync(marker, 'utf8').trim())}）`
+          : '无（默认关闭）'))
+        const blanked = join(fxDir, 'fx.blanked')
+        if (existsSync(blanked)) {
+          let pid = ''
+          try { pid = readFileSync(blanked, 'utf8').trim() } catch { }
+          lines.push('  运行状态  : **正在接管光标**（装饰进程 pid=' + (pid || '?') + '）')
+        } else {
+          lines.push('  运行状态  : 未接管（停手 30 秒后会自动恢复，属正常）')
+        }
+        try {
+          const pose = readFileSync(join(fxDir, 'fx.pose'), 'utf8').trim()
+          lines.push('  当前姿态  : ' + pose)
+        } catch { lines.push('  当前姿态  : （无记录）') }
+        try {
+          const log = readFileSync(join(fxDir, 'fx.log'), 'utf8').trim().split('\n')
+          lines.push('  最近日志  : ' + (log[log.length - 1] ?? '（空）'))
+        } catch { lines.push('  最近日志  : （无）') }
+        try {
+          const glog = readFileSync(join(fxDir, 'guard.log'), 'utf8').trim().split('\n')
+          lines.push('  看门狗    : ' + (glog[glog.length - 1] ?? '（空）'))
+        } catch { lines.push('  看门狗    : （无日志，说明还没触发过恢复）') }
+      }
       lines.push('')
       // 判据要说清楚：`stage === 'probe-only'` 且没有 error 时，闸门是好的 ——
       // 只是闸门正拉着，probe 刻意不做写删（那样会覆盖用户写的原因）。

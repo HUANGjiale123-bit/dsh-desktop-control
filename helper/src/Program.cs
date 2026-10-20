@@ -1043,6 +1043,69 @@ namespace Dsc
         /// 所以"树读得残"该先排除"自己级别不够"，而不是又去怀疑 Chromium。
         /// 把级别放进返回值里，读残了才能一眼看出原因。
         /// </summary>
+        /* ── 自身文件的完整性标签 ──
+         *
+         * 复核报告（2.18.66）用三位置对照证明：同一份 dsc.exe 放在 DSH 工作区里，
+         * 自报就是 Low —— 因为 DSH 的 ACL 沙箱把工作区目录标成 Low，文件**继承**该标签，
+         * 而带 Low 标签的可执行文件启动后进程就是 Low。
+         *
+         * 所以只报"进程令牌"不够：用户看到 Low 会以为是插件坏了。把**文件标签**也报出来，
+         * 一眼就能看出"哦，我在工作区里跑的它"。
+         */
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern uint GetNamedSecurityInfoW(string name, int objectType, int securityInfo,
+            out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr sd);
+
+        private const int SE_FILE_OBJECT = 1;
+        private const int LABEL_SECURITY_INFORMATION = 0x10;
+        private const byte SYSTEM_MANDATORY_LABEL_ACE_TYPE = 0x11;
+
+        private static int FileIntegrityRid(string path)
+        {
+            IntPtr sd = IntPtr.Zero;
+            try
+            {
+                IntPtr owner, group, dacl, sacl;
+                uint rc = GetNamedSecurityInfoW(path, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION,
+                    out owner, out group, out dacl, out sacl, out sd);
+                if (rc != 0 || sacl == IntPtr.Zero) return -1;
+
+                // 遍历 SACL 里的 ACE，找 SYSTEM_MANDATORY_LABEL_ACE（type 0x11）
+                // ACL 结构头部 8 字节（AclRevision/Sbz1/AclSize/AceCount/Sbz2），ACE 从 8 开始
+                int offset = 8;
+                while (true)
+                {
+                    byte aceType = Marshal.ReadByte(sacl, offset);
+                    int aceSize = Marshal.ReadInt16(sacl, offset + 2);
+                    if (aceSize <= 0) break;
+                    if (aceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+                    {
+                        // ACE_HEADER(4) + Mask(4) 之后是 SID
+                        IntPtr sid = new IntPtr(sacl.ToInt64() + offset + 8);
+                        IntPtr str;
+                        if (!ConvertSidToStringSid(sid, out str)) return -1;
+                        try
+                        {
+                            string text = Marshal.PtrToStringUni(str);
+                            if (string.IsNullOrEmpty(text)) return -1;
+                            int dash = text.LastIndexOf('-');
+                            int v;
+                            if (dash >= 0 && int.TryParse(text.Substring(dash + 1), out v)) return v;
+                            return -1;
+                        }
+                        finally { LocalFree(str); }
+                    }
+                    offset += aceSize;
+                }
+                return -1;
+            }
+            catch { return -1; }
+            finally
+            {
+                if (sd != IntPtr.Zero) LocalFree(sd);
+            }
+        }
+
         private static int SelfIntegrityRid()
         {
             if (_selfIntegrityRid >= 0) return _selfIntegrityRid;
@@ -1093,6 +1156,10 @@ namespace Dsc
                 .Key("dpiInitOk").Bool(_dpiAwareCallOk)
                 .Key("integrity").Val(IntegrityName(SelfIntegrityRid()))
                 .Key("integrityRid").Num(SelfIntegrityRid())
+                // 自身文件/目录带的强制性标签：与令牌级别不同，能解释"为什么我在工作区里跑就是 Low"
+                .Key("exePath").Val(System.Reflection.Assembly.GetExecutingAssembly().Location)
+                .Key("exeFileIntegrity").Val(IntegrityName(FileIntegrityRid(System.Reflection.Assembly.GetExecutingAssembly().Location)))
+                .Key("exeFileIntegrityRid").Num(FileIntegrityRid(System.Reflection.Assembly.GetExecutingAssembly().Location))
                 .Key("halted").Bool(IsHalted())
                 .Key("gatePath").Val(GatePath())
                 .Key("clr").Val(Environment.Version.ToString())
