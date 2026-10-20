@@ -19,7 +19,8 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
+import { readdirSync } from 'node:fs'
 
 const results = []
 let pass = 0
@@ -127,6 +128,43 @@ try {
   }
 } finally {
   try { rmSync(tmp, { recursive: true, force: true }) } catch { /* 清理失败不影响结论 */ }
+}
+
+// ── 素材必须都在打包清单里 ──
+//
+// 十张光标姿势图曾经没写进 package.json 的 files —— 打包不报错，条目就是没有，
+// 装到别人机器上光标功能直接退化（只剩一张图）。这类"少文件但静默"的问题
+// 只能靠测试兜住。
+{
+  const pkg = JSON.parse(readFileSync(join(repo, 'plugin', 'package.json'), 'utf8'))
+  const files = pkg.files ?? []
+  const pluginRoot = join(repo, 'plugin')
+  const missing = []
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) { walk(p); continue }
+      const rel = p.slice(pluginRoot.length + 1).split(sep).join('/')
+      const covered = files.some((f) => {
+        const norm = String(f).split(sep).join('/').replace(/\/$/, '')
+        return rel === norm || rel.startsWith(norm + '/')
+      })
+      if (!covered) missing.push(rel)
+    }
+  }
+  walk(join(pluginRoot, 'assets'))
+
+  let total = 0
+  const count = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) count(join(d, e.name))
+      else total++
+    }
+  }
+  count(join(pluginRoot, 'assets'))
+
+  if (missing.length === 0) ok(`assets 下 ${total} 个文件都在 files 清单里`)
+  else bad(`${missing.length} 个素材不在打包清单：${missing.slice(0, 4).join(', ')}`)
 }
 
 console.log(results.join('\n'))
