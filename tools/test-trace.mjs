@@ -57,7 +57,7 @@ console.log('── 1. 基础设施在 ──')
   const src = readFileSync('plugin/index.mjs', 'utf8')
   for (const [needle, label] of [
     ['new AsyncLocalStorage()', '用 AsyncLocalStorage（不是全局变量）'],
-    ['als.run({ trace }', '每次调用在 als.run 里执行'],
+    ['als.run({ trace, agent', '每次调用在 als.run 里执行（并带上会话身份）'],
     ['function span(', '有 span 包装'],
     ['rememberTrace(trace)', 'trace 会被记下来'],
   ]) {

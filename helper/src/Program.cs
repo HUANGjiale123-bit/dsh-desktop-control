@@ -421,7 +421,9 @@ namespace Dsc
             // 兼容旧的分钟变量：设了就换算
             string old = Environment.GetEnvironmentVariable("DSC_HALT_TTL_MINUTES");
             if (!string.IsNullOrEmpty(old) && int.TryParse(old, out n) && n >= 0) return n * 60;
-            return 60;
+            // 默认锁存：急停不自动过期，必须显式 stop --clear / desktop_resume。
+            // 旧默认 60 秒与文档、与工具描述都相反（复核 R3）。
+            return 0;
         }
 
         /// <summary>
@@ -2038,21 +2040,52 @@ namespace Dsc
             if (target != IntPtr.Zero) Native.GetWindowThreadProcessId(target, out targetPid);
             string hitExe = BaseName(ProcessPath(hitPid));
 
-            // 同进程、但不是目标窗口本身 → 典型就是菜单/下拉/工具提示这类弹出窗口。
+            // 同进程、但不是目标窗口本身 → **可能是**菜单/下拉。
+            //
+            // 复核 R6 指出：只看"同 PID"放得太宽。一个进程可以有多份文档或多窗口，
+            // 目标主窗口被同进程的另一个普通窗口挡住时，也会被当成菜单放行 ——
+            // 那违背了"这次调用指定了目标窗口"的意图。
+            //
+            // 判据收紧为三条同时成立：
+            //   1. 同进程（授权本来就是按 exe 给的）
+            //   2. 落点窗口的 root owner 就是目标（菜单挂在它下面），或落在目标自己身上
+            //   3. 窗口类是弹出交互面（菜单 #32768 / 下拉 ComboLBox）
+            IntPtr rootOwner = root != IntPtr.Zero ? Native.GetAncestor(root, 3 /*GA_ROOTOWNER*/) : IntPtr.Zero;
+            IntPtr targetOwner = target != IntPtr.Zero ? Native.GetAncestor(target, 3) : IntPtr.Zero;
+            string rootClass = root != IntPtr.Zero ? WindowClass(root) : string.Empty;
+            bool isPopupInteraction =
+                !string.IsNullOrEmpty(rootClass) &&
+                (rootClass.StartsWith("#32768", StringComparison.OrdinalIgnoreCase) ||
+                 rootClass.Equals("ComboLBox", StringComparison.OrdinalIgnoreCase));
+            bool ownedByTarget = rootOwner == target || (targetOwner != IntPtr.Zero && rootOwner == targetOwner);
+
+            // WinForms 的 MenuStrip 下拉**不是**经典 #32768 菜单，类名是
+            // WindowsForms10.Window.*，所以不能只靠类名判断。owner 关系才是
+            // 更可靠的结构证据：真正的弹出菜单挂在目标窗口的 owner 链上，
+            // 而同进程的**另一个普通顶层窗口**与目标没有 owner 关系。
             bool sameProcessPopup = target != IntPtr.Zero && root != IntPtr.Zero
-                && root != target && targetPid != 0 && hitPid == targetPid;
+                && root != target && targetPid != 0 && hitPid == targetPid
+                && (ownedByTarget || isPopupInteraction) && ownedByTarget;
 
             if (target != IntPtr.Zero)
             {
                 RequireAllowedWindow(target, "click");
                 // 只有在"落点就是目标窗口"时才要求激活；同进程弹出窗口不激活。
-                if (!sameProcessPopup) RequireActivated(target, "click");
+                if (!sameProcessPopup)
+                {
+                    RequireActivated(target, "click");
+                    // 激活可能改变 z 序：重新采样，别用激活前的旧落点做判断。
+                    hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+                    root = hit == IntPtr.Zero ? IntPtr.Zero : Native.GetAncestor(hit, Native.GA_ROOT);
+                }
             }
 
             Console.Error.WriteLine("[click 诊断] 目标=(" + x + "," + y + ")" +
                 " 指定窗口=" + target +
                 " WindowFromPoint=" + hit + " root=" + root + " pid=" + hitPid +
                 " exe=\"" + hitExe + "\"" +
+                " class=\"" + (root != IntPtr.Zero ? WindowClass(root) : "") + "\"" +
+                " rootOwner=" + (root != IntPtr.Zero ? Native.GetAncestor(root, 3).ToInt64() : 0) +
                 " 前台=" + Native.GetForegroundWindow() +
                 " 白名单=[" + string.Join(",", Allowlist()) + "]");
 
@@ -2077,6 +2110,8 @@ namespace Dsc
             if (target == IntPtr.Zero) RequireActivated(root, "click");
 
             MoveCursorAbsolute(x, y);
+            // 最后一步再查一次闸门：ESC 可能在等锁、激活或计算坐标期间被按下。
+            RequireNotHalted("click");
             SendMouseButton(clickButton, clickCount);
 
             // 回读光标位置：调用成功不代表点在了期望处，读回来才是证据。

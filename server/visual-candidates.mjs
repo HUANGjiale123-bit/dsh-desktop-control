@@ -262,6 +262,24 @@ function wordsBounds(words) {
  *   · `role` / `actionability` 恒为 "unknown" —— OCR 不知道那是不是可点的；
  *   · 分数原样放在 `scores.textRecognition`，**不改名成置信度**。
  */
+/**
+ * 把 OCR 行（含词框）从局部坐标平移到原图坐标。
+ *
+ * 这是裁剪 OCR 的**唯一边界**：行框和词框必须一起平移。
+ * 复核 R4 的反例：裁图原点 (1000,200)、词框 (100,100,60,20)，
+ * 正确点击中心是 (1130,310)；只平移行框时实际点了 (130,110)。
+ */
+export function shiftOcrRows(rows, dx, dy) {
+  if (!dx && !dy) return rows ?? []
+  return (rows ?? []).map((row) => ({
+    ...row,
+    quad: Array.isArray(row.quad) ? row.quad.map(([x, y]) => [x + dx, y + dy]) : row.quad,
+    words: Array.isArray(row.words)
+      ? row.words.map((w) => ({ ...w, x: Number(w.x) + dx, y: Number(w.y) + dy }))
+      : row.words,
+  }))
+}
+
 export function candidatesFromOcr(rows, { shotId, viewId, ownerId, query }) {
   const out = []
   for (const row of rows ?? []) {

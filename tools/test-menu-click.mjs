@@ -139,6 +139,16 @@ try {
       }
 
       console.log()
+      console.log('── 3b. 同进程的**普通窗口**：必须拒绝（复核 R6）──')
+      if (opened.otherX) {
+        const neg = run(['click', String(opened.otherX), String(opened.otherY), '--hwnd', String(opened.hwnd)])
+        if (!neg.ok) ok(`同进程普通窗口被拒绝（${String(neg.error ?? '').slice(0, 20)}）`)
+        else bad('同进程的普通窗口被当成菜单放行了 —— R6 未修复')
+      } else {
+        skip('夹具没提供第二个窗口坐标')
+      }
+
+      console.log()
       console.log('── 4. 菜单项真的执行了吗 ──')
       const clicked = await waitFor(() => existsSync(LOG) && /clicked/.test(readFileSync(LOG, 'utf8')), 4000)
       if (clicked) ok('菜单项的 Click 事件执行了（日志有记录）')

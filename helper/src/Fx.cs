@@ -646,6 +646,8 @@ namespace DscFx
                     // 任何退出路径都要恢复：正常退出、异常、被 fx.stop 叫停。
                     if (blanked) RestoreSystemCursors();
                     try { System.IO.File.Delete(blankedFile); } catch { }
+                    // 清掉停止标记：否则下一次启动的实例一进循环就看到它，立刻退出。
+                    try { System.IO.File.Delete(stopFile); } catch { }
                     DestroyWindow(hwnd);
                     foreach (Pose pose in poses)
                     {

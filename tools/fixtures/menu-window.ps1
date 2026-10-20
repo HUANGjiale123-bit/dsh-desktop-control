@@ -61,6 +61,22 @@ $label.Left = 10
 $label.Top = 40
 $form.Controls.Add($label)
 
+# Second ordinary window, same process, NOT owned by main and not a menu:
+# used by the test to prove that "same process" alone must not be enough.
+$other = New-Object System.Windows.Forms.Form
+$other.Text = "Other Window"
+$other.Width = 300
+$other.Height = 200
+$other.StartPosition = 'Manual'
+$other.Left = 800
+$other.Top = 620
+$otherLabel = New-Object System.Windows.Forms.Label
+$otherLabel.Text = "not a menu"
+$otherLabel.AutoSize = $true
+$otherLabel.Left = 20
+$otherLabel.Top = 20
+$other.Controls.Add($otherLabel)
+
 # Clicking the item writes a line: that is the proof the menu item executed.
 $item.add_Click({
   Add-Content -Path $LogPath -Value ("clicked " + (Get-Date -Format "HH:mm:ss.fff"))
@@ -74,10 +90,12 @@ $edit.add_DropDownOpened({
     $dd = $edit.DropDown
     $itemBounds = $item.Bounds
     $itemPt = $dd.PointToScreen((New-Object System.Drawing.Point(($itemBounds.Left + $itemBounds.Width / 2), ($itemBounds.Top + $itemBounds.Height / 2))))
+    $oc2 = $other.PointToScreen((New-Object System.Drawing.Point(150, 100)))
     $obj = @{
       hwnd = [int64]$form.Handle
       barX = [int]$barPt.X; barY = [int]$barPt.Y
       itemX = [int]$itemPt.X; itemY = [int]$itemPt.Y
+      otherHwnd = [int64]$other.Handle; otherX = [int]$oc2.X; otherY = [int]$oc2.Y
     }
     ($obj | ConvertTo-Json -Compress) | Set-Content -Path $CoordPath -Encoding UTF8
   } catch { }
@@ -90,7 +108,12 @@ $form.add_Shown({
   try {
     $bar = $edit.Bounds
     $barPt = $form.PointToScreen((New-Object System.Drawing.Point(($bar.Left + $bar.Width / 2), ($bar.Top + $bar.Height / 2))))
-    $obj = @{ hwnd = [int64]$form.Handle; barX = [int]$barPt.X; barY = [int]$barPt.Y }
+    $other.Show()
+    $oc = $other.PointToScreen((New-Object System.Drawing.Point(150, 100)))
+    $obj = @{
+      hwnd = [int64]$form.Handle; barX = [int]$barPt.X; barY = [int]$barPt.Y
+      otherHwnd = [int64]$other.Handle; otherX = [int]$oc.X; otherY = [int]$oc.Y
+    }
     ($obj | ConvertTo-Json -Compress) | Set-Content -Path $CoordPath -Encoding UTF8
   } catch { }
 

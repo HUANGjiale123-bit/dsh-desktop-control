@@ -37,12 +37,15 @@ const FAST_EXCLUDE = new RegExp('^test-(' + [
   'menu-click',      // 要真 GUI 菜单 + 焦点，批量跑时偶发不稳
   'cursor-orphan',   // 要等 25 秒看进程自己退出，且会真的接管光标
   'cursor-idle-exit',// 同上：验证"插件活着但不活动时也会退"，约 45 秒
+  'clean-profile',   // 真跑 pnpm add/remove，约 10 秒
 ].join('|') + ')')
 
 const files = readdirSync('tools')
   .filter((f) => /^test-.*\.mjs$/.test(f))
   .filter((f) => !filter || f.includes(filter))
   .filter((f) => !(fast && FAST_EXCLUDE.test(f)))
+  // 手动测试：需要一块"没有其它置顶窗口挡着"的桌面，默认不跑
+  .filter((f) => !(new RegExp('^test-(menu-click)\.mjs$').test(f) && process.env.DSC_MANUAL !== '1'))
   .sort()
 
 if (fast) {

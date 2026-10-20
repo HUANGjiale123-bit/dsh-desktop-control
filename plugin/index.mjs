@@ -38,7 +38,7 @@ import { createHash, randomUUID } from 'node:crypto'
 // 视觉兜底：候选层与 OCR 后端。两者都**不发输入、不碰桌面**，
 // 真正的点击仍然走下面 set.tools.click 那条已经验证过的链。
 import {
-  cropFromRegion, viewPointToWindow, candidatesFromOcr, createCandidateStore,
+  cropFromRegion, viewPointToWindow, candidatesFromOcr, createCandidateStore, shiftOcrRows,
   labelMatches, pngSize, candidatePointToWindow, quadBounds,
 } from './visual-candidates.mjs'
 import { probeOcr, runOcr, linesToRows } from './ocr-worker.mjs'
@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.70'
+const PLUGIN_VERSION = '2.18.71'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -240,7 +240,9 @@ function applyInner(ctx, config = {}) {
       throw new Error('approval 服务不可用')
     }
 
-    const agent = agents?.currentInitiator?.()
+    // 优先用 execute 入口解析、并随 ALS 传下来的身份：
+    // 授权与撤销必须使用**同一个**会话标识，否则撤销清不到审批记的那份（复核 R1）。
+    const agent = (als.getStore() && als.getStore().agent) || agents?.currentInitiator?.()
     if (!agent) {
       throw new Error('当前没有会话上下文，无法发起授权')
     }
@@ -778,19 +780,27 @@ function applyInner(ctx, config = {}) {
         args.push(`${dest}@${anchor[0]},${anchor[1]}`)
       }
 
+      // 启动失败（文件被移走/拒绝执行）会走异步 'error'；旧代码只监听 exit，
+      // 于是未处理事件直接把宿主带走（复核 R2）。这里全部走托管 spawn。
+      if (this.startFailAt && Date.now() - this.startFailAt < 60000) {
+        // 失败后冷却 60 秒：否则每次工具调用都会重拉一个起不来的进程。
+        return
+      }
       try {
-        this.child = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true })
+        this.child = spawnManaged('光标装饰', exe, args,
+          { detached: true, stdio: 'ignore', windowsHide: true },
+          (why) => { this.child = null; if (why === 'error') this.startFailAt = Date.now() })
+        if (!this.child) return
         this.child.unref()
-        // 进程一退出就把句柄清掉，下一次调用能重新拉起。
-        this.child.on('exit', () => { this.child = null })
         // 看门狗：装饰进程被杀/崩溃时把系统光标恢复回来。
         // 它必须**独立**于装饰进程存活，所以是另一个进程。
         if (!this.guard || this.guard.exitCode !== null) {
           const guardExe = join(dir, 'dsc-guard.exe')
           if (existsSync(guardExe)) {
-            this.guard = spawn(guardExe, ['--watch', dir], { detached: true, stdio: 'ignore', windowsHide: true })
-            this.guard.unref()
-            this.guard.on('exit', () => { this.guard = null })
+            this.guard = spawnManaged('看门狗', guardExe, ['--watch', dir],
+              { detached: true, stdio: 'ignore', windowsHide: true },
+              (why) => { this.guard = null; if (why === 'error') this.startFailAt = Date.now() })
+            this.guard?.unref()
           }
         }
         ctx.logger?.info?.(`[desktop-control] 光标装饰已启动（${mode} 模式，${files.length} 张素材）`)
@@ -862,16 +872,53 @@ function applyInner(ctx, config = {}) {
     },
 
     /** 收工：先叫它自己退（它会恢复光标），再兜底调一次 cursor_restore。 */
-    stop() {
+    /**
+     * 收尾：**先让装饰自己恢复光标，确认之后再杀进程**。
+     *
+     * 复核 R5：旧实现是"写 stop → 立刻 kill fx → 立刻 kill guard → taskkill /IM"。
+     * Windows 上 child.kill() 是强制结束，不是优雅退出，fx 的 finally 可能根本没跑，
+     * 恢复就没有发生；而且 taskkill /IM 会杀掉机器上**所有**实例（包括用户另一个 profile 的）。
+     *
+     * 现在的顺序：
+     *   1. 停心跳、写 stop（fx 读到后会恢复并自己退出）
+     *   2. 有界等待 fx.blanked 消失 —— 这是"光标已恢复"的可观察证据
+     *   3. 没在时限内恢复 → 用 helper 的 cursor_restore 兜底，并**再确认一次**
+     *   4. 只 kill 自己起的两个进程（按句柄），看门狗最后走
+     *   5. 清掉 stop 标记，避免下一次启动被旧标记立刻叫停
+     */
+    async stop() {
       if (!this.enabled) return
+      const blanked = this.dir ? join(this.dir, 'fx.blanked') : null
+      const stopFile = this.dir ? join(this.dir, 'fx.stop') : null
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
       try { if (this.dir) rmSync(join(this.dir, 'fx.heartbeat'), { force: true }) } catch { }
-      try { if (this.dir) writeFileSync(join(this.dir, 'fx.stop'), '1') } catch { }
+      try { if (stopFile) writeFileSync(stopFile, '1') } catch { }
+
+      let restored = !blanked || !existsSync(blanked)
+      const deadline = Date.now() + 5000
+      while (!restored && Date.now() < deadline) {
+        await wait(100)
+        restored = !existsSync(blanked)
+      }
+      if (!restored && blanked) {
+        // 兜底：单独恢复，然后再确认一次（不假设它成功）
+        try { await spawnAsync(helperPath, ['cursor_restore']) } catch { }
+        await wait(200)
+        restored = !existsSync(blanked)
+      }
+
       try { if (this.child) this.child.kill() } catch { }
+      await wait(200)
       try { if (this.guard) this.guard.kill() } catch { }
-      // 兜底：句柄可能已经失效（HMR / 重装），按进程名再收一次。
-      // 顺序无所谓——两个进程现在都会自己退出，不再互相拉起。
-      try { spawn('taskkill', ['/IM', 'dsc-fx.exe', '/F'], { windowsHide: true }) } catch { }
-      try { spawn('taskkill', ['/IM', 'dsc-guard.exe', '/F'], { windowsHide: true }) } catch { }
+      try { if (stopFile) rmSync(stopFile, { force: true }) } catch { }
+
+      if (!restored) {
+        ctx.logger?.warn?.(
+          '[desktop-control] 光标恢复**未确认**：fx.blanked 仍在。' +
+            '若系统光标仍是透明的，请运行 bin\dsc.exe cursor_restore 或重启 DSH。',
+        )
+      }
     },
   }
 
@@ -891,9 +938,12 @@ function applyInner(ctx, config = {}) {
     // 必须按**会话**分授权：我们在弹窗里承诺了"仅对当前会话有效"。
     getSessionKey: () => {
       const st = als.getStore()
-      const a = st && st.agent
+      if (!st) return null
+      // execute 入口解析出的会话键最可信，直接用它。
+      if (st.sessionKey) return String(st.sessionKey)
+      // 兼容：只有 agent 对象时再推导一次。
+      const a = st.agent
       if (!a) return null
-      // agent.id 与 agent.session.id 在宿主里是相等的；用 session.id 更直观
       const sid = (a.session && a.session.id) || a.id
       return sid ? String(sid) : null
     },
@@ -1249,6 +1299,45 @@ function applyInner(ctx, config = {}) {
     'desktop_release',
   ])
 
+  // 单会话模式：测试/独立运行用。**默认关闭**——DSH 里拿不到会话身份就该拒绝，
+  // 否则所有会话会共用一张授权表（复核 2.18.70 的 R1）。
+  const allowSingleSession = config.allowSingleSession === true
+
+  /**
+   * 托管一个子进程：**必须**监听 error。
+   *
+   * Node 的 spawn 在启动失败（ENOENT/EACCES/文件被移走）时不是抛异常，而是
+   * 异步发一个 'error' 事件；没有监听者就是未处理事件 —— 整个宿主进程退出。
+   * 复核 R2 就是这么复现的：fx-error / guard-error 都让隔离宿主退出码 1。
+   *
+   * 这里统一：立即监听 error/exit，只结算一次，清掉引用，记一条受控警告。
+   * 返回 null 表示**同步**启动失败。
+   */
+  function spawnManaged(label, cmd, args, opts, onSettle) {
+    let child = null
+    let settled = false
+    const settle = (why, detail) => {
+      if (settled) return
+      settled = true
+      if (why === 'error') {
+        ctx.logger?.warn?.(
+          `[desktop-control] ${label}启动失败：${detail ?? '未知原因'} —— ` +
+            `已关闭本次${label}，核心工具不受影响`,
+        )
+      }
+      try { onSettle?.(why) } catch { }
+    }
+    try {
+      child = spawn(cmd, args, opts)
+    } catch (e) {
+      settle('error', e?.message ?? String(e))
+      return null
+    }
+    child.once('error', (e) => settle('error', e?.message ?? String(e)))
+    child.once('exit', () => settle('exit'))
+    return child
+  }
+
   const register = (definition) => {
     registered.push(definition.name)
     const wrapped = Object.assign({}, definition, {
@@ -1291,7 +1380,28 @@ function applyInner(ctx, config = {}) {
           if (MUTATING_TOOLS.has(definition.name)) ensureIndicator()
           else touchActivity()
 
-          return await als.run({ trace }, async () => {
+          // ── 会话身份必须在**这一层**解析 ──
+        //
+        // 复核（2.18.70）指出：这里原先只塞了 trace，getSessionKey 读到的 agent 恒为空，
+        // 于是所有会话都落进 '__default__' 授权表 —— A 授权后 B 不用问、A 结束后也不失效。
+        // 身份来自宿主的 execute 上下文，不是模型能伪造的参数。
+        const hostAgent = exec?.agent ?? (() => {
+          try { return ctx.get('agents')?.currentInitiator?.() ?? null } catch { return null }
+        })()
+        const hostSessionKey = (() => {
+          if (!hostAgent) return null
+          const sid = (hostAgent.session && hostAgent.session.id) || hostAgent.id
+          return sid ? String(sid) : null
+        })()
+        if (!hostSessionKey && !allowSingleSession) {
+          throw new Error(
+            '失败：Refused — 无法确定当前会话身份，已拒绝这次调用。' +
+              '  [retry=no] 这通常意味着宿主没有把会话信息传给工具；' +
+              '请重启 DSH 后重试，或由管理员显式开启单会话模式（config.allowSingleSession）。',
+          )
+        }
+
+        return await als.run({ trace, agent: hostAgent, sessionKey: hostSessionKey }, async () => {
             try {
               // ── 先取执行权，再碰桌面 ──
               let lease = { ok: true, waitedMs: 0 }
@@ -2020,9 +2130,15 @@ function applyInner(ctx, config = {}) {
       // 裁图坐标 → 原图坐标（全图时偏移是 0，走同一条代码）
       const dx = ocrPath === rec.filepath ? 0 : crop.x
       const dy = ocrPath === rec.filepath ? 0 : crop.y
-      const rows = linesToRows(ocr.lines).map((row) => (dx === 0 && dy === 0
-        ? row
-        : { ...row, quad: row.quad.map(([x, y]) => [x + dx, y + dy]) }))
+      // ── 裁剪偏移必须同时作用在**行框和词框**上 ──
+      //
+      // 复核 R4：原先只平移 row.quad，没平移 row.words。有 query 时候选优先用
+      // **命中词的框**，于是局部坐标被当成原图坐标直接传给输入层：
+      // 裁图原点 (1000,200)、词框 (100,100) 应点 (1130,310)，实际点 (130,110)。
+      //
+      // 这里是"OCR 坐标进入候选库"的唯一边界，所以两处一起平移；
+      // 以后加缩放也应在这一个地方做变换，不要在多个分支各维护一套。
+      const rows = shiftOcrRows(linesToRows(ocr.lines), dx, dy)
       const inCrop = rows.filter((row) => intersectsCrop(row.quad, crop))
       const matched = inCrop.filter((row) => labelMatches(row.label, args.query))
       const viewId = randomUUID()
@@ -3164,7 +3280,9 @@ function applyInner(ctx, config = {}) {
       const n = Number(mv)
       if (Number.isFinite(n) && n >= 0) return n * 60
     }
-    return 60
+    // 默认 **锁存**：急停只能由用户显式恢复（desktop_resume 或 stop --clear）。
+    // 旧默认 60 秒与文档承诺相反：文件还在，原生端却已经当作解除（复核 R3）。
+    return 0
   }
 
   /**
@@ -3206,7 +3324,8 @@ function applyInner(ctx, config = {}) {
       if (!existsSync(gp)) return 0
       return ttl * 1000 - (Date.now() - statSync(gp).mtimeMs)
     } catch {
-      return 0
+      // 读失败按"永不自动恢复"处理，与 isHalted 的方向一致
+      return Infinity
     }
   }
 
@@ -4081,9 +4200,10 @@ function applyInner(ctx, config = {}) {
   )
 
   // 插件卸载时收掉所有浮层，不留孤儿窗口
-  ctx.on?.('dispose', () => {
+  ctx.on?.('dispose', async () => {
     // 光标必须恢复：这是唯一会影响用户整台机器的状态。
-    cursorFx.stop()
+    // stop() 现在会**等恢复确认**（最多 5 秒），所以 dispose 必须等它。
+    try { await cursorFx.stop() } catch { }
     for (const child of liveOverlays.values()) {
       try { child.kill() } catch { }
     }
