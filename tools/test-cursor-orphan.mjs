@@ -29,6 +29,8 @@ const HELPER = tempHelper()
 assertNotLow(HELPER)
 
 const DIR = join(tmpdir(), 'dsc-orphan-test')
+const PS_ABS = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+const NEEDLE = DIR
 const FX_SRC = join(process.cwd(), 'helper', 'bin', 'dsc-fx.exe')
 const GUARD_SRC = join(process.cwd(), 'helper', 'bin', 'dsc-guard.exe')
 const ASSET = join(process.cwd(), 'plugin', 'assets', 'cursor', 'fish-arrow.png')
@@ -36,18 +38,22 @@ const MARK = join(DIR, 'fx.blanked')
 const BEAT = join(DIR, 'fx.heartbeat')
 
 const restore = () => { try { spawnSync(HELPER, ['cursor_restore'], { windowsHide: true }) } catch { } }
-const killAll = () => {
-  spawnSync('taskkill', ['/IM', 'dsc-fx.exe', '/F'], { windowsHide: true })
-  spawnSync('taskkill', ['/IM', 'dsc-guard.exe', '/F'], { windowsHide: true })
+// 只杀命令行里带本测试目录的进程：机器上真装着的插件也有同名进程，不能误伤。
+const killOurs = () => {
+  spawnSync(PS_ABS, ['-NoProfile', '-Command',
+    `foreach ($n in @('dsc-fx.exe','dsc-guard.exe')) { Get-CimInstance Win32_Process -Filter "Name='$n'" | Where-Object { $_.CommandLine -like '*${NEEDLE}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }`],
+  { windowsHide: true, timeout: 15000 })
 }
-const alive = (name) => {
-  const r = spawnSync('tasklist', ['/FI', `IMAGENAME eq ${name}`], { encoding: 'utf8', windowsHide: true })
-  return String(r.stdout).includes(name)
+const oursAlive = (name) => {
+  const r = spawnSync(PS_ABS, ['-NoProfile', '-Command',
+    `(Get-CimInstance Win32_Process -Filter "Name='${name}'" | Where-Object { $_.CommandLine -like '*${NEEDLE}*' } | Measure-Object).Count`],
+  { encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  return Number(String(r.stdout).trim()) > 0
 }
 
 try {
   mkdirSync(DIR, { recursive: true })
-  killAll()
+  killOurs()
   restore()
   for (const f of [MARK, BEAT, join(DIR, 'fx.active'), join(DIR, 'fx.log')]) {
     try { rmSync(f, { force: true }) } catch { }
@@ -69,7 +75,7 @@ try {
 
   const guard = spawn(join(DIR, 'dsc-guard.exe'), ['--watch', DIR], { stdio: 'ignore', windowsHide: true })
   await sleep(1000)
-  if (alive('dsc-fx.exe') && alive('dsc-guard.exe')) ok('两个进程都在跑')
+  if (oursAlive('dsc-fx.exe') && oursAlive('dsc-guard.exe')) ok('两个进程都在跑')
   else bad('进程没起来')
 
   console.log()
@@ -82,8 +88,8 @@ try {
   while (Date.now() - t0 < 70000) {
     await sleep(1000)
     const since = Date.now() - t0
-    if (fxGone < 0 && !alive('dsc-fx.exe')) fxGone = since
-    if (guardGone < 0 && !alive('dsc-guard.exe')) guardGone = since
+    if (fxGone < 0 && !oursAlive('dsc-fx.exe')) fxGone = since
+    if (guardGone < 0 && !oursAlive('dsc-guard.exe')) guardGone = since
     if (fxGone > 0 && guardGone > 0) break
   }
 
@@ -98,7 +104,7 @@ try {
   if (!existsSync(MARK)) ok('fx.blanked 已清除（光标已恢复）')
   else bad('marker 还在，光标可能仍是透明的')
 } finally {
-  killAll()
+  killOurs()
   restore()
   rmSync(DIR, { recursive: true, force: true })
 }

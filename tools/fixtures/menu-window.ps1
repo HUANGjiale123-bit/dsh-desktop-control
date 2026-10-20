@@ -40,6 +40,9 @@ $form.Height = 260
 $form.StartPosition = 'Manual'
 $form.Left = 400
 $form.Top = 300
+# TopMost：测试要验的是"同进程弹出窗口的落点判定"，不是抢前台。
+# 放在普通层时会被 DSH 主窗口盖住，第一次点击落在 DSH 身上（实测）。
+$form.TopMost = $true
 
 $menu = New-Object System.Windows.Forms.MenuStrip
 $edit = New-Object System.Windows.Forms.ToolStripMenuItem("Edit")
@@ -90,6 +93,8 @@ $form.add_Shown({
     $obj = @{ hwnd = [int64]$form.Handle; barX = [int]$barPt.X; barY = [int]$barPt.Y }
     ($obj | ConvertTo-Json -Compress) | Set-Content -Path $CoordPath -Encoding UTF8
   } catch { }
+
+  $script:menuTimer.Start()
 })
 
 [void]$form.ShowDialog()

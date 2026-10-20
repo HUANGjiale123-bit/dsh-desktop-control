@@ -70,7 +70,29 @@ try {
   { windowsHide: true })
 } catch { }
 
+// ── 让夹具能到前台 ──
+//
+// DSH 主窗口通常盖住整屏，而且它自己也是置顶的；夹具在它下面，点菜单栏会落在 DSH 上。
+// 测试期间把 DSH 最小化，结束再恢复——这样菜单栏可点，测完界面照原样。
+const hideDsh = () => {
+  try {
+    spawnSync(PS, ['-NoProfile', '-Command',
+      `$p = Get-Process | Where-Object { $_.MainWindowTitle -like '*DeepSeek Harness*' } | Select-Object -First 1
+       if ($p) { [void](Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'); [W.U]::ShowWindow($p.MainWindowHandle, 6) }`],
+    { windowsHide: true, timeout: 15000 })
+  } catch { }
+}
+const showDsh = () => {
+  try {
+    spawnSync(PS, ['-NoProfile', '-Command',
+      `$p = Get-Process | Where-Object { $_.MainWindowTitle -like '*DeepSeek Harness*' } | Select-Object -First 1
+       if ($p) { [void](Add-Type -Namespace W -Name U -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'); [W.U]::ShowWindow($p.MainWindowHandle, 9) }`],
+    { windowsHide: true, timeout: 15000 })
+  } catch { }
+}
+
 let child = null
+hideDsh()
 try {
   console.log()
   console.log('── 1. 起夹具窗口 ──')
@@ -90,21 +112,15 @@ try {
 
     console.log()
     console.log('── 2. 点菜单栏打开菜单 ──')
-    let opened = null
-    for (let attempt = 1; attempt <= 2 && !opened; attempt++) {
-      // 第二次尝试前先按 Esc：第一次可能已经把菜单打开了又关掉，
-      // 直接再点会变成 toggle，越点越乱。
-      if (attempt === 2) run(['press_key', String(boot.hwnd), 'Escape'])
+    // DSH 已在测试开始时最小化，夹具此时能到前台，菜单栏可点。
+    const cr = run(['click', String(boot.barX), String(boot.barY), '--hwnd', String(boot.hwnd)])
+    if (!cr.ok) bad(`开菜单的点击失败：${String(cr.message ?? cr.raw ?? '').slice(0, 140)}`)
+    else ok('菜单栏点击被接受')
 
-      const cr = run(['click', String(boot.barX), String(boot.barY), '--hwnd', String(boot.hwnd)])
-      if (!cr.ok) bad(`开菜单的点击失败：${String(cr.message ?? cr.raw ?? '').slice(0, 140)}`)
-      else if (attempt === 1) ok('菜单栏点击被接受')
-
-      opened = await waitFor(() => {
-        const c = readCoords()
-        return c && c.itemX ? c : null
-      }, 6000)
-    }
+    const opened = await waitFor(() => {
+      const c = readCoords()
+      return c && c.itemX ? c : null
+    }, 8000)
     if (!opened) {
       skip('菜单没打开（没有 itemX），跳过后续')
     } else {
@@ -131,6 +147,7 @@ try {
   }
 } finally {
   try { if (child) child.kill() } catch { }
+  showDsh()
   try {
     spawnSync(PS, ['-NoProfile', '-Command',
       'Get-Process powershell | Where-Object { $_.MainWindowTitle -eq "Menu Fixture" } | Stop-Process -Force'],
