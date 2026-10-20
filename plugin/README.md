@@ -35,13 +35,17 @@
 工具报 `unknown tool`）。更糟的是，那个数组是手写 JSON——**写坏一个逗号，整个 DSH
 起不来**。
 
-如果你必须手改，按这个顺序，**不要跳步**：
+如果你必须手动装，**顺序是三步，少一步都不行**：
 
-1. 备份：`copy package.json package.json.bak`
-2. 只往 `dsh.profile.bundles` 加一项 `"dsh-desktop-control"`（注意最后一项后面不能有逗号）
-3. 立刻校验：`node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('OK')"`
-4. 没打印 `OK` 就还原：`copy package.json.bak package.json`
-5. 重启 DSH
+1. 装进 profile：`cd <profile>; pnpm add file:<tgz 绝对路径>`
+2. 备份 `package.json`（`copy package.json package.json.bak`），往 `dsh.profile.bundles`
+   里加 `"dsh-desktop-control"`（注意最后一项后面不能有逗号），然后立刻校验：
+   `node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('OK')"`；
+   没打印 `OK` 就 `copy package.json.bak package.json`
+3. 重启 DSH，跑 `desktop_diagnose`：看到 `插件 2.18.xx` 才算成功
+
+**不要**手改 `cordis.yml` / `cordis.patch.yml`——本包自带 patch，手写 YAML 条目
+容易写错字段（早期说明就错在让人写 `package:` 那一项）。
 
 **弄坏了怎么救**：关掉 DSH → 还原 `package.json.bak`（或删掉多加的那一行并检查逗号）
 → 校验 JSON → 重启。实在不行，把 profile 目录**改名**（不要删）成 `<名字>.broken`，
