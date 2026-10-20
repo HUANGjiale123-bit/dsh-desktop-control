@@ -130,6 +130,20 @@ try {
   try { rmSync(tmp, { recursive: true, force: true }) } catch { /* 清理失败不影响结论 */ }
 }
 
+// ── 发布用的 exe 必须在 git 里 ──
+//
+// .gitignore 里有一条 `*.exe`，一度把 plugin/bin 下的四个可执行文件也一起忽略了。
+// 后果不是"报错"，而是**别人 clone 下来打包，包里的 bin/ 是空的**，装完所有工具
+// 都报 HelperMissing。实测过：fresh clone → pnpm pack → bin/ 条目数 0。
+{
+  const tracked = execFileSync('git', ['ls-files', 'plugin/bin'], { cwd: repo, encoding: 'utf8' })
+    .split('\n').filter(Boolean)
+  const needed = ['dsc.exe', 'dsc-esc.exe', 'dsc-fx.exe', 'dsc-guard.exe']
+  const missing = needed.filter((n) => !tracked.some((t) => t.endsWith('/' + n) || t === 'plugin/bin/' + n))
+  if (missing.length === 0) ok(`发布用的 ${needed.length} 个 exe 都在 git 里`)
+  else bad(`这些 exe 没被 git 跟踪（clone 后打不出可用的包）：${missing.join(', ')}`)
+}
+
 // ── 素材必须都在打包清单里 ──
 //
 // 十张光标姿势图曾经没写进 package.json 的 files —— 打包不报错，条目就是没有，

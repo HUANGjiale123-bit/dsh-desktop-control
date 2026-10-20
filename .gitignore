@@ -4,6 +4,10 @@ helper/obj/
 *.exe
 *.pdb
 *.dll
+# 但 plugin/bin 下的是**发布产物**：别人 clone 下来打包必须带着，
+# 否则包里的 bin/ 是空的，装完所有工具报 HelperMissing（实测过）。
+!plugin/bin/
+!plugin/bin/*.exe
 
 # Node
 node_modules/
@@ -36,3 +40,6 @@ tools/diag/bin/
 # 临时探测目录（本地脚本、解包验证）
 /.tmp/
 __pycache__/
+
+# 本地 profile 备份（含本机路径，不入库）
+backup/
