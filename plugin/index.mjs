@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.58'
+const PLUGIN_VERSION = '2.18.59'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -800,11 +800,15 @@ function applyInner(ctx, config = {}) {
         //                                      p05 加载圈 / p06 四向 / p08 双向
         //   poses（无箭头，系统光标旁边的装饰）：p02 举手 / p06 托腮 / p09 使劲拉
         const arrowSet = existsSync(join(pluginDir, 'assets', 'cursor', 'poses-arrow'))
+        // 光标底下是什么我们看不到，但"调了哪个工具"说明了意图：
+        //   输入类 → I 形；按名字点控件 → 手形；纯坐标点 → 不知道是什么，不敢猜；
+        //   拖拽 → 四向箭头；其余 → 标准箭头。
+        // 之前"只要 click 就给手形"，于是点在正文文字上也变手形（用户当场指出）。
         const pose = arrowSet
-          ? (/drag|wheel/.test(t) ? 5        // p06 四向箭头（移动/拖动）
-            : /click/.test(t) ? 2            // p03 手形
-              : /type|press_key|set_value/.test(t) ? 3   // p04 I 形
-                : 0)                          // p01 标准箭头
+          ? (/type|press_key|set_value/.test(t) ? 3        // p04 I 形
+            : /click_element/.test(t) ? 2                  // p03 手形（命名控件≈按钮）
+              : /drag|wheel/.test(t) ? 5                   // p06 四向箭头
+                : 0)                                        // p01 标准箭头（含坐标点击）
           : (/drag|wheel/.test(t) ? 8
             : /click/.test(t) ? 1
               : /type|press_key|set_value/.test(t) ? 2
