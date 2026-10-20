@@ -124,6 +124,11 @@ echo "编译 dsc-guard.exe （光标看门狗：装饰进程死了就恢复系�
 echo "完成: bin/dsc-guard.exe ($(stat -c%s bin/dsc-guard.exe) bytes)"
 
 echo
+echo "编译 dsc-cursor-probe.exe （B1 可行性探针：隐形记号能否读回）..."
+( cd src && "$CSC" -nologo -target:exe -platform:x64 -out:../bin/dsc-cursor-probe.exe -win32manifest:app.manifest -r:System.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll CursorProbe.cs )
+echo "完成: bin/dsc-cursor-probe.exe ($(stat -c%s bin/dsc-cursor-probe.exe) bytes)"
+
+echo
 
 echo
 echo "自检:"
