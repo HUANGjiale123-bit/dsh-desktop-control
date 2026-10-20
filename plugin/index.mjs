@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.57'
+const PLUGIN_VERSION = '2.18.58'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -672,6 +672,7 @@ function applyInner(ctx, config = {}) {
     dir: null,
     child: null,
     lastActionAt: 0,
+    poseTimer: null,
     asset: null,
     anchor: null,
 
@@ -811,8 +812,16 @@ function applyInner(ctx, config = {}) {
         if (isAction) {
           this.lastActionAt = Date.now()
           writeFileSync(join(this.dir, 'fx.pose'), String(pose))
-        } else if (Date.now() - this.lastActionAt > 1500) {
-          writeFileSync(join(this.dir, 'fx.pose'), arrowSet ? '0' : '5')
+          // 动作结束后 1.5 秒自己回落到空闲形状。
+          //
+          // 之前是"下一次调用时判断有没有超过 1.5 秒"，但动作本身的耗时（拖拽
+          // 12 步接近 1 秒）加上随后的自动截图，会让那个判断立刻成立 ——
+          // 拖拽刚显示成四向箭头就被改回标准箭头。定时器不受动作时长影响。
+          if (this.poseTimer) clearTimeout(this.poseTimer)
+          this.poseTimer = setTimeout(() => {
+            try { writeFileSync(join(this.dir, 'fx.pose'), arrowSet ? '0' : '5') } catch { }
+          }, 1500)
+          if (this.poseTimer.unref) this.poseTimer.unref()
         }
         this.start()
       } catch { }
