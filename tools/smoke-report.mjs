@@ -67,7 +67,10 @@ if (exe && existsSync(exe)) {
     // 闸门路径与状态
     add('helper', '闸门', j.halted ? '⚠ 正在急停' : '未拉下')
   } catch {
-    add('helper', 'ping', `失败：${(r.stdout || r.stderr || '').slice(0, 80)}`)
+    // 失败原因可能是"没输出"（沙箱 EPERM 时 stdout/stderr 都是空的），
+    // 只取 stdout/stderr 会得到一行"失败："后面什么都没有。
+    const why = r.error?.code ?? r.error?.message ?? (r.stdout || r.stderr || '').trim() ?? ''
+    add('helper', 'ping', `失败：${String(why).slice(0, 80) || '无输出（可能被沙箱拦截）'}`)
   }
 } else {
   add('helper', 'dsc.exe', exe ? '不存在' : '（没找到插件目录）')
@@ -122,7 +125,11 @@ if (pluginDir) {
   add('光标', '透明光标素材', `${n} 张`, n === 10 ? '' : '⚠ 应为 10 张，包可能不完整')
 
   const fxDir = join(process.env.TEMP ?? '', 'dsc-cursor-fx')
-  add('光标', '运行状态', existsSync(join(fxDir, 'fx.blanked')) ? '正在拦截光标' : '未启用')
+  add('光标', '运行状态', existsSync(join(fxDir, 'fx.blanked')) ? '正在拦截光标' : '未接管（空闲或未启用）')
+  // 把实际用的 TEMP 打出来：在 DSH 沙箱里 TEMP 会被重定向到 dsh-XXXX，
+  // 读到的"开关不存在"不代表宿主上没有（第三方验收踩过这条）。
+  add('光标', 'TEMP 路径', process.env.TEMP ?? '（未设置）',
+    '沙箱内这是重定向后的临时目录，不代表宿主状态')
   const marker = join(process.env.TEMP ?? '', 'dsc-cursor-fx.enable')
   add('光标', '开关文件', existsSync(marker) ? `存在（内容 ${JSON.stringify(readFileSync(marker, 'utf8').trim())}）` : '不存在（默认关闭）')
 }

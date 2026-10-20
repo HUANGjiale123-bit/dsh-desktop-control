@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.68'
+const PLUGIN_VERSION = '2.18.69'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -805,15 +805,16 @@ function applyInner(ctx, config = {}) {
       try {
         this.bash()
         writeFileSync(join(this.dir, 'fx.active'), String(Date.now()))
+        // 心跳**只在真实桌面操作时**写，不起任何定时器。
+        //
+        // 第一版用了 setInterval 每 5 秒续心跳，结果被第三方验收抓到硬伤：
+        // HMR 卸载插件时不走 dispose，那个定时器留在 DSH 进程里继续写，
+        // 于是"心跳永不停止"，fx/guard 的自退机制永远等不到触发条件 ——
+        // 不但没修好孤儿进程，还多了一个每 5 秒写盘的泄漏。
+        //
+        // 现在的判据是"插件**被使用时**才会续心跳"：卸载后没有任何工具调用，
+        // 心跳自然过期，两个孩子各自退出。不需要谁记得清理。
         writeFileSync(join(this.dir, 'fx.heartbeat'), String(Date.now()))
-        // 每 5 秒续一次心跳。插件被卸载后没人续，dsc-fx 会在 25 秒内自己退出并
-        // 恢复光标，dsc-guard 也会在 30 秒内退出——不需要谁记得去 kill 它们。
-        if (!this.beatTimer) {
-          this.beatTimer = setInterval(() => {
-            try { writeFileSync(join(this.dir, 'fx.heartbeat'), String(Date.now())) } catch { }
-          }, 5000)
-          this.beatTimer.unref?.()
-        }
         // 姿势序号（对应 poses 目录排序）：
         //   8 = p09 双手使劲拉  → 拖拽/滚轮
         //   1 = p02 举手欢呼    → 点击
@@ -863,7 +864,6 @@ function applyInner(ctx, config = {}) {
     /** 收工：先叫它自己退（它会恢复光标），再兜底调一次 cursor_restore。 */
     stop() {
       if (!this.enabled) return
-      try { if (this.beatTimer) { clearInterval(this.beatTimer); this.beatTimer = null } } catch { }
       try { if (this.dir) rmSync(join(this.dir, 'fx.heartbeat'), { force: true }) } catch { }
       try { if (this.dir) writeFileSync(join(this.dir, 'fx.stop'), '1') } catch { }
       try { if (this.child) this.child.kill() } catch { }
@@ -3983,8 +3983,10 @@ function applyInner(ctx, config = {}) {
           let pid = ''
           try { pid = readFileSync(blanked, 'utf8').trim() } catch { }
           lines.push('  运行状态  : **正在接管光标**（装饰进程 pid=' + (pid || '?') + '）')
+        } else if (existsSync(marker)) {
+          lines.push('  运行状态  : 已启用，当前空闲（未被接管；下次操作会接管）')
         } else {
-          lines.push('  运行状态  : 未接管（停手 30 秒后会自动恢复，属正常）')
+          lines.push('  运行状态  : 未启用（没有开关文件）')
         }
         try {
           const pose = readFileSync(join(fxDir, 'fx.pose'), 'utf8').trim()

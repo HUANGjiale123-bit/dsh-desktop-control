@@ -36,6 +36,7 @@ const FAST_EXCLUDE = new RegExp('^test-(' + [
   'isourwindow', 'tree-sample', 'image-block',
   'menu-click',      // 要真 GUI 菜单 + 焦点，批量跑时偶发不稳
   'cursor-orphan',   // 要等 25 秒看进程自己退出，且会真的接管光标
+  'cursor-idle-exit',// 同上：验证"插件活着但不活动时也会退"，约 45 秒
 ].join('|') + ')')
 
 const files = readdirSync('tools')
