@@ -138,6 +138,7 @@ namespace DscFx
         }
 
         private static bool calibrateMode = false;
+        private static bool poseMode = false;
 
         private static Pose LoadPose(string path, int anchorX, int anchorY, int displaySize)
         {
@@ -245,8 +246,11 @@ namespace DscFx
             if (watchMode)
             {
                 // --watch <状态目录> <尺寸> <png@x,y> [...]
-                if (args.Length < 4) { Console.Error.WriteLine("用法: dsc-fx.exe --watch <dir> <size> <png@x,y> ..."); return 2; }
+                // --watch <状态目录> <blank|pose> <尺寸> <png@x,y> [...]
+                if (args.Length < 5) { Console.Error.WriteLine("用法: dsc-fx.exe --watch <dir> <blank|pose> <size> <png@x,y> ..."); return 2; }
                 watchDir = args[1];
+                poseMode = args[2] == "pose";
+                if (poseMode) { watchMode = true; }
             }
             int argOffset = blankMode ? 1 : (calibrate ? 1 : 0);
 
@@ -258,9 +262,9 @@ namespace DscFx
             }
 
             calibrateMode = calibrate;
-            int size = int.Parse(args[watchMode ? 2 : argOffset]);
+            int size = int.Parse(args[watchMode ? 3 : argOffset]);
             int seconds = watchMode ? 0 : int.Parse(args[argOffset + 1]);
-            int poseStart = watchMode ? 3 : (argOffset + 2);
+            int poseStart = watchMode ? 4 : (argOffset + 2);
 
             List<Pose> poses = new List<Pose>();
             for (int i = poseStart; i < args.Length; i++)
@@ -308,6 +312,7 @@ namespace DscFx
                 string activeFile = System.IO.Path.Combine(watchDir, "fx.active");
                 string blankedFile = System.IO.Path.Combine(watchDir, "fx.blanked");
                 string stopFile = System.IO.Path.Combine(watchDir, "fx.stop");
+                string poseFile = System.IO.Path.Combine(watchDir, "fx.pose");
                 const double IdleTimeoutSec = 30.0;
                 bool blanked = false;
                 bool visible = false;
@@ -326,14 +331,28 @@ namespace DscFx
 
                         if (active)
                         {
-                            if (!blanked)
+                            if (!poseMode && !blanked)
                             {
                                 blanked = BlankSystemArrow(48);
                                 System.IO.File.WriteAllText(blankedFile, System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
                             }
                             if (!visible) { ShowWindow(hwnd, SW_SHOWNOACTIVATE); visible = true; }
+
+                            // pose 模式下插件写 fx.pose（姿势序号）；读失败就用第 0 个。
+                            int pick = 0;
+                            if (poseMode)
+                            {
+                                try
+                                {
+                                    string raw = System.IO.File.ReadAllText(poseFile).Trim();
+                                    int n;
+                                    if (int.TryParse(raw, out n) && poses.Count > 0) pick = ((n % poses.Count) + poses.Count) % poses.Count;
+                                }
+                                catch { }
+                            }
+
                             POINT p;
-                            if (GetCursorPos(out p)) DrawAt(hwnd, poses[0], p.X, p.Y, false);
+                            if (GetCursorPos(out p)) DrawAt(hwnd, poses[pick], p.X, p.Y, false);
                         }
                         else
                         {

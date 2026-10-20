@@ -99,9 +99,14 @@ for exe in dsc.exe dsc-esc.exe dsc-fx.exe; do
 done
 # 光标装饰素材（缺了只会"静默不启动"，所以必须一起同步）
 mkdir -p "$DEST/assets/cursor"
+mkdir -p "$DEST/assets/cursor/poses"
 if [ -f "$SRC/assets/cursor/fish-arrow.png" ]; then
   copy_if_changed "$SRC/assets/cursor/fish-arrow.png" "$DEST/assets/cursor/fish-arrow.png" || sync_failed=1
 fi
+for f in "$SRC/assets/cursor/poses"/*; do
+  [ -f "$f" ] || continue
+  copy_if_changed "$f" "$DEST/assets/cursor/poses/$(basename "$f")" || sync_failed=1
+done
 echo "③ 已同步到 $DEST"
 echo
 

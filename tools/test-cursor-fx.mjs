@@ -9,7 +9,7 @@
  * 用法：node tools/test-cursor-fx.mjs
  */
 
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, unlinkSync, readdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -33,18 +33,24 @@ for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs',
   'visual-candidates.mjs', 'ocr-worker.mjs', 'win-ocr.ps1']) {
   writeFileSync(join(tmp, f), readFileSync(join('plugin', f)))
 }
-mkdirSync(join(tmp, 'assets', 'cursor'), { recursive: true })
+mkdirSync(join(tmp, 'assets', 'cursor', 'poses'), { recursive: true })
 writeFileSync(join(tmp, 'assets', 'cursor', 'fish-arrow.png'),
   readFileSync(join('plugin', 'assets', 'cursor', 'fish-arrow.png')))
+for (const f of readdirSync(join('plugin', 'assets', 'cursor', 'poses'))) {
+  writeFileSync(join(tmp, 'assets', 'cursor', 'poses', f),
+    readFileSync(join('plugin', 'assets', 'cursor', 'poses', f)))
+}
 mkdirSync(join(tmp, 'bin'), { recursive: true })
 writeFileSync(join(tmp, 'bin', 'dsc-fx.exe'), readFileSync(join('helper', 'bin', 'dsc-fx.exe')))
 
 function killFx() {
   spawnSync('taskkill', ['/IM', 'dsc-fx.exe', '/F'], { windowsHide: true })
-  try { if (existsSync(STOP)) unlinkSync(STOP) } catch { }
+  for (const f of [STOP, join(FX_DIR, 'fx.blanked')]) {
+    try { if (existsSync(f)) unlinkSync(f) } catch { }
+  }
 }
 
-async function boot({ cursorFx }) {
+async function boot({ cursorFx, cursorFxMode }) {
   const reg = []
   const logs = []
   const ctx = {
@@ -61,7 +67,7 @@ async function boot({ cursorFx }) {
   const mod = await import(pathToFileURL(join(tmp, 'index.mjs')).href + '?' + Math.random())
   await mod.apply(ctx, {
     helperPath: HELPER, escPath: 'helper/bin/dsc-esc.exe', shotDir: join(tmp, 'shots'), cursorFx,
-    cursorFxDir: FX_DIR,
+    cursorFxMode, cursorFxDir: FX_DIR,
   })
   return { reg, logs, mod, by: new Map(reg.map((t) => [t.name, t])) }
 }
@@ -96,7 +102,7 @@ try {
 
     const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq dsc-fx.exe'], { encoding: 'utf8', windowsHide: true })
     if (/dsc-fx\.exe/.test(String(r.stdout))) ok('装饰进程已启动')
-    else bad('装饰进程没起来')
+    else bad(`装饰进程没起来（日志：${logs.slice(-3).join(' | ')}）`)
 
     // 再调一次：不应该起第二个进程
     await by.get('desktop_list_windows').execute({}).catch(() => {})
@@ -105,6 +111,31 @@ try {
     const count = (String(r2.stdout).match(/dsc-fx\.exe/g) || []).length
     if (count === 1) ok('只起了一个装饰进程（没有重复启动）')
     else bad(`起了 ${count} 个装饰进程`)
+  }
+  console.log()
+  console.log('── 3. pose 模式：不透明光标，按工具写姿势序号 ──')
+  {
+    killFx()
+    try { if (existsSync(ACTIVE)) unlinkSync(ACTIVE) } catch { }
+    const { by } = await boot({ cursorFx: true, cursorFxMode: 'pose' })
+    await by.get('desktop_list_windows').execute({}).catch(() => {})
+    await new Promise((r) => setTimeout(r, 500))
+
+    const poseFile = join(FX_DIR, 'fx.pose')
+    if (existsSync(poseFile)) {
+      const n = Number(readFileSync(poseFile, 'utf8').trim())
+      if (n === 5) ok(`读取类工具 → 姿势序号 ${n}（托腮）`)
+      else bad(`姿势序号不对：${n}，期望 5`)
+    } else {
+      bad('没有写 fx.pose（姿势模式不生效）')
+    }
+
+    if (!existsSync(join(FX_DIR, 'fx.blanked'))) ok('没有透明光标（pose 模式不该动系统箭头）')
+    else bad('pose 模式却把光标弄透明了')
+
+    const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq dsc-fx.exe'], { encoding: 'utf8', windowsHide: true })
+    if (/dsc-fx\.exe/.test(String(r.stdout))) ok('装饰进程已启动')
+    else bad('装饰进程没起来')
   }
 } finally {
   killFx()

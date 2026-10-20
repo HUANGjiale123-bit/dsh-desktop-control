@@ -20,7 +20,7 @@
 import { spawn } from 'node:child_process'
 import {
   existsSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync,
-  appendFileSync, renameSync, copyFileSync,
+  appendFileSync, renameSync, copyFileSync, readdirSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.53'
+const PLUGIN_VERSION = '2.18.54'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -691,10 +691,10 @@ function applyInner(ctx, config = {}) {
       const from = existsSync(src) ? src : repo
       if (!existsSync(from)) return null
       const exe = join(dir, 'dsc-fx.exe')
-      try {
-        const a = statSync(from), b = existsSync(exe) ? statSync(exe) : null
-        if (!b || b.size !== a.size) copyFileSync(from, exe)
-      } catch { /* 复制失败就用旧文件 */ }
+      // 每次启动都覆盖：曾经按"大小不同才复制"判断，结果新旧版本刚好同样字节数
+      // （13824）时用了旧二进制，参数格式对不上，进程起来就崩。一个 10KB 的文件，
+      // 省这一次 stat 不值得。
+      try { copyFileSync(from, exe) } catch { /* 复制失败就用旧文件 */ }
 
       const assetFrom = join(pluginDir, 'assets', 'cursor', 'fish-arrow.png')
       if (!existsSync(assetFrom)) return null
@@ -708,23 +708,78 @@ function applyInner(ctx, config = {}) {
       if (this.child && !this.child.killed) return
       const exe = this.stage()
       if (!exe) return
+      // 模式：配置项优先；没配时看标记文件的内容（写 "pose" 就是姿势模式）。
+      // 标记文件当开关用，是为了本机切换时不用改 profile 的 YAML。
+      let mode = config.cursorFxMode === 'pose' ? 'pose' : 'blank'
+      if (!config.cursorFxMode) {
+        try {
+          const marker = join(tmpdir(), 'dsc-cursor-fx.enable')
+          if (existsSync(marker) && readFileSync(marker, 'utf8').trim() === 'pose') mode = 'pose'
+        } catch { }
+      }
+      const dir = this.bash()
+
+      // 素材清单：blank 一张（画里自带箭头），pose 十张（无箭头，只能配系统光标）。
+      // 这里扫目录取清单，而不是在对象上再加方法 —— 加方法会让这个对象字面量
+      // 在某个位置解析失败（实测），改成在既有方法里内联，风险小得多。
+      const files = []
+      if (mode === 'pose') {
+        const poseDir = join(pluginDir, 'assets', 'cursor', 'poses')
+        if (existsSync(poseDir)) {
+          for (const f of readdirSync(poseDir).sort()) {
+            if (!f.endsWith('.png')) continue
+            files.push({ file: join(poseDir, f), anchor: null })
+          }
+        }
+      } else {
+        const one = join(pluginDir, 'assets', 'cursor', 'fish-arrow.png')
+        if (existsSync(one)) files.push({ file: one, anchor: [45, 102] })
+      }
+      if (!files.length) {
+        ctx.logger?.warn?.('[desktop-control] 光标装饰素材缺失，跳过启动')
+        return
+      }
+
+      let meta = {}
       try {
-        this.child = spawn(exe, ['--watch', this.bash(), String(this.size), `${this.asset}@${this.anchor}`], {
-          detached: true, stdio: 'ignore', windowsHide: true,
-        })
+        meta = JSON.parse(readFileSync(join(pluginDir, 'assets', 'cursor', 'poses', 'index.json'), 'utf8'))
+      } catch { }
+
+      const args = ['--watch', dir, mode, String(this.size)]
+      for (let i = 0; i < files.length; i++) {
+        const name = files[i].file.split(/[\\/]/).pop()
+        const dest = join(dir, `pose-${i}.png`)
+        try { copyFileSync(files[i].file, dest) } catch { }
+        const anchor = files[i].anchor ?? (meta[name] && meta[name].anchor) ?? [0, 0]
+        args.push(`${dest}@${anchor[0]},${anchor[1]}`)
+      }
+
+      try {
+        this.child = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true })
         this.child.unref()
-        ctx.logger?.info?.('[desktop-control] 光标装饰已启动（沉浸模式）')
+        ctx.logger?.info?.(`[desktop-control] 光标装饰已启动（${mode} 模式，${files.length} 张素材）`)
       } catch (e) {
         ctx.logger?.warn?.(`[desktop-control] 光标装饰启动失败：${e?.message ?? e}`)
       }
     },
 
     /** 每次桌面操作报到一次：续上 30 秒的活动窗口。 */
-    touch() {
+    touch(tool) {
       if (!this.enabled) return
       try {
         this.bash()
         writeFileSync(join(this.dir, 'fx.active'), String(Date.now()))
+        // 姿势序号（对应 poses 目录排序）：
+        //   8 = p09 双手使劲拉  → 拖拽/滚轮
+        //   1 = p02 举手欢呼    → 点击
+        //   2 = p03 挥手        → 输入/按键
+        //   5 = p06 坐着托腮    → 读取类与默认
+        const t = String(tool ?? '')
+        const pose = /drag|wheel/.test(t) ? 8
+          : /click/.test(t) ? 1
+            : /type|press_key|set_value/.test(t) ? 2
+              : 5
+        writeFileSync(join(this.dir, 'fx.pose'), String(pose))
         this.start()
       } catch { }
     },
@@ -741,7 +796,7 @@ function applyInner(ctx, config = {}) {
     helperPath,
     allowedApps: Array.isArray(config.allowedApps) ? config.allowedApps.join(',') : config.allowedApps,
     shotDir: config.shotDir,
-    onDesktopActivity: () => cursorFx.touch(),
+    onDesktopActivity: (tool) => cursorFx.touch(tool),
     // 把 span 注进 toolset：它自己**不维护**当前 trace（那会在并发下串号），
     // 只负责在自己认为值得计时的边界上调用这个函数。
     span,
