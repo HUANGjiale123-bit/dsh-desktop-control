@@ -851,6 +851,19 @@ export function createDesktopToolset(options = {}) {
       return { ok: true, window: w, via: 'session' }
     }
 
+    // ②.5 已结束的会话：不要在发审批前还去问它
+    if (isSessionDisposed(currentSessionKey())) {
+      return {
+        ok: false,
+        code: 'SessionDisposed',
+        message: advice(
+          'Refused',
+          '失败：这个会话已经结束了 —— 授权作废，没有询问也没有执行。' +
+            '请在新的会话里重新授权。',
+        ),
+      }
+    }
+
     // ③ 都没有 → 走会话级授权（问用户）。
     //
     // 顺序很重要：静态名单为空时也走这里，而不是像早先那样直接拒绝。
@@ -901,9 +914,13 @@ export function createDesktopToolset(options = {}) {
     const _k = currentSessionKey()
     if (isSessionDisposed(_k)) {
       return {
-        allowed: false,
-        reason: '这个会话已经结束了 —— 授权作废。请在新的会话里重新授权。',
-        deniedBy: 'session-disposed',
+        ok: false,
+        code: 'SessionDisposed',
+        message: advice(
+          'Refused',
+          '失败：这个会话已经结束了 —— 授权作废，没有执行任何操作。' +
+            '请在新的会话里重新授权。',
+        ),
       }
     }
     grants().set(base, 'session')
@@ -990,9 +1007,11 @@ export function createDesktopToolset(options = {}) {
     const _k2 = currentSessionKey()
     if (isSessionDisposed(_k2)) {
       return {
-        allowed: false,
-        reason: '这个会话已经结束了 —— 授权作废。请在新的会话里重新授权。',
-        deniedBy: 'session-disposed',
+        ok: false,
+        code: 'SessionDisposed',
+        message:
+          '失败：这个会话已经结束了 —— 授权作废，没有执行任何操作。' +
+          '请在新的会话里重新授权。',
       }
     }
     grants().set(appBase, 'session')

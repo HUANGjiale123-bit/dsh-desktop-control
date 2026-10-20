@@ -149,6 +149,16 @@ try {
       }
 
       console.log()
+      console.log('── 3c. 共同 owner 的普通窗口：以 B 为目标点 C，必须拒绝 ──')
+      if (opened.bHwnd && opened.otherX) {
+        const neg2 = run(['click', String(opened.otherX), String(opened.otherY), '--hwnd', String(opened.bHwnd)])
+        if (!neg2.ok) ok('共同 root owner 不足以为据：C 被拒绝')
+        else bad('共同 root owner 被当成"属于目标"—— R6 未修完')
+      } else {
+        skip('夹具没提供 B 窗口坐标')
+      }
+
+      console.log()
       console.log('── 4. 菜单项真的执行了吗 ──')
       const clicked = await waitFor(() => existsSync(LOG) && /clicked/.test(readFileSync(LOG, 'utf8')), 4000)
       if (clicked) ok('菜单项的 Click 事件执行了（日志有记录）')

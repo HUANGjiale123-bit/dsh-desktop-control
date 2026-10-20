@@ -428,10 +428,23 @@ $ip = $null
 $hasInvoke = $false
 try { $hasInvoke = $hit.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$ip) } catch { $hasInvoke = $false }
 
+# ── 动作前最后一次查急停 ──
+# 复核（2.18.71）：Python 入口查过一次，但"找元素"可能花几秒，这期间用户按 ESC，
+# PowerShell 照样会 Invoke。这里在执行变更动作之前再读一次同一个闸门文件。
+# 缺路径、读失败都按"已拉下"处理（fail closed）。
+$gate = $env:DSC_HALT_GATE
+$haltedNow = $false
+try {
+  if ([string]::IsNullOrEmpty($gate)) { $haltedNow = $true }
+  elseif (Test-Path -LiteralPath $gate) { $haltedNow = $true }
+} catch { $haltedNow = $true }
+
 $method = 'Coordinate'
 $invokeError = $null
 if ($dry) {
   $method = 'DryRun'
+} elseif ($haltedNow) {
+  $method = 'Halted'
 } elseif ($btn -ne 'right' -and $hasInvoke) {
   try {
     $ip.Invoke()
@@ -442,6 +455,7 @@ if ($dry) {
 }
 
 $elem = @{ type = $etype; name = $ename; aid = $eaid; className = $ecls; l = $l; t = $t; w = $w; h = $hh2 }
+$haltedOut = $haltedNow
 
 if ($invokeError -ne $null) {
   # 结果未知：**不重试**，也不假装失败。交给调用方去重新观察。
@@ -559,10 +573,22 @@ def click_by_descriptor(hwnd: int, descriptor: str, button: str = "left",
         "DSC_DESC": descriptor or "",
         "DSC_BUTTON": "right" if (button or "").lower() == "right" else "left",
         "DSC_DRY": "1" if dry_run else "0",
+        # 动作前复查要读同一个闸门；路径由 toolset 每次显式传下来
+        "DSC_HALT_GATE": os.environ.get("DSC_HALT_GATE", ""),
     }
     res = _run_ps(CLICK_TEMPLATE, env, timeout_ms)
     if not isinstance(res, dict):
         return {"ok": False, "error": "bad result", "raw": str(res)[:300]}
+    # PowerShell 在动作前复查了闸门：读到这里就说明"找到元素之后被急停"。
+    # 这时**不能**继续，也不能把 method 当成正常点击报给调用方。
+    if res.get("haltedOut") or res.get("halted"):
+        return {
+            "ok": False,
+            "mode": "click",
+            "error": "Halted",
+            "message": ("你在等元素定位的这几秒里按了 ESC —— 桥在真正 Invoke 之前"
+                        "复查了闸门，已中止。没有执行任何点击。不要重试，也不要自行解除闸门。"),
+        }
     # ConvertTo-Json 会把只有一个元素的数组压成对象，统一回数组。
     for k in ("nearby", "sample"):
         v = res.get(k)

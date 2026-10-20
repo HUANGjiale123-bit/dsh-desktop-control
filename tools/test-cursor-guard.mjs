@@ -60,6 +60,11 @@ try {
   console.log()
   console.log('── 1. 装饰进程正常时：看门狗不插手 ──')
   {
+    // 先起看门狗：装饰进程要看到 guard.ready 才允许隐藏系统光标
+    // （复核 2.18.71：没有恢复者时不能隐藏光标）。
+    const guard = spawn(GUARD, ['--watch', DIR], { stdio: 'ignore', windowsHide: true })
+    for (let i = 0; i < 20 && !existsSync(join(DIR, 'guard.ready')); i++) await sleep(100)
+
     const errFile = join(DIR, 'fx.err')
     const fx = spawn(FX, ['--watch', DIR, 'blank', '120', `${ASSET}@45,102`], {
       stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
@@ -79,7 +84,6 @@ ${fxErr}`) } catch { } })
       bad(`装饰进程没写 marker，后面的判断无从谈起（${e.slice(0, 160).split('\n').join(' ')}）`)
     }
 
-    const guard = spawn(GUARD, ['--watch', DIR], { stdio: 'ignore', windowsHide: true })
     await sleep(1500)
     if (existsSync(MARK)) ok('看门狗运行期间没有误删 marker')
     else bad('看门狗在装饰进程还活着时就把 marker 删了')

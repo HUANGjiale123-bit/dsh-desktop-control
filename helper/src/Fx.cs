@@ -546,8 +546,29 @@ namespace DscFx
                         {
                             if (!poseMode && !blanked)
                             {
-                                blanked = BlankAllCursors();
-                                System.IO.File.WriteAllText(blankedFile, System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
+                                // 先确认看门狗就绪：没有恢复者时不要隐藏系统光标。
+                                // （spawn 返回对象 ≠ 看门狗已经在工作）
+                                string guardReady = System.IO.Path.Combine(watchDir, "guard.ready");
+                                bool readyOk = System.IO.File.Exists(guardReady);
+                                if (!readyOk)
+                                {
+                                    for (int w = 0; w < 20 && !readyOk; w++)
+                                    {
+                                        System.Threading.Thread.Sleep(100);
+                                        readyOk = System.IO.File.Exists(guardReady);
+                                    }
+                                }
+                                if (!readyOk)
+                                {
+                                    blanked = false;
+                                    LogPick(watchDir, "看门狗未就绪：保持系统光标，不隐藏");
+                                }
+                                else
+                                {
+                                    blanked = BlankAllCursors();
+                                }
+                                if (blanked)
+                                    System.IO.File.WriteAllText(blankedFile, System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
                             }
                             if (!visible) { ShowWindow(hwnd, SW_SHOWNOACTIVATE); visible = true; }
 
@@ -644,8 +665,19 @@ namespace DscFx
                 finally
                 {
                     // 任何退出路径都要恢复：正常退出、异常、被 fx.stop 叫停。
-                    if (blanked) RestoreSystemCursors();
-                    try { System.IO.File.Delete(blankedFile); } catch { }
+                    // 复核（2.18.71）：旧代码忽略返回值、随后无条件删标记 ——
+                    // 底层恢复失败时也会把"已隐藏"状态抹掉，等于谎报恢复成功。
+                    bool restoredOk = true;
+                    if (blanked) restoredOk = RestoreSystemCursors();
+                    if (restoredOk)
+                    {
+                        try { System.IO.File.Delete(blankedFile); } catch { }
+                    }
+                    else
+                    {
+                        // 保留标记：让别人（下次启动 / cursor_restore / 看门狗）知道还欠一次恢复
+                        LogPick(watchDir, "恢复失败：保留 fx.blanked 待重试");
+                    }
                     // 清掉停止标记：否则下一次启动的实例一进循环就看到它，立刻退出。
                     try { System.IO.File.Delete(stopFile); } catch { }
                     DestroyWindow(hwnd);

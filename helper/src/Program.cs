@@ -138,6 +138,19 @@ namespace Dsc
         // 弹窗的 GW_OWNER 指向它的宿主窗口，这是比"同一个进程"精确得多的判据。
         [DllImport("user32.dll")]
         public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+        public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+        /// <summary>32 位进程没有 GetWindowLongPtrW，退回 GetWindowLongW。</summary>
+        public static IntPtr GetWindowLong(IntPtr hWnd, int nIndex)
+        {
+            if (IntPtr.Size == 8) return GetWindowLongPtr(hWnd, nIndex);
+            return (IntPtr)GetWindowLong32(hWnd, nIndex);
+        }
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+        private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
         public const uint GW_OWNER = 4;
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -1976,6 +1989,30 @@ namespace Dsc
         /// 没有任何缩放换算。这是与 dsh-click 最大的设计差异：
         /// 它把「读」与「验」分成两次独立抓取，坐标空间不一致导致互相矛盾。
         /// </summary>
+        /// <summary>沿直接 owner 链向上，看是否经过指定窗口（最多 8 层）。</summary>
+        private static bool ChainHitsTarget(IntPtr h, IntPtr tgt)
+        {
+            IntPtr cur = h;
+            for (int i = 0; i < 8 && cur != IntPtr.Zero; i++)
+            {
+                IntPtr owner = Native.GetWindow(cur, Native.GW_OWNER);
+                if (owner == IntPtr.Zero) return false;
+                if (owner == tgt) return true;
+                cur = owner;
+            }
+            return false;
+        }
+
+        /// <summary>无标题栏、无系统菜单的 WS_POPUP：像弹出交互面，而不是普通窗口。</summary>
+        private static bool LooksLikePopupSurface(IntPtr h)
+        {
+            const long WS_POPUP = 0x80000000L;
+            const long WS_CAPTION = 0x00C00000L;
+            const long WS_SYSMENU = 0x00080000L;
+            long style = (long)Native.GetWindowLong(h, -16 /*GWL_STYLE*/);
+            return (style & WS_POPUP) != 0 && (style & WS_CAPTION) == 0 && (style & WS_SYSMENU) == 0;
+        }
+
         private static int CmdClick(string[] args)
         {
             // 急停检查必须是第一件事——放在坐标计算之后就等于没有闸门。
@@ -2050,22 +2087,18 @@ namespace Dsc
             //   1. 同进程（授权本来就是按 exe 给的）
             //   2. 落点窗口的 root owner 就是目标（菜单挂在它下面），或落在目标自己身上
             //   3. 窗口类是弹出交互面（菜单 #32768 / 下拉 ComboLBox）
-            IntPtr rootOwner = root != IntPtr.Zero ? Native.GetAncestor(root, 3 /*GA_ROOTOWNER*/) : IntPtr.Zero;
-            IntPtr targetOwner = target != IntPtr.Zero ? Native.GetAncestor(target, 3) : IntPtr.Zero;
-            string rootClass = root != IntPtr.Zero ? WindowClass(root) : string.Empty;
-            bool isPopupInteraction =
-                !string.IsNullOrEmpty(rootClass) &&
-                (rootClass.StartsWith("#32768", StringComparison.OrdinalIgnoreCase) ||
-                 rootClass.Equals("ComboLBox", StringComparison.OrdinalIgnoreCase));
-            bool ownedByTarget = rootOwner == target || (targetOwner != IntPtr.Zero && rootOwner == targetOwner);
-
-            // WinForms 的 MenuStrip 下拉**不是**经典 #32768 菜单，类名是
-            // WindowsForms10.Window.*，所以不能只靠类名判断。owner 关系才是
-            // 更可靠的结构证据：真正的弹出菜单挂在目标窗口的 owner 链上，
-            // 而同进程的**另一个普通顶层窗口**与目标没有 owner 关系。
+            // 复核（2.18.71）指出：比较 GA_ROOTOWNER 只能证明"同一个共同根"，
+            // 不能证明这个窗口属于**本次指定的目标**。反例：
+            //   主窗 A 下有两个普通 owned 窗口 B（目标）和 C（挡住落点），
+            //   GA_ROOTOWNER(B) == GA_ROOTOWNER(C) == A → 旧判据把 C 当成 B 的菜单。
+            //
+            // 现在沿 **直接 owner 链**（GW_OWNER）向上走，链上必须出现本次 target；
+            // 同时要求它长得像弹出交互面（无标题栏/无系统菜单的 WS_POPUP），
+            // 普通带标题栏的 owned 窗口仍然拒绝。
+            bool ownedByTarget = target != IntPtr.Zero && ChainHitsTarget(root, target);
             bool sameProcessPopup = target != IntPtr.Zero && root != IntPtr.Zero
                 && root != target && targetPid != 0 && hitPid == targetPid
-                && (ownedByTarget || isPopupInteraction) && ownedByTarget;
+                && ownedByTarget && LooksLikePopupSurface(root);
 
             if (target != IntPtr.Zero)
             {

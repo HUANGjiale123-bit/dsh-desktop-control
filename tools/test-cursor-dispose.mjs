@@ -94,6 +94,12 @@ try {
   const took = Date.now() - t0
 
   // 关键断言：dispose 返回时，光标必须已经恢复（blanked 已清）
+  if (existsSync(blanked)) {
+    try {
+      const lines = readFileSync(join(STATE, 'fx.log'), 'utf8').trim().split('\n')
+      console.log('    fx.log:', lines.slice(-3).join(' | '))
+    } catch { }
+  }
   if (!existsSync(blanked)) ok(`dispose 返回时光标已恢复（耗时 ${Math.round(took / 1000)} 秒）`)
   else bad('dispose 返回时 fx.blanked 仍在 —— 恢复没有得到确认')
 

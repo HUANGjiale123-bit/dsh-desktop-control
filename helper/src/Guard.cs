@@ -83,6 +83,10 @@ namespace DscGuard
             string stop = Path.Combine(dir, "fx.stop");
             string beat = Path.Combine(dir, "fx.heartbeat");
 
+            // 就绪标记：装饰进程必须先看到它才允许隐藏系统光标。
+            // 复核（2.18.71）：看门狗启动失败时 fx 仍在隐藏光标 —— 没有恢复者。
+            string ready = Path.Combine(dir, "guard.ready");
+            try { File.WriteAllText(ready, Process.GetCurrentProcess().Id.ToString()); } catch { }
             Log(dir, "guard 启动 pid=" + Process.GetCurrentProcess().Id);
 
             int idleRounds = 0;
@@ -102,9 +106,13 @@ namespace DscGuard
                 bool marker = File.Exists(blanked);
                 if (hostGone)
                 {
-                    if (marker) SystemParametersInfoW(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
-                    try { if (marker) File.Delete(blanked); } catch { }
+                    // 恢复失败时**保留标记**，不要谎报恢复成功（复核 2.18.71）。
+                    bool restoredHere = true;
+                    if (marker) restoredHere = SystemParametersInfoW(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+                    if (restoredHere) { try { if (marker) File.Delete(blanked); } catch { } }
+                    else Log(dir, "宿主消失但恢复失败：保留 fx.blanked 待重试");
                     Log(dir, "guard 退出（宿主心跳已停止，插件已卸载或退出）");
+                    try { File.Delete(ready); } catch { }
                     return 0;
                 }
 
@@ -117,7 +125,8 @@ namespace DscGuard
                     if (pid > 0 && !IsAlive(pid))
                     {
                         bool ok = SystemParametersInfoW(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
-                        try { File.Delete(blanked); } catch { }
+                        // 成功才删标记；失败保留，下一轮继续尝试恢复
+                        if (ok) { try { File.Delete(blanked); } catch { } }
                         Log(dir, "恢复光标（装饰进程 " + pid + " 已退出）ok=" + ok);
                     }
                 }
@@ -130,7 +139,8 @@ namespace DscGuard
                     if (File.Exists(stop) && idleRounds > 12)
                     {
                         Log(dir, "guard 退出（收到 fx.stop）");
-                        return 0;
+                        try { File.Delete(ready); } catch { }
+                    return 0;
                     }
 
                     // 另一个退出条件：装饰进程不在了、也没有要恢复的光标，
@@ -152,7 +162,8 @@ namespace DscGuard
                     if (noFxRounds > 60)
                     {
                         Log(dir, "guard 退出（装饰进程已不在，且无需恢复）");
-                        return 0;
+                        try { File.Delete(ready); } catch { }
+                    return 0;
                     }
                 }
 

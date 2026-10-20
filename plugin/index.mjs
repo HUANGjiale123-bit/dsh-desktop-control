@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.71'
+const PLUGIN_VERSION = '2.18.72'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -691,6 +691,8 @@ function applyInner(ctx, config = {}) {
 
     /** 把 exe 与素材复制到 Medium 完整性的位置，返回可执行的路径。 */
     stage() {
+      // 测试注入点：直接返回指定路径（不检查存在性），用来在 spawn 边界制造真实 ENOENT。
+      if (config.cursorFxExePath) return String(config.cursorFxExePath)
       const dir = this.bash()
       const src = join(pluginDir, 'bin', 'dsc-fx.exe')
       const repo = join(pluginDir, '..', 'helper', 'bin', 'dsc-fx.exe')
@@ -795,8 +797,8 @@ function applyInner(ctx, config = {}) {
         // 看门狗：装饰进程被杀/崩溃时把系统光标恢复回来。
         // 它必须**独立**于装饰进程存活，所以是另一个进程。
         if (!this.guard || this.guard.exitCode !== null) {
-          const guardExe = join(dir, 'dsc-guard.exe')
-          if (existsSync(guardExe)) {
+          const guardExe = config.cursorFxGuardPath ? String(config.cursorFxGuardPath) : join(dir, 'dsc-guard.exe')
+          if (config.cursorFxGuardPath || existsSync(guardExe)) {
             this.guard = spawnManaged('看门狗', guardExe, ['--watch', dir],
               { detached: true, stdio: 'ignore', windowsHide: true },
               (why) => { this.guard = null; if (why === 'error') this.startFailAt = Date.now() })
@@ -902,23 +904,34 @@ function applyInner(ctx, config = {}) {
         restored = !existsSync(blanked)
       }
       if (!restored && blanked) {
-        // 兜底：单独恢复，然后再确认一次（不假设它成功）
-        try { await spawnAsync(helperPath, ['cursor_restore']) } catch { }
+        // 兜底：单独恢复，并**检查 helper 的结构化结果**（退出码 / ok / 超时）
+        const r = await runHelperJson(['cursor_restore'], 8000)
+        const helperSaysOk = r.ok && r.data && r.data.ok !== false
+        // helper 恢复成功后，标记由我们清：它是我们的状态文件，
+        // helper 不知道它的存在（否则这里会一直判"未恢复"）。
+        if (helperSaysOk && blanked) {
+          try { rmSync(blanked, { force: true }) } catch { }
+        }
         await wait(200)
         restored = !existsSync(blanked)
+        if (!restored || !helperSaysOk) {
+          ctx.logger?.warn?.(
+            '[desktop-control] 光标恢复**未确认**（helper 结果：' +
+              JSON.stringify(r).slice(0, 160) + '）。' +
+              '已**保留**装饰与看门狗进程和恢复标记，方便再试；' +
+              '请运行 bin\\dsc.exe cursor_restore 或重启 DSH。',
+          )
+        }
       }
+
+      // 只有确认恢复后才终止进程；未确认时保留它们 —— 它们还持有恢复路径。
+      if (!restored) return false
 
       try { if (this.child) this.child.kill() } catch { }
       await wait(200)
       try { if (this.guard) this.guard.kill() } catch { }
       try { if (stopFile) rmSync(stopFile, { force: true }) } catch { }
-
-      if (!restored) {
-        ctx.logger?.warn?.(
-          '[desktop-control] 光标恢复**未确认**：fx.blanked 仍在。' +
-            '若系统光标仍是透明的，请运行 bin\dsc.exe cursor_restore 或重启 DSH。',
-        )
-      }
+      return true
     },
   }
 
@@ -1302,6 +1315,37 @@ function applyInner(ctx, config = {}) {
   // 单会话模式：测试/独立运行用。**默认关闭**——DSH 里拿不到会话身份就该拒绝，
   // 否则所有会话会共用一张授权表（复核 2.18.70 的 R1）。
   const allowSingleSession = config.allowSingleSession === true
+
+  /**
+   * 跑一个 helper 子命令并**解析结果**。
+   *
+   * 复核（2.18.71）：旧 spawnAsync() 不看退出码、不解析输出，
+   * 启动失败、超时、{"ok":false} 与成功都 resolve —— 拿它当"恢复已确认"是假的。
+   */
+  function runHelperJson(args, timeoutMs = 8000) {
+    return new Promise((resolve) => {
+      let settled = false
+      const done = (r) => { if (!settled) { settled = true; resolve(r) } }
+      let child
+      try {
+        child = spawn(helperPath, args, { windowsHide: true })
+      } catch (e) {
+        return done({ ok: false, error: 'spawn', message: e?.message ?? String(e) })
+      }
+      let out = '', err = ''
+      child.stdout?.on('data', (b) => { out += String(b) })
+      child.stderr?.on('data', (b) => { err += String(b) })
+      child.once('error', (e) => done({ ok: false, error: 'error', message: e?.message ?? String(e) }))
+      child.once('close', (code) => {
+        if (code !== 0) return done({ ok: false, error: 'exit', code, message: err.trim().slice(0, 200) })
+        try { done({ ok: true, data: JSON.parse(out) }) } catch { done({ ok: false, error: 'bad-json', message: out.slice(0, 200) }) }
+      })
+      setTimeout(() => {
+        try { child.kill() } catch { }
+        done({ ok: false, error: 'timeout' })
+      }, timeoutMs)
+    })
+  }
 
   /**
    * 托管一个子进程：**必须**监听 error。
@@ -3791,9 +3835,10 @@ function applyInner(ctx, config = {}) {
       if (isHalted()) {
         throw new Error(
           '用户已按 ESC 叫停，指示层不会重新拉起。\n' +
-            '  这不是故障 —— 是急停生效中。解除需要**用户本人**执行：\n' +
-            '    dsc.exe stop --clear\n' +
-            '  （或删掉闸门文件 ' + gateChecked() + '）\n' +
+            '  这不是故障 —— 是急停生效中。解除需要**用户本人**执行（PowerShell，路径已引用）：\n' +
+            '    & "' + helperPath + '" stop --clear\n' +
+            '  闸门文件：' + gateChecked() + '\n' +
+            '  （用别的 helper 时要显式带 DSC_HALT_GATE 指向同一个闸门）\n' +
             '  [retry=stop] 缓过来再问用户要不要继续。',
             '  **不要试图绕过**：绕过急停比停下来更糟。',
         )

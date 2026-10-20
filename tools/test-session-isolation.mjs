@@ -78,7 +78,8 @@ const tool = () => {
 const callAs = async (agent) => {
   try {
     const out = await tool().execute({ hwnd: target.hwnd, maxNodes: 20 }, { agent })
-    return { ok: true, text: String(out?.result ?? out?.text ?? '').slice(0, 60) }
+    const t = String(out?.result ?? out?.text ?? '')
+    return { ok: true, text: (t || JSON.stringify(out)).slice(0, 200) }
   } catch (e) {
     return { ok: false, text: String(e?.message ?? e).slice(0, 120) }
   }
@@ -111,8 +112,11 @@ try {
   // 先让 A 通过一次（可能已在第 1 步授权），然后结束 A，再调 A。
   const beforeA2 = approvals.length
   const r3 = await callAs(A)
-  if (approvals.length > beforeA2) ok('A 结束后再调用会重新询问（授权已撤销）')
+  const refused = !r3.ok || /会话|结束|SessionDisposed/.test(r3.text)
+  if (refused) ok('A 结束后再调用被拒绝（授权已撤销）')
   else bad('A 结束后授权仍然有效 —— 撤销没有生效')
+  if (approvals.length === beforeA2) ok('死会话没有被再次询问')
+  else bad('对已结束的会话又发了一次审批')
 
   console.log()
   console.log('── 4. 没有会话身份：必须受控拒绝 ──')

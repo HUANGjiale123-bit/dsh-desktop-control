@@ -77,6 +77,17 @@ $otherLabel.Left = 20
 $otherLabel.Top = 20
 $other.Controls.Add($otherLabel)
 
+# B: another ordinary owned window of the main form. The test uses it as the
+# explicitly specified target while C (the window above) covers the point --
+# both share the same root owner, which the old rule mistook for "belongs to B".
+$ownedB = New-Object System.Windows.Forms.Form
+$ownedB.Text = "Target B"
+$ownedB.Width = 220
+$ownedB.Height = 160
+$ownedB.StartPosition = 'Manual'
+$ownedB.Left = 500
+$ownedB.Top = 900
+
 # Clicking the item writes a line: that is the proof the menu item executed.
 $item.add_Click({
   Add-Content -Path $LogPath -Value ("clicked " + (Get-Date -Format "HH:mm:ss.fff"))
@@ -96,10 +107,14 @@ $edit.add_DropDownOpened({
       barX = [int]$barPt.X; barY = [int]$barPt.Y
       itemX = [int]$itemPt.X; itemY = [int]$itemPt.Y
       otherHwnd = [int64]$other.Handle; otherX = [int]$oc2.X; otherY = [int]$oc2.Y
+      bHwnd = [int64]$ownedB.Handle; bX = [int]$bc.X; bY = [int]$bc.Y
     }
     ($obj | ConvertTo-Json -Compress) | Set-Content -Path $CoordPath -Encoding UTF8
   } catch { }
 })
+
+$other.Owner = $form
+$ownedB.Owner = $form
 
 $form.add_Shown({
   if (Test-Path $CoordPath) { Remove-Item $CoordPath -Force }
@@ -109,10 +124,13 @@ $form.add_Shown({
     $bar = $edit.Bounds
     $barPt = $form.PointToScreen((New-Object System.Drawing.Point(($bar.Left + $bar.Width / 2), ($bar.Top + $bar.Height / 2))))
     $other.Show()
+    $ownedB.Show()
+    $bc = $ownedB.PointToScreen((New-Object System.Drawing.Point(110, 80)))
     $oc = $other.PointToScreen((New-Object System.Drawing.Point(150, 100)))
     $obj = @{
       hwnd = [int64]$form.Handle; barX = [int]$barPt.X; barY = [int]$barPt.Y
       otherHwnd = [int64]$other.Handle; otherX = [int]$oc.X; otherY = [int]$oc.Y
+      bHwnd = [int64]$ownedB.Handle; bX = [int]$bc.X; bY = [int]$bc.Y
     }
     ($obj | ConvertTo-Json -Compress) | Set-Content -Path $CoordPath -Encoding UTF8
   } catch { }

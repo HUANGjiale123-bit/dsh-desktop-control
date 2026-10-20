@@ -63,6 +63,8 @@ try {
 
   console.log()
   console.log('── 1. 启动装饰与看门狗（像插件那样）──')
+  // 看门狗就绪标记：装饰进程看到它才允许隐藏系统光标（复核 2.18.71）
+  writeFileSync(join(DIR, 'guard.ready'), '0')
   const fx = spawn(join(DIR, 'dsc-fx.exe'), ['--watch', DIR, 'blank', '120', `${ASSET}@45,102`],
     { stdio: 'ignore', windowsHide: true })
   await sleep(1200)

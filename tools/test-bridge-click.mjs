@@ -47,11 +47,15 @@ function findPython() {
 const PY = findPython()
 const SCRIPT = path.resolve('server/uia-bridge.py')
 
+// 桥现在要求显式闸门路径（缺路径 fail closed）。默认给一个不存在的路径 = 未拉下；
+// 第 3 块会用存在的高优先级覆盖。
+const DEFAULT_GATE = path.resolve('.cache', 'bridge-gate-absent')
+
 function bridge(args, envExtra) {
   const r = spawnSync(PY, [SCRIPT, ...args], {
     encoding: 'utf8',
     timeout: 90000,
-    env: { ...process.env, ...(envExtra || {}) },
+    env: { ...process.env, DSC_HALT_GATE: DEFAULT_GATE, ...(envExtra || {}) },
   })
   const line = (r.stdout || '').trim().split('\n').filter(Boolean).pop()
   if (!line) {
@@ -91,7 +95,7 @@ results.push(`  python: ${PY}`)
 results.push('')
 
 const targetExe = String(target.exe ?? '').split(/[\\/]/).pop()
-const set = createDesktopToolset({ allowedApps: targetExe })
+const set = createDesktopToolset({ allowedApps: targetExe, getGatePath: () => path.join('.cache', 'bridge-gate-absent') })
 results.push(`  白名单: ${targetExe}`)
 results.push('')
 
