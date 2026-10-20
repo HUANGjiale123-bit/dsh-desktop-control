@@ -88,6 +88,23 @@ for (const file of files) {
   })
 }
 
+// ── dist/ 里的副本必须与源文件一致 ──
+//
+// 踩过：改完 tools/smoke-report.mjs 忘了同步 dist/，发出去的还是旧脚本，
+// 第三方复核指出"和上一版字节完全相同"。这类"发错版本"无声音、后果直接。
+{
+  const mirrors = [
+    ['tools/smoke-report.mjs', 'dist/smoke-report.mjs'],
+    ['docs/第二台机器验收清单.md', 'dist/第二台机器验收清单.md'],
+  ]
+  for (const [src, dst] of mirrors) {
+    if (!existsSync(src) || !existsSync(dst)) continue
+    const a = readFileSync(src, 'utf8'), b = readFileSync(dst, 'utf8')
+    if (a === b) console.log(`  ✓ ${dst} 与源文件一致`)
+    else report(dst, 0, `与 ${src} 不一致（发出去的是旧副本）`)
+  }
+}
+
 console.log()
 if (problems === 0) {
   console.log('  ✓ 没有发现文档与代码不一致的地方')

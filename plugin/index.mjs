@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.69'
+const PLUGIN_VERSION = '2.18.70'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -3992,13 +3992,20 @@ function applyInner(ctx, config = {}) {
           const pose = readFileSync(join(fxDir, 'fx.pose'), 'utf8').trim()
           lines.push('  当前姿态  : ' + pose)
         } catch { lines.push('  当前姿态  : （无记录）') }
+        // 日志会跨安装累积：只显示最后一行，会被误读成"本次会话"。
+        // 附上文件修改时间，就能看出这条记录是不是这一次的。
+        const logStamp = (f) => {
+          try { return statSync(f).mtime.toTimeString().slice(0, 8) } catch { return '?' }
+        }
         try {
-          const log = readFileSync(join(fxDir, 'fx.log'), 'utf8').trim().split('\n')
-          lines.push('  最近日志  : ' + (log[log.length - 1] ?? '（空）'))
+          const f = join(fxDir, 'fx.log')
+          const log = readFileSync(f, 'utf8').trim().split('\n')
+          lines.push('  最近日志  : ' + (log[log.length - 1] ?? '（空）') + '（文件更新于 ' + logStamp(f) + '）')
         } catch { lines.push('  最近日志  : （无）') }
         try {
-          const glog = readFileSync(join(fxDir, 'guard.log'), 'utf8').trim().split('\n')
-          lines.push('  看门狗    : ' + (glog[glog.length - 1] ?? '（空）'))
+          const gf = join(fxDir, 'guard.log')
+          const glog = readFileSync(gf, 'utf8').trim().split('\n')
+          lines.push('  看门狗    : ' + (glog[glog.length - 1] ?? '（空）') + '（文件更新于 ' + logStamp(gf) + '）')
         } catch { lines.push('  看门狗    : （无日志，说明还没触发过恢复）') }
       }
       lines.push('')
