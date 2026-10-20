@@ -298,6 +298,11 @@ namespace DscFx
         private static int statFrames = 0;
         private static int statDraws = 0;
         private static int statSlots = 0;
+        private static int idleFrames = 0;
+        private static long statBodyTicks = 0;
+        private static long statSlotTicks = 0;
+        private static long statDrawTicks = 0;
+        private static long statSleepTicks = 0;
         private static DateTime lastSlotCheck = DateTime.MinValue;
         private static int pendingSlot = -99;
         private static int lastSlot = -99;
@@ -507,6 +512,7 @@ namespace DscFx
 
                         bool moved = false;
                         statFrames++;
+                        var swFrame = System.Diagnostics.Stopwatch.StartNew();
                         if (active)
                         {
                             if (!poseMode && !blanked)
@@ -537,7 +543,9 @@ namespace DscFx
                                 if ((DateTime.UtcNow - lastSlotCheck).TotalMilliseconds > 150)
                                 {
                                     lastSlotCheck = DateTime.UtcNow;
+                                    var swSlot = System.Diagnostics.Stopwatch.StartNew();
                                     int fresh = ReadSlot();
+                                    statSlotTicks += swSlot.ElapsedTicks;
                                     statSlots++;
                                     if (fresh == pendingSlot) slot = fresh;
                                     else pendingSlot = fresh;
@@ -575,7 +583,9 @@ namespace DscFx
                                     // 它每帧都要走一次 DWM 合成，是占用的主要来源。
                                     if (lastPick != pick || p.X != lastX || p.Y != lastY)
                                     {
+                                        var swDraw = System.Diagnostics.Stopwatch.StartNew();
                                         DrawAt(hwnd, poses[pick], p.X, p.Y, false);
+                                        statDrawTicks += swDraw.ElapsedTicks;
                                         statDraws++;
                                         moved = (p.X != lastX || p.Y != lastY);
                                         lastX = p.X; lastY = p.Y;
@@ -592,7 +602,14 @@ namespace DscFx
 
                         // 自适应休眠：光标在动时保持流畅（8ms），静止时降到 40ms。
                         // 静止时仍然每 6 帧查一次形状（≈240ms），足够跟上系统的光标切换。
-                        Thread.Sleep(moved ? 8 : 40);
+                        statBodyTicks += swFrame.ElapsedTicks;
+                        var swSleep = System.Diagnostics.Stopwatch.StartNew();
+                        // 三级休眠：移动中 8ms（跟手）、刚停下 40ms、长时间静止 250ms。
+                        // GetCursorPos 本身只要几微秒，250ms 一次的代价可以忽略，
+                        // 但能把"静止时每秒 20 帧"降到 4 帧。
+                        if (moved) idleFrames = 0; else idleFrames++;
+                        Thread.Sleep(moved ? 8 : (idleFrames > 50 ? 250 : 40));
+                        statSleepTicks += swSleep.ElapsedTicks;
                     }
                 }
                 finally
