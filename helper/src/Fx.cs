@@ -339,8 +339,9 @@ namespace DscFx
                             if (!visible) { ShowWindow(hwnd, SW_SHOWNOACTIVATE); visible = true; }
 
                             // pose 模式下插件写 fx.pose（姿势序号）；读失败就用第 0 个。
+                            // 两种模式都按 fx.pose 选图：blank 模式下每个姿势自己带箭头，
+                            // 所以切姿势不会丢指针。
                             int pick = 0;
-                            if (poseMode)
                             {
                                 try
                                 {

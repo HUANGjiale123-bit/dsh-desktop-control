@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.54'
+const PLUGIN_VERSION = '2.18.55'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -732,8 +732,17 @@ function applyInner(ctx, config = {}) {
           }
         }
       } else {
-        const one = join(pluginDir, 'assets', 'cursor', 'fish-arrow.png')
-        if (existsSync(one)) files.push({ file: one, anchor: [45, 102] })
+        // blank 模式也用带箭头的十张：每张自己带箭头，切姿势时指针还在。
+        const arrowDir = join(pluginDir, 'assets', 'cursor', 'poses-arrow')
+        if (existsSync(arrowDir)) {
+          for (const f of readdirSync(arrowDir).sort()) {
+            if (!f.endsWith('.png')) continue
+            files.push({ file: join(arrowDir, f), anchor: null })
+          }
+        } else {
+          const one = join(pluginDir, 'assets', 'cursor', 'fish-arrow.png')
+          if (existsSync(one)) files.push({ file: one, anchor: [45, 102] })
+        }
       }
       if (!files.length) {
         ctx.logger?.warn?.('[desktop-control] 光标装饰素材缺失，跳过启动')
@@ -742,7 +751,8 @@ function applyInner(ctx, config = {}) {
 
       let meta = {}
       try {
-        meta = JSON.parse(readFileSync(join(pluginDir, 'assets', 'cursor', 'poses', 'index.json'), 'utf8'))
+        const metaDir = mode === 'pose' ? 'poses' : 'poses-arrow'
+        meta = JSON.parse(readFileSync(join(pluginDir, 'assets', 'cursor', metaDir, 'index.json'), 'utf8'))
       } catch { }
 
       const args = ['--watch', dir, mode, String(this.size)]

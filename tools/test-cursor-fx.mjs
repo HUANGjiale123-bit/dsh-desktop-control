@@ -36,9 +36,12 @@ for (const f of ['index.mjs', 'toolset.mjs', 'tooldsl.mjs', 'apps.mjs',
 mkdirSync(join(tmp, 'assets', 'cursor', 'poses'), { recursive: true })
 writeFileSync(join(tmp, 'assets', 'cursor', 'fish-arrow.png'),
   readFileSync(join('plugin', 'assets', 'cursor', 'fish-arrow.png')))
-for (const f of readdirSync(join('plugin', 'assets', 'cursor', 'poses'))) {
-  writeFileSync(join(tmp, 'assets', 'cursor', 'poses', f),
-    readFileSync(join('plugin', 'assets', 'cursor', 'poses', f)))
+for (const sub of ['poses', 'poses-arrow']) {
+  mkdirSync(join(tmp, 'assets', 'cursor', sub), { recursive: true })
+  for (const f of readdirSync(join('plugin', 'assets', 'cursor', sub))) {
+    writeFileSync(join(tmp, 'assets', 'cursor', sub, f),
+      readFileSync(join('plugin', 'assets', 'cursor', sub, f)))
+  }
 }
 mkdirSync(join(tmp, 'bin'), { recursive: true })
 writeFileSync(join(tmp, 'bin', 'dsc-fx.exe'), readFileSync(join('helper', 'bin', 'dsc-fx.exe')))
