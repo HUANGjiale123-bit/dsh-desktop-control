@@ -20,6 +20,17 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { tempHelper, assertNotLow } from './fixture.mjs'
 
+// ── 安全闸门：这些测试会真的隐藏系统光标 ──
+//
+// 实事故：测试在用户机器上隐藏了光标，清理时直接杀进程，恢复没跑完。
+// 现在默认**不运行**；只有显式设 DSC_REAL_CURSOR_TESTS=1 才执行。
+if (process.env.DSC_REAL_CURSOR_TESTS !== '1') {
+  console.log('  · 会真改系统光标：设 DSC_REAL_CURSOR_TESTS=1 才运行（默认跳过）')
+  console.log('  0 项通过，0 项失败，1 项跳过')
+  process.exit(0)
+}
+
+
 const PS_ABS = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 const HELPER = tempHelper()
 assertNotLow(HELPER)
