@@ -129,6 +129,8 @@ try {
   else bad('再次调用后没有重新启动 —— 功能被"自退"破坏了')
 } finally {
   killOurs()
+  // 这个测试真的会让插件隐藏系统光标：收尾必须恢复（实事故：曾把用户光标弄消失）
+  try { spawnSync(HELPER, ['cursor_restore'], { windowsHide: true, timeout: 15000 }) } catch { }
   try { rmSync(tmp, { recursive: true, force: true }) } catch { }
 }
 

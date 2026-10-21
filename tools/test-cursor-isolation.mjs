@@ -14,7 +14,7 @@
  * 用法：node tools/test-cursor-isolation.mjs（约 15 秒）
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, copyFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -39,6 +39,7 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 
 const helper = process.argv[2]
+const dir = process.argv[3]
 const reg = []
 const ctx = {
   logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -47,7 +48,7 @@ const ctx = {
   get() { return undefined },
 }
 const mod = await import(pathToFileURL(join(process.cwd(), 'plugin', 'index.mjs')).href + '?' + Math.random())
-await mod.apply(ctx, { helperPath: helper, escPath: 'helper/bin/dsc-esc.exe', shotDir: join('.cache', 'iso-shots'), cursorFx: true, allowSingleSession: true })
+await mod.apply(ctx, { helperPath: helper, escPath: 'helper/bin/dsc-esc.exe', shotDir: join('.cache', 'iso-shots'), cursorFx: true, cursorFxDir: dir, allowSingleSession: true })
 const t = reg.find((x) => x.name === 'desktop_list_windows')
 await t.execute({}, {})
 console.log('READY ' + process.pid)
@@ -75,16 +76,18 @@ try {
 
   console.log()
   console.log('── 1. 起两个独立插件实例 ──')
-  const a = spawn(process.execPath, [CHILD, HELPER], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  const DIR_A = join(BASE, 'test-a-' + process.pid)
+  const DIR_B = join(BASE, 'test-b-' + process.pid)
+  const a = spawn(process.execPath, [CHILD, HELPER, DIR_A], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   const pidA = await waitReady(a)
-  const b = spawn(process.execPath, [CHILD, HELPER], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+  const b = spawn(process.execPath, [CHILD, HELPER, DIR_B], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   const pidB = await waitReady(b)
 
   if (pidA && pidB) ok(`两个实例都起来了（${pidA} / ${pidB}）`)
   else bad('实例没起来')
 
-  const dirA = join(BASE, String(pidA))
-  const dirB = join(BASE, String(pidB))
+  const dirA = DIR_A
+  const dirB = DIR_B
   if (dirA === dirB) bad('两个实例算出了同一个目录')
   if (existsSync(join(dirA, 'fx.heartbeat'))) ok('A 有自己的状态目录与心跳')
   else bad(`A 的目录没有心跳：${dirA}`)
@@ -113,9 +116,25 @@ try {
   try { rmSync(CHILD, { force: true }) } catch { }
   ok('清理完成')
 } finally {
-  for (const name of ['dsc-fx.exe', 'dsc-guard.exe']) {
-    spawnSync('taskkill', ['/IM', name, '/F'], { windowsHide: true })
+  // 关键：装饰进程真的会隐藏系统光标 —— 收尾必须**先恢复**，再杀进程。
+  // 这个测试曾经直接 taskkill，导致用户机器上的光标一直是透明的（实事故）。
+  const t = join(process.cwd(), '.cache', 'restore-helper')
+  try {
+    mkdirSync(t, { recursive: true })
+    const src = join('helper', 'bin', 'dsc.exe')
+    const dst = join(t, 'dsc.exe')
+    copyFileSync(src, dst)
+    spawnSync(dst, ['cursor_restore'], { windowsHide: true, timeout: 10000 })
+  } catch { }
+  // 只杀本测试目录下的实例（命令行含 test-a/test-b），不按进程名全局强杀
+  for (const needle of ['test-a-' + process.pid, 'test-b-' + process.pid]) {
+    spawnSync('C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',
+      ['-NoProfile', '-Command',
+        `foreach ($n in @('dsc-fx.exe','dsc-guard.exe')) { Get-CimInstance Win32_Process -Filter "Name='$n'" | Where-Object { $_.CommandLine -like '*${needle}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }`],
+      { windowsHide: true, timeout: 15000 })
   }
+  try { rmSync(DIR_A, { recursive: true, force: true }) } catch { }
+  try { rmSync(DIR_B, { recursive: true, force: true }) } catch { }
   try { rmSync(CHILD, { force: true }) } catch { }
 }
 
