@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-control",
-  "version": "2.18.80",
+  "version": "1.0.0",
   "description": "让 DSH 看见屏幕、操作鼠标键盘，带会话级授权与随时可停的急停机制",
   "type": "module",
   "main": "index.mjs",
@@ -42,5 +42,14 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HUANGjiale123-bit/dsh-desktop-control.git"
+  },
+  "homepage": "https://github.com/HUANGjiale123-bit/dsh-desktop-control#readme",
+  "bugs": {
+    "url": "https://github.com/HUANGjiale123-bit/dsh-desktop-control/issues"
+  },
+  "author": "north-star(t)"
 }
