@@ -108,6 +108,20 @@ for (const file of files) {
   }
 }
 
+// ── dist/ 文件名里的版本号也必须等于当前版本 ──
+//
+// 踩过：版本升到 1.0.2，正文都改了，文件名还挂着 "-1.0.0"，
+// 发出去的包里并排躺着两代文档，收的人不知道哪份是新的。
+{
+  for (const f of readdirSync('dist')) {
+    const m = f.match(/-(\d+\.\d+\.\d+)/)
+    if (m && m[1] !== version) {
+      console.log(`  ✗ dist/${f}  文件名里的版本 ${m[1]} ≠ 当前 ${version}`)
+      problems++
+    }
+  }
+}
+
 // ── dist/ 里的副本必须与源文件一致 ──
 //
 // 踩过：改完 tools/smoke-report.mjs 忘了同步 dist/，发出去的还是旧脚本，
