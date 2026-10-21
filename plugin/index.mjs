@@ -52,13 +52,15 @@ export const name = 'dsh-desktop-control'
  * **关键：真正生效的是 cordis.patch.yml 里那条 insert 的 `inject` 字段，
  * 不是这里。** Cordis 的 loader 是按
  * `Inject.resolve(fiber.entry.options.inject, fiber.inject)`
- * 从**条目选项**填充注入表的；只写模块导出，`ctx.tools` 会抛
- * "cannot get property tools without inject" 且插件激活失败。
+ * 从**条目选项**填充注入表。但真实宿主实测（2.18.77）表明：模块导出的 inject
+ * 也会参与激活判定 —— 只把 YAML 改成 ["tools","approval"] 而模块导出里
+ * 仍写着 workspaceRegistry 时，插件在 headless profile 里依旧 pending。
+ * 所以**两处必须一致**，改一处等于没改。
  *
- * 这个导出保留是为了元数据完整（其他 DSH 插件也这么写），但改注入清单时
- * 必须改 YAML，否则不会生效。
+ * 只把真正必需的服务放进来；agents / workspaceRegistry / attachments 用
+ * ctx.get() 可选获取，缺了也不阻止插件激活（否则在这种 profile 里工具根本不注册）。
  */
-export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
+export const inject = ['tools', 'approval']
 
 /**
  * 插件版本，只用于日志与工具输出。
@@ -68,7 +70,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.76'
+const PLUGIN_VERSION = '2.18.77'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }

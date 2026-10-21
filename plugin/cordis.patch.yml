@@ -6,7 +6,7 @@
       # tools    —— 注册工具
       # approval —— 会话级授权（每次操作现场问用户）
       # agents   —— 取当前会话，用于把授权限定在本次会话内
-      inject: ["tools", "approval", "agents", "workspaceRegistry", "attachments"]
+      inject: ["tools", "approval"]
       config:
         # 这里**刻意不写 helperPath / edgePath**：
         # 辅助程序随插件包一起安装（bin/dsc.exe、bin/dsc-esc.exe），

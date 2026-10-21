@@ -57,7 +57,9 @@ check('未写死 helperPath', !/^\s*helperPath:/m.test(yml), '应留给自动解
 check('未写死 edgePath', !/^\s*edgePath:/m.test(yml), '应留给自动解析')
 check('未写死本机盘符路径', !/[A-Za-z]:\\\\/.test(yml.replace(/^\s*#.*$/gm, '')), '注释里的示例不算')
 check('声明了 inject', /inject:\s*\[/.test(yml), '')
-for (const svc of ['tools', 'approval', 'agents']) {
+// inject 只应包含真正必需的服务；agents/workspaceRegistry/attachments 用 ctx.get() 可选获取。
+// 把它们列为必需会导致没有该服务的 profile 里插件永远 pending（真实宿主实测）。
+for (const svc of ['tools', 'approval']) {
   check(`inject 含 ${svc}`, new RegExp(`inject:\\s*\\[[^\\]]*"${svc}"`).test(yml), yml.match(/inject:.*/)?.[0] ?? '')
 }
 
