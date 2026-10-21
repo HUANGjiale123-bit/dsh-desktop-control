@@ -91,7 +91,10 @@ for (const f of files) {
   const hasCross = /✗/.test(out)
   const inconsistent = hasCross && fail === 0
 
-  const crashedHere = r.status !== 0 && !matched
+  // 任何非零退出都必须让整体失败 —— 即使它打印了一条"1 项通过，0 项失败"。
+  // 复核（2.18.79）：旧逻辑只在"非零且没有汇总行"时才记崩溃，
+  // 于是"先打印汇总、随后崩溃/清理失败"会被算成全绿。
+  const crashedHere = r.status !== 0
   if (crashedHere) crashed.push(f)
 
   rows.push({ f, pass, fail, skip, ms, status: r.status, inconsistent, crashed: crashedHere, matched })
@@ -122,6 +125,9 @@ console.log(
   pad(totalPass, 6) + pad(totalFail, 6) + pad(totalSkip, 6),
 )
 
+// 自相矛盾（输出有 ✗ 但汇总说 0 失败）也必须失败，不能只写在备注里
+const inconsistentCount = rows.filter((r) => r.inconsistent).length
+
 const skipped = rows.filter((r) => r.skip > 0)
 if (skipped.length) {
   console.log()
@@ -131,10 +137,14 @@ if (skipped.length) {
 
 if (crashed.length) {
   console.log()
-  console.log(`  ✗ ${crashed.length} 个文件直接崩溃：${crashed.join(', ')}`)
+  console.log(`  ✗ ${crashed.length} 个文件退出码非零（含崩溃）：${crashed.join(', ')}`)
+}
+if (inconsistentCount) {
+  console.log()
+  console.log(`  ✗ ${inconsistentCount} 个文件汇总自相矛盾（输出有 ✗ 但汇总写 0 失败）`)
 }
 
 console.log()
-const bad = totalFail > 0 || crashed.length > 0
+const bad = totalFail > 0 || crashed.length > 0 || inconsistentCount > 0
 console.log(`  ${bad ? '✗ 有失败' : '✓ 全部通过'}（失败 ${totalFail}，跳过 ${totalSkip}）`)
 process.exit(bad ? 1 : 0)

@@ -70,7 +70,7 @@ export const inject = ['tools', 'approval']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.79'
+const PLUGIN_VERSION = '2.18.80'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -579,6 +579,11 @@ function applyInner(ctx, config = {}) {
   // 让使用者以为急停坏了。告警只在探测**失败**时发。
   let _gateWarned = false
   let _gateProbe = null
+  /** 恢复是否**明确成功**：卸载路径与启动恢复共用同一个判据，不要各写一份。 */
+  function restoreConfirmed(r) {
+    return r && r.ok === true && r.data && r.data.ok === true
+  }
+
   /** 生成一条可复制的 PowerShell 解除急停命令：引用实际 helper、路径、闸门。 */
   function haltClearCommand() {
     // PowerShell 单引号字符串里，单引号写成两个单引号
@@ -699,7 +704,7 @@ function applyInner(ctx, config = {}) {
       // 也因为 TEMP 在某些 shell 里是 POSIX 风格路径（/tmp），不能直接喂给 exe。
       // 每个插件进程一个目录：多 profile / 多 DSH 实例不会互相踩 stop/blanked/ready。
       // 系统光标是全局资源，但"控制消息"必须是每实例一份，否则 A 暂停会把 B 的恢复进程也叫停。
-      const base = join(tmpdir(), 'dsc-cursor-fx')
+      const base = config.cursorFxBaseDir ? String(config.cursorFxBaseDir) : join(tmpdir(), 'dsc-cursor-fx')
       this.dir = config.cursorFxDir ? String(config.cursorFxDir) : join(base, String(process.pid))
       mkdirSync(this.dir, { recursive: true })
       // 顺手清理已死实例的旧目录（1 小时前且 pid 不在），避免临时目录无限增长
@@ -712,6 +717,8 @@ function applyInner(ctx, config = {}) {
             let alive = true
             try { process.kill(pid, 0) } catch { alive = false }
             if (alive) continue
+            // 有 fx.blanked 说明还欠一次恢复：GC 不能替恢复流程结束责任（复核 2.18.79）
+            if (existsSync(join(d, 'fx.blanked'))) continue
             try {
               if (Date.now() - statSync(d).mtimeMs > 3600_000) rmSync(d, { recursive: true, force: true })
             } catch { }
@@ -944,7 +951,7 @@ function applyInner(ctx, config = {}) {
         // 兜底：单独恢复，并**检查 helper 的结构化结果**（退出码 / ok / 超时）
         const r = await runHelperJson(['cursor_restore'], 8000)
         // 复核（2.18.72）：{}、缺字段、ok:null 都不能算确认。
-        const helperSaysOk = r.ok === true && r.data && r.data.ok === true
+        const helperSaysOk = restoreConfirmed(r)
         // helper 恢复成功后，标记由我们清：它是我们的状态文件，
         // helper 不知道它的存在（否则这里会一直判"未恢复"）。
         if (helperSaysOk && blanked) {
@@ -981,7 +988,7 @@ function applyInner(ctx, config = {}) {
    * 只处理"已死"的；活着的实例不动它。
    */
   function recoverStaleCursorState() {
-    const base = join(tmpdir(), 'dsc-cursor-fx')
+    const base = config.cursorFxBaseDir ? String(config.cursorFxBaseDir) : join(tmpdir(), 'dsc-cursor-fx')
     if (!existsSync(base)) return
     const staleDirs = []
     let legacyMarker = false
@@ -1010,12 +1017,36 @@ function applyInner(ctx, config = {}) {
       `[desktop-control] 发现 ${staleDirs.length + (legacyMarker ? 1 : 0)} 个已结束实例的待恢复标记` +
         `（可能是被同时强杀）——正在恢复系统光标`,
     )
-    // 恢复一次，然后清掉这些实例的目录（它们已经没有任何进程在管）
-    spawnAsync(helperPath, ['cursor_restore']).then(() => {
-      for (const d of staleDirs) { try { rmSync(d, { recursive: true, force: true }) } catch { } }
+    // 用**带结果**的调用，并且只在明确 ok:true 时清理。
+    // 复核（2.18.79）：旧 spawnAsync 对失败/超时/空输出都 resolve，
+    // 于是"恢复失败"也会删标记并写"已恢复"——那正是"没有确认却报成功"。
+    const restore = typeof config.cursorRestore === 'function'
+      ? Promise.resolve().then(() => config.cursorRestore())
+      : runHelperJson(['cursor_restore'], 8000)
+    restore.then((r) => {
+      if (!restoreConfirmed(r)) {
+        ctx.logger?.warn?.(
+          '[desktop-control] 启动恢复**未确认**（' + JSON.stringify(r).slice(0, 160) + '）——' +
+            '保留待恢复标记，下一次启动或手动 cursor_restore 会再试',
+        )
+        return
+      }
+      // 删除前再核验：目录里的标记仍是"已死 pid"，没有被新实例接管
+      for (const d of staleDirs) {
+        try {
+          const m = join(d, 'fx.blanked')
+          if (!existsSync(m)) continue
+          const pid = Number(readFileSync(m, 'utf8').trim())
+          let alive = false
+          try { if (pid > 0) { process.kill(pid, 0); alive = true } } catch { }
+          if (!alive) rmSync(d, { recursive: true, force: true })
+        } catch { }
+      }
       if (legacyMarker) { try { rmSync(join(base, 'fx.blanked'), { force: true }) } catch { } }
-      ctx.logger?.info?.(`[desktop-control] 已恢复并清理 ${staleDirs.length} 个残留状态目录`)
-    }).catch(() => { })
+      ctx.logger?.info?.('[desktop-control] 已确认恢复并清理残留状态')
+    }).catch((e) => {
+      ctx.logger?.warn?.('[desktop-control] 启动恢复出错：' + (e?.message ?? e) + '（保留标记）')
+    })
   }
 
   recoverStaleCursorState()

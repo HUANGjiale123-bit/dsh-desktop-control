@@ -94,9 +94,9 @@ try {
   if (!accepts('other-run')) ok('换一个 runId → 拒绝（同一份 ready）')
   else bad('同一份 ready 被别的 run 接受')
 
+  // 只结束本测试创建的这个 guard；不要按进程名全局强杀（会误杀别的实例）
   try { guard.kill() } catch { }
 } finally {
-  try { spawnSync('taskkill', ['/IM', 'dsc-guard.exe', '/F'], { windowsHide: true }) } catch { }
   try { rmSync(DIR, { recursive: true, force: true }) } catch { }
 }
 

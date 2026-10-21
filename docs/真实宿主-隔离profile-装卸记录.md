@@ -71,13 +71,13 @@ $ dsh iso-l "hi"
 ```
 $ dsh --profile iso-w --from-default-profile web --dump-config     # 新建隔离 profile
 $ dsh plugin --profile iso-w add file:.../dsc79.tgz
-+ dsh-desktop-control 2.18.79
++ dsh-desktop-control 修复版
 
 $ dsh iso-w --port 61234
 dsh web: http://127.0.0.1:61234/?token=...        # 真起了 web 服务，无 pending 告警
 
 $ dsh plugin --profile iso-w remove dsh-desktop-control
-- dsh-desktop-control 2.18.79
+- dsh-desktop-control 修复版
 
 $ grep -c dsh-desktop-control profiles/iso-w/package.json
 0                                                  # 引用已清
