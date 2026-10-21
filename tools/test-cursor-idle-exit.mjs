@@ -110,11 +110,16 @@ try {
   if (beatAfter === beatAt) ok('心跳没有被后台定时器继续刷新')
   else bad(`心跳被刷新了（${Math.round((beatAfter - beatAt) / 1000)} 秒后）—— 说明还有定时器在写`)
 
+  // 新语义（复核 2.18.72）：恢复成功才退出；恢复失败时保留进程继续重试是**正确**的。
+  // 所以判据是：要么已退出，要么仍在、但标记还在（说明它在负责恢复）。
+  const markerLeft = existsSync(join(STATE, 'fx.blanked'))
   if (fxGone >= 0) ok(`dsc-fx 在无操作后自行退出（${Math.round(fxGone / 1000)} 秒）`)
-  else bad('45 秒内 dsc-fx 没有退出 —— 插件卸载/停用后会留孤儿')
+  else if (oursAlive('dsc-fx.exe') && markerLeft) ok('dsc-fx 仍在，但保留待恢复标记（继续持有恢复责任）')
+  else bad('45 秒后既没退出、也没有待恢复标记 —— 状态不明确')
 
-  if (!oursAlive('dsc-guard.exe')) ok('dsc-guard 也已退出')
-  else bad('dsc-guard 仍在运行')
+  if (!oursAlive('dsc-guard.exe')) ok('dsc-guard 已退出')
+  else if (markerLeft) ok('dsc-guard 仍在（有待恢复标记，继续负责恢复）')
+  else bad('dsc-guard 仍在运行且没有待恢复标记')
 
   console.log()
   console.log('── 3. 再次调用时能重新拉起（可用性没被破坏）──')

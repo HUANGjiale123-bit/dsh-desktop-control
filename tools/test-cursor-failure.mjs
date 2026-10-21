@@ -93,7 +93,7 @@ const spawnWarns = warns.filter((m) => /启动失败/.test(m))
 if (spawnWarns.length >= 1) ok(`确实尝试过启动并收到错误（${spawnWarns.length} 条告警）`)
 else bad('没有任何"启动失败"告警 —— 测试可能没走到 spawn 边界')
 if (spawnWarns.some((m) => /ENOENT|spawn/i.test(m))) ok('错误内容来自真实的启动失败（ENOENT）')
-else console.log(`  · 告警原文：${spawnWarns.map((m) => m.slice(0, 80)).join(' / ')}`)
+else bad(`错误内容不含 ENOENT：${spawnWarns.map((m) => m.slice(0, 80)).join(' / ')}`)
 if (firstOk) ok('工具本身照常返回结果（装饰失败不影响核心功能）')
 else bad('工具调用失败 —— 装饰失败不应影响核心工具')
 
@@ -106,7 +106,7 @@ for (let i = 0; i < 3; i++) {
 }
 const newWarns = warns.length - warnsBefore
 if (newWarns === 0) ok('冷却生效：后续调用没有再尝试启动（没有重复告警）')
-else console.log(`  · 后续调用又产生了 ${newWarns} 条告警`)
+else bad(`冷却没生效：后续调用又产生 ${newWarns} 条启动告警`)
 
 console.log()
 console.log('── 3. 诊断仍可用 ──')

@@ -2224,6 +2224,19 @@ export function createDesktopToolset(options = {}) {
           return { text: lines.join('\n') }
         }
 
+        // 桥在"找到元素之后、Invoke 之前"发现闸门：必须原样传成 Halted，
+        // 不能再落到"NotFound → 重新观察"的兜底里（复核 2.18.72）。
+        if (b && b.error === 'Halted') {
+          return {
+            isError: true,
+            text: advice(
+              'Halted',
+              (b.message ? b.message + '\n' : '') +
+                '  [retry=stop] 用户已按 ESC 叫停，**不要重试**，也不要自行解除闸门。',
+            ),
+          }
+        }
+
         if (b && b.error === 'UnknownOutcome') {
           return {
             isError: true,

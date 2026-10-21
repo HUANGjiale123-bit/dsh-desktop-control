@@ -68,7 +68,7 @@ export const inject = ['tools', 'approval', 'agents', 'workspaceRegistry']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.72'
+const PLUGIN_VERSION = '2.18.73'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -577,6 +577,17 @@ function applyInner(ctx, config = {}) {
   // 让使用者以为急停坏了。告警只在探测**失败**时发。
   let _gateWarned = false
   let _gateProbe = null
+  /** 生成一条可复制的 PowerShell 解除急停命令：引用实际 helper、路径、闸门。 */
+  function haltClearCommand() {
+    // PowerShell 单引号字符串里，单引号写成两个单引号
+    const q = (v) => "'" + String(v).replace(/'/g, "''") + "'"
+    const helper = helperPath
+    const gate = gateChecked()
+    return (
+      '$env:DSC_HALT_GATE=' + q(gate) + '; & ' + q(helper) + " stop --clear"
+    )
+  }
+
   function gateChecked() {
     const g = gate()
     // 顺手做一次 helper 位置检查（需要会话上下文，所以放在这里而不是加载时）。
@@ -788,6 +799,11 @@ function applyInner(ctx, config = {}) {
         // 失败后冷却 60 秒：否则每次工具调用都会重拉一个起不来的进程。
         return
       }
+      // 本轮实例标识：fx 与 guard 共用；guard.ready 里带着它，
+      // 下一轮就不会把上一轮遗留的 ready 当成"已就绪"（复核 2.18.72）。
+      const runId = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8)
+      args.push('--run', runId)
+
       try {
         this.child = spawnManaged('光标装饰', exe, args,
           { detached: true, stdio: 'ignore', windowsHide: true },
@@ -799,7 +815,7 @@ function applyInner(ctx, config = {}) {
         if (!this.guard || this.guard.exitCode !== null) {
           const guardExe = config.cursorFxGuardPath ? String(config.cursorFxGuardPath) : join(dir, 'dsc-guard.exe')
           if (config.cursorFxGuardPath || existsSync(guardExe)) {
-            this.guard = spawnManaged('看门狗', guardExe, ['--watch', dir],
+            this.guard = spawnManaged('看门狗', guardExe, ['--watch', dir, '--run', runId],
               { detached: true, stdio: 'ignore', windowsHide: true },
               (why) => { this.guard = null; if (why === 'error') this.startFailAt = Date.now() })
             this.guard?.unref()
@@ -906,7 +922,8 @@ function applyInner(ctx, config = {}) {
       if (!restored && blanked) {
         // 兜底：单独恢复，并**检查 helper 的结构化结果**（退出码 / ok / 超时）
         const r = await runHelperJson(['cursor_restore'], 8000)
-        const helperSaysOk = r.ok && r.data && r.data.ok !== false
+        // 复核（2.18.72）：{}、缺字段、ok:null 都不能算确认。
+        const helperSaysOk = r.ok === true && r.data && r.data.ok === true
         // helper 恢复成功后，标记由我们清：它是我们的状态文件，
         // helper 不知道它的存在（否则这里会一直判"未恢复"）。
         if (helperSaysOk && blanked) {
@@ -4225,8 +4242,8 @@ function applyInner(ctx, config = {}) {
           }
         }
 
-        lines.push('  想提前解除：')
-        lines.push('    ' + escPath.replace(/dsc-esc\.exe$/, 'dsc.exe') + ' stop --clear')
+        lines.push('  想提前解除（PowerShell，路径已引用，可直接复制）：')
+        lines.push('    ' + haltClearCommand())
         lines.push('    或删除闸门文件：' + gateChecked())
         lines.push('    或双击工作区里的「解除急停.bat」')
         lines.push('  模型**不应该**尝试自行解除 —— 急停是用户发起的，也该由用户结束。')

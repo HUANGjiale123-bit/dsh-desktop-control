@@ -129,7 +129,15 @@ try {
   else bad('desktop_diagnose 缺失')
 
   console.log()
-  console.log('── 5. 卸载：pnpm remove ──')
+  console.log('── 5. 卸载：先从 bundles 移除引用，再 pnpm remove（文档顺序）──')
+  const beforeRm = readManifest()
+  beforeRm.dsh.profile.bundles = (beforeRm.dsh.profile.bundles ?? [])
+    .filter((b) => b !== 'dsh-desktop-control')
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify(beforeRm, null, 2) + '\n')
+  const noRef = readManifest()
+  if (!(noRef.dsh.profile.bundles ?? []).includes('dsh-desktop-control')) ok('bundle 引用已移除')
+  else bad('bundle 引用仍在')
+
   const rm = run(['remove', 'dsh-desktop-control'])
   if (rm.status === 0) ok('pnpm remove 成功')
   else bad(`pnpm remove 失败：${String(rm.stderr || rm.stdout).slice(0, 160)}`)
@@ -138,6 +146,8 @@ try {
   const after = readManifest()
   if (!after.dependencies || !after.dependencies['dsh-desktop-control']) ok('dependencies 已清理')
   else bad('dependencies 仍有残留')
+  if (!(after.dsh?.profile?.bundles ?? []).includes('dsh-desktop-control')) ok('卸载后 bundles 不含该插件（宿主可正常重启的必要条件）')
+  else bad('卸载后 bundles 仍有悬空引用')
 } finally {
   // 清理：只删本测试造的 profile
   try { rmSync(profileDir, { recursive: true, force: true }) } catch { }

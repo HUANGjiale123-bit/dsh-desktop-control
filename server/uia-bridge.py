@@ -468,6 +468,22 @@ if ($invokeError -ne $null) {
     element = $elem
     message = ('已调用 InvokePattern 但它抛了异常：' + $invokeError + '。应用可能已经开始执行，也可能没有——异常证明不了是哪一种。不会再去点一次。请重新读树或截图确认界面状态。')
   }
+  return
+}
+
+# 急停分支必须输出**结构化错误**：复核（2.18.72）发现这里原来算出了 haltedOut，
+# 但 Emit 里没有它，于是 Python 收到 ok:true / method:Halted，工具层没法映射成 stop。
+if ($haltedNow -and -not $dry) {
+  Emit @{
+    ok = $false
+    error = 'Halted'
+    halted = $true
+    invoked = $false
+    mode = 'click'
+    message = ('你在等元素定位的这几秒里按了 ESC —— 动作前复查发现闸门已拉下，' +
+               '已中止，没有执行任何点击。不要重试，也不要自行解除闸门。')
+  }
+  return
 }
 
 Emit @{

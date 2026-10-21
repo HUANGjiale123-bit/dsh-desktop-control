@@ -79,6 +79,12 @@ namespace DscGuard
             }
 
             string dir = args[1];
+            // 本轮实例标识：与 fx 用同一个 --run，ready 文件据此区分新旧实例
+            string myRun = "";
+            for (int ai = 2; ai < args.Length - 1; ai++)
+            {
+                if (args[ai] == "--run") { myRun = args[ai + 1]; break; }
+            }
             string blanked = Path.Combine(dir, "fx.blanked");
             string stop = Path.Combine(dir, "fx.stop");
             string beat = Path.Combine(dir, "fx.heartbeat");
@@ -86,7 +92,12 @@ namespace DscGuard
             // 就绪标记：装饰进程必须先看到它才允许隐藏系统光标。
             // 复核（2.18.71）：看门狗启动失败时 fx 仍在隐藏光标 —— 没有恢复者。
             string ready = Path.Combine(dir, "guard.ready");
-            try { File.WriteAllText(ready, Process.GetCurrentProcess().Id.ToString()); } catch { }
+            try
+            {
+                File.WriteAllText(ready,
+                    "{\"runId\":\"" + myRun + "\",\"pid\":" + Process.GetCurrentProcess().Id + "}");
+            }
+            catch { }
             Log(dir, "guard 启动 pid=" + Process.GetCurrentProcess().Id);
 
             int idleRounds = 0;
@@ -106,14 +117,20 @@ namespace DscGuard
                 bool marker = File.Exists(blanked);
                 if (hostGone)
                 {
-                    // 恢复失败时**保留标记**，不要谎报恢复成功（复核 2.18.71）。
+                    // 恢复失败时保留标记，并且**不能退出** —— 否则磁盘上只剩标记，
+                    // 没有进程会去执行恢复（复核 2.18.72）。
                     bool restoredHere = true;
                     if (marker) restoredHere = SystemParametersInfoW(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
-                    if (restoredHere) { try { if (marker) File.Delete(blanked); } catch { } }
-                    else Log(dir, "宿主消失但恢复失败：保留 fx.blanked 待重试");
-                    Log(dir, "guard 退出（宿主心跳已停止，插件已卸载或退出）");
-                    try { File.Delete(ready); } catch { }
-                    return 0;
+                    if (restoredHere)
+                    {
+                        try { if (marker) File.Delete(blanked); } catch { }
+                        Log(dir, "guard 退出（宿主心跳已停止，插件已卸载或退出）");
+                        try { File.Delete(ready); } catch { }
+                        return 0;
+                    }
+                    Log(dir, "宿主消失但恢复失败：保留标记，2 秒后重试");
+                    System.Threading.Thread.Sleep(2000);
+                    continue;
                 }
 
                 if (marker)

@@ -204,6 +204,60 @@ namespace DscFx
             }
         }
 
+        /// <summary>
+        /// guard.ready 是否属于**本轮**且看门狗仍存活。
+        /// 文件格式：{"runId":"...","pid":1234}；为了兼容旧格式，纯数字也接受为 pid。
+        /// </summary>
+        private static bool GuardReadyValid(string path, string myRun)
+        {
+            try
+            {
+                if (!System.IO.File.Exists(path)) return false;
+                string text = System.IO.File.ReadAllText(path).Trim();
+                string runId = null;
+                int pid = 0;
+                if (text.StartsWith("{"))
+                {
+                    // 手写解析，避免正则字符串转义把编译搞坏
+                    int k1 = text.IndexOf("\"runId\"");
+                    if (k1 >= 0)
+                    {
+                        int c1 = text.IndexOf(':', k1);
+                        int q1 = c1 > 0 ? text.IndexOf('"', c1 + 1) : -1;
+                        int q2 = q1 > 0 ? text.IndexOf('"', q1 + 1) : -1;
+                        if (q2 > q1 && q1 > 0) runId = text.Substring(q1 + 1, q2 - q1 - 1);
+                    }
+                    int k2 = text.IndexOf("\"pid\"");
+                    if (k2 >= 0)
+                    {
+                        int c2 = text.IndexOf(':', k2);
+                        int e = c2 + 1;
+                        while (e < text.Length && !char.IsDigit(text[e])) e++;
+                        int b = e;
+                        while (e < text.Length && char.IsDigit(text[e])) e++;
+                        if (e > b) int.TryParse(text.Substring(b, e - b), out pid);
+                    }
+                }
+                else
+                {
+                    int.TryParse(text, out pid);
+                }
+                if (pid <= 0) return false;
+                // 旧文件可能指向一个已经退出（或早已被复用）的 pid
+                try
+                {
+                    var p = System.Diagnostics.Process.GetProcessById(pid);
+                    if (p == null) return false;
+                }
+                catch { return false; }
+
+                // 有 runId 时必须匹配本轮；旧格式（没有 runId）只校验 pid 存活
+                if (!string.IsNullOrEmpty(myRun) && !string.IsNullOrEmpty(runId) && runId != myRun) return false;
+                return true;
+            }
+            catch { return false; }
+        }
+
         private static bool BlankAllCursors()
         {
             bool any = false;
@@ -450,6 +504,8 @@ namespace DscFx
             List<Pose> poses = new List<Pose>();
             for (int i = poseStart; i < args.Length; i++)
             {
+                // --run <id> 是本轮实例标识，不是素材；跳过它和它的值
+                if (args[i] == "--run") { i++; continue; }
                 string token = args[i];
                 int at = token.LastIndexOf('@');
                 if (at < 0) { Console.Error.WriteLine("姿势格式应为 png@x,y: " + token); return 2; }
@@ -490,6 +546,14 @@ namespace DscFx
                 //
                 // 为什么用文件而不是命名管道：崩溃后不需要清理，读方也不需要处理连接状态，
                 // 最坏情况就是"文件旧了"，而旧了正好就该恢复。
+                // 本轮实例标识：由插件生成并同时传给 fx 与 guard。
+                // 只看"ready 文件存在"会读到上一轮 guard 留下的旧文件（复核 2.18.72）。
+                string myRun = "";
+                for (int ai = 0; ai < args.Length - 1; ai++)
+                {
+                    if (args[ai] == "--run") { myRun = args[ai + 1]; break; }
+                }
+
                 string activeFile = System.IO.Path.Combine(watchDir, "fx.active");
                 string blankedFile = System.IO.Path.Combine(watchDir, "fx.blanked");
                 string stopFile = System.IO.Path.Combine(watchDir, "fx.stop");
@@ -530,16 +594,37 @@ namespace DscFx
 
                         if (pluginGone)
                         {
-                            if (blanked) RestoreSystemCursors();
-                            try { System.IO.File.Delete(blankedFile); } catch { }
-                            LogPick(watchDir, "退出：插件心跳已停止（插件已卸载或退出）");
-                            DestroyWindow(hwnd);
-                            foreach (Pose pose0 in poses)
+                            // 复核（2.18.72）：原来这里不管恢复成功失败都删标记并退出，
+                            // 失败时"最后一个恢复者"就没了。现在失败就继续持有并退避重试。
+                            bool okNow = true;
+                            if (blanked) okNow = RestoreSystemCursors();
+                            if (okNow)
                             {
-                                if (pose0.HBitmap != IntPtr.Zero) DeleteObject(pose0.HBitmap);
-                                pose0.Sprite.Dispose();
+                                blanked = false;
+                                try { System.IO.File.Delete(blankedFile); } catch { }
+                                LogPick(watchDir, "退出：插件心跳已停止（插件已卸载或退出）");
+                                DestroyWindow(hwnd);
+                                foreach (Pose pose0 in poses)
+                                {
+                                    if (pose0.HBitmap != IntPtr.Zero) DeleteObject(pose0.HBitmap);
+                                    pose0.Sprite.Dispose();
+                                }
+                                return 0;
                             }
-                            return 0;
+                            LogPick(watchDir, "恢复失败（心跳停止）：保持标记，2 秒后重试");
+                            System.Threading.Thread.Sleep(2000);
+                            continue;
+                        }
+
+                        // 运行中看门狗死了/被换成旧 run：立刻恢复，避免"没人兜底还继续隐藏"
+                        if (blanked && !GuardReadyValid(System.IO.Path.Combine(watchDir, "guard.ready"), myRun))
+                        {
+                            if (RestoreSystemCursors())
+                            {
+                                blanked = false;
+                                try { System.IO.File.Delete(blankedFile); } catch { }
+                            }
+                            LogPick(watchDir, "看门狗失效：已恢复系统光标，暂停隐藏");
                         }
 
                         if (active)
@@ -549,13 +634,13 @@ namespace DscFx
                                 // 先确认看门狗就绪：没有恢复者时不要隐藏系统光标。
                                 // （spawn 返回对象 ≠ 看门狗已经在工作）
                                 string guardReady = System.IO.Path.Combine(watchDir, "guard.ready");
-                                bool readyOk = System.IO.File.Exists(guardReady);
+                                bool readyOk = GuardReadyValid(guardReady, myRun);
                                 if (!readyOk)
                                 {
                                     for (int w = 0; w < 20 && !readyOk; w++)
                                     {
                                         System.Threading.Thread.Sleep(100);
-                                        readyOk = System.IO.File.Exists(guardReady);
+                                        readyOk = GuardReadyValid(guardReady, myRun);
                                     }
                                 }
                                 if (!readyOk)
@@ -647,7 +732,20 @@ namespace DscFx
                         else
                         {
                             if (visible) { ShowWindow(hwnd, SW_HIDE); visible = false; }
-                            if (blanked) { RestoreSystemCursors(); blanked = false; try { System.IO.File.Delete(blankedFile); } catch { } }
+                            if (blanked)
+                            {
+                                // 同样：成功才清状态；失败保留待恢复标记，下一轮再试。
+                                if (RestoreSystemCursors())
+                                {
+                                    blanked = false;
+                                    try { System.IO.File.Delete(blankedFile); } catch { }
+                                }
+                                else
+                                {
+                                    LogPick(watchDir, "恢复失败（空闲）：保持标记，稍后重试");
+                                    System.Threading.Thread.Sleep(1000);
+                                }
+                            }
                         }
 
                         // 自适应休眠：光标在动时保持流畅（8ms），静止时降到 40ms。
