@@ -12,7 +12,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -124,8 +124,21 @@ if (pluginDir) {
   const n = existsSync(arrow) ? readdirSync(arrow).filter((f) => f.endsWith('.png')).length : 0
   add('光标', '透明光标素材', `${n} 张`, n === 10 ? '' : '⚠ 应为 10 张，包可能不完整')
 
-  const fxDir = join(process.env.TEMP ?? '', 'dsc-cursor-fx')
-  add('光标', '运行状态', existsSync(join(fxDir, 'fx.blanked')) ? '正在拦截光标' : '未接管（空闲或未启用）')
+  // 每个插件进程一个子目录（实例隔离）：扫描子目录判断是否有实例在接管光标
+  const fxBase = join(process.env.TEMP ?? '', 'dsc-cursor-fx')
+  let instances = 0
+  let anyBlanked = false
+  let claimedDir = ''
+  try {
+    const subs = readdirSync(fxBase).map((n) => join(fxBase, n))
+      .filter((d) => { try { return statSync(d).isDirectory() } catch { return false } })
+    instances = subs.length
+    for (const d of subs) {
+      if (existsSync(join(d, 'fx.blanked'))) { anyBlanked = true; claimedDir = d }
+    }
+  } catch { }
+  add('光标', '实例目录', fxBase + '\\<pid>', instances ? `${instances} 个实例` : '（无）')
+  add('光标', '运行状态', anyBlanked ? `正在拦截光标（${claimedDir.split(/[\/]/).pop()}）` : '未接管（空闲或未启用）')
   // 把实际用的 TEMP 打出来：在 DSH 沙箱里 TEMP 会被重定向到 dsh-XXXX，
   // 读到的"开关不存在"不代表宿主上没有（第三方验收踩过这条）。
   add('光标', 'TEMP 路径', process.env.TEMP ?? '（未设置）',

@@ -27,11 +27,11 @@ desktop-control (dsh-desktop-control): pending (waiting for service: workspaceRe
 **根因**：`cordis.patch.yml` 与模块导出的 `inject` 都把 `workspaceRegistry` 列为必需；
 headless profile 没有这个服务 → 插件永远 pending，**工具根本不注册**。
 
-## 2. 升级到 2.18.77（inject 只留 `tools`/`approval`）→ 启动
+## 2. 升级到 修复版（inject 只留 `tools`/`approval`）→ 启动
 
 ```
 $ dsh plugin --profile iso-l add file:.../dsc77.tgz
-+ dsh-desktop-control 2.18.77
++ dsh-desktop-control 修复版
 
 $ dsh iso-l "hi"
 （没有 pending / did not activate 行 —— 插件已激活）
@@ -42,7 +42,7 @@ dsh: MISSING_CREDENTIAL: ...   # 隔离 DSH_HOME 没有 API key，预期，与�
 
 ```
 $ dsh plugin --profile iso-l remove dsh-desktop-control
-- dsh-desktop-control 2.18.77
+- dsh-desktop-control 修复版
 
 $ grep dsh-desktop-control profiles/iso-l/package.json
 （无输出：引用与依赖都已清除）

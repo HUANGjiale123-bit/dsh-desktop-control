@@ -70,7 +70,7 @@ export const inject = ['tools', 'approval']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.77'
+const PLUGIN_VERSION = '2.18.78'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -697,8 +697,27 @@ function applyInner(ctx, config = {}) {
       if (this.dir) return this.dir
       // 允许用 config.cursorFxDir 覆盖：测试里要指到能预期的位置，
       // 也因为 TEMP 在某些 shell 里是 POSIX 风格路径（/tmp），不能直接喂给 exe。
-      this.dir = config.cursorFxDir ? String(config.cursorFxDir) : join(tmpdir(), 'dsc-cursor-fx')
+      // 每个插件进程一个目录：多 profile / 多 DSH 实例不会互相踩 stop/blanked/ready。
+      // 系统光标是全局资源，但"控制消息"必须是每实例一份，否则 A 暂停会把 B 的恢复进程也叫停。
+      const base = join(tmpdir(), 'dsc-cursor-fx')
+      this.dir = config.cursorFxDir ? String(config.cursorFxDir) : join(base, String(process.pid))
       mkdirSync(this.dir, { recursive: true })
+      // 顺手清理已死实例的旧目录（1 小时前且 pid 不在），避免临时目录无限增长
+      if (!config.cursorFxDir) {
+        try {
+          for (const name of readdirSync(base)) {
+            const d = join(base, name)
+            const pid = Number(name)
+            if (!Number.isFinite(pid) || pid === process.pid) continue
+            let alive = true
+            try { process.kill(pid, 0) } catch { alive = false }
+            if (alive) continue
+            try {
+              if (Date.now() - statSync(d).mtimeMs > 3600_000) rmSync(d, { recursive: true, force: true })
+            } catch { }
+          }
+        } catch { }
+      }
       return this.dir
     },
 
@@ -4156,8 +4175,25 @@ function applyInner(ctx, config = {}) {
       // 这里把它读出来：开关文件、运行状态、当前姿态、看门狗日志尾部。
       lines.push('== 光标装饰 ==')
       {
-        const fxDir = join(tmpdir(), 'dsc-cursor-fx')
+        const fxBase = join(tmpdir(), 'dsc-cursor-fx')
         const marker = join(tmpdir(), 'dsc-cursor-fx.enable')
+        // 每实例一个子目录；挑最近写入的那个来展示，并报实例数
+        let fxDir = fxBase
+        let instances = 0
+        try {
+          const subs = readdirSync(fxBase)
+            .map((n) => join(fxBase, n))
+            .filter((d) => { try { return statSync(d).isDirectory() } catch { return false } })
+          instances = subs.length
+          let newest = 0
+          for (const d of subs) {
+            try {
+              const t = statSync(join(d, 'fx.log')).mtimeMs
+              if (t > newest) { newest = t; fxDir = d }
+            } catch { }
+          }
+        } catch { }
+        if (instances > 0) lines.push('  实例目录  : ' + instances + ' 个（' + fxBase + '\<pid>）')
         lines.push('  开关文件  : ' + (existsSync(marker)
           ? `有（内容 ${JSON.stringify(readFileSync(marker, 'utf8').trim())}）`
           : '无（默认关闭）'))
