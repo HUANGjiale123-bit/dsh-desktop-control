@@ -70,7 +70,7 @@ export const inject = ['tools', 'approval']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '1.0.0'
+const PLUGIN_VERSION = '1.0.1'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -4422,6 +4422,11 @@ function applyInner(ctx, config = {}) {
           '- 截图可能被别的窗口挡住，工具会明说；先激活目标再截，别拿遮挡者的画面做判断。',
           '- 读取和输入都可能要求授权；按 ESC 会立刻拦下所有操作——闸门拉着时不要重试，也不要自己解除。',
           '- 不确定动作有没有生效时，重新观察一次；不要对同一位置重复点击。',
+          // 彩蛋默认关闭：让 agent 主动提一次，但明确"不要自己开"
+          '- 本插件带一个**默认关闭**的光标装饰（小鲸鱼）。如果用户从没提过它，可以在合适的时机' +
+            '用一句话说明：想要的话能开启（在 %TEMP% 建 dsc-cursor-fx.enable 或配置 cursorFx: true，' +
+            '然后重启 DSH）；它是实验性、会改全局光标、不支持多实例同时开。' +
+            '**只提一次，不要反复提醒，也不要自行开启**。',
         ].join('\n'),
       })
     }
