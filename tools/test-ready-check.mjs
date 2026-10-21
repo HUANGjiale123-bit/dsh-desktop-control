@@ -23,6 +23,7 @@ const FX = join(process.cwd(), 'helper', 'bin', 'dsc-fx.exe')
 const GUARD = join(process.cwd(), 'helper', 'bin', 'dsc-guard.exe')
 const DIR = join(process.cwd(), '.cache', 'ready-check')
 const RUN = 'run-' + Date.now()
+let guardProc = null   // finally 里统一结束，避免中途抛异常时残留
 
 let pass = 0
 let fail = 0
@@ -79,6 +80,7 @@ try {
   // 起一个真 guard，用同一个 runId；它写出的 ready 必须被接受
   const { spawn } = await import('node:child_process')
   const guard = spawn(GUARD, ['--watch', DIR, '--run', RUN], { stdio: 'ignore', windowsHide: true })
+  guardProc = guard
   let readyOk = false
   for (let i = 0; i < 30 && !readyOk; i++) { await sleep(100); readyOk = existsSync(join(DIR, 'guard.ready')) }
   if (readyOk) ok('guard 写了 ready')
@@ -97,6 +99,8 @@ try {
   // 只结束本测试创建的这个 guard；不要按进程名全局强杀（会误杀别的实例）
   try { guard.kill() } catch { }
 } finally {
+  try { if (guardProc) guardProc.kill() } catch { }
+  await new Promise((r) => setTimeout(r, 300))
   try { rmSync(DIR, { recursive: true, force: true }) } catch { }
 }
 
