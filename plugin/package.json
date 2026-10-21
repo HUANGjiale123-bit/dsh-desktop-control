@@ -1,10 +1,10 @@
 {
   "name": "dsh-desktop-control",
-  "version": "2.18.74",
+  "version": "2.18.75",
   "description": "让 DSH 看见屏幕、操作鼠标键盘，带会话级授权与随时可停的急停机制",
   "type": "module",
   "main": "index.mjs",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "private": true,
   "engines": {
     "node": ">=18"

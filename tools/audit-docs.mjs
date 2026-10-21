@@ -88,6 +88,26 @@ for (const file of files) {
   })
 }
 
+// ── 许可证必须真实存在且与元数据一致 ──
+//
+// 踩过：package.json 写 "SEE LICENSE IN LICENSE"，但仓库里根本没有 LICENSE。
+// 这类"元数据指向不存在的文件"无声无息，直到发布被拦。
+{
+  const pkg = JSON.parse(readFileSync('plugin/package.json', 'utf8'))
+  if (pkg.license === 'MIT') console.log('  ✓ package.json license = MIT')
+  else report('plugin/package.json', 0, `license 是 ${JSON.stringify(pkg.license)}，期望 MIT`)
+
+  for (const p of ['LICENSE', 'plugin/LICENSE']) {
+    if (!existsSync(p)) { report(p, 0, 'LICENSE 不存在'); continue }
+    const text = readFileSync(p, 'utf8')
+    if (/^MIT License/m.test(text) && /Copyright \(c\) \d{4} /.test(text)) {
+      console.log(`  ✓ ${p} 是 MIT 全文（含版权行）`)
+    } else {
+      report(p, 0, '不是完整的 MIT 文本或缺少版权行')
+    }
+  }
+}
+
 // ── dist/ 里的副本必须与源文件一致 ──
 //
 // 踩过：改完 tools/smoke-report.mjs 忘了同步 dist/，发出去的还是旧脚本，
