@@ -1,17 +1,36 @@
 # dsh-desktop-control
 
-> 让 AI 助手观察并操作 Windows 桌面：读窗口无障碍树、截图、点击、输入。
+> Windows 桌面观察与操作插件（DSH / DeepSeek Harness）：读窗口无障碍树、截图、点击、输入。
+> Windows desktop observation and control for DeepSeek Harness: accessibility tree, screenshots,
+> OCR fallback, mouse/keyboard, session-scoped approvals.
 >
 > **这会让 AI 操作你的真实鼠标和键盘。** 权限模型见下面「权限模型」一节。
+>
+> - 安装包：[Releases](https://github.com/HUANGjiale123-bit/dsh-desktop-control/releases)
+> - 新手实战笔记：**[使用经验与技巧](docs/使用经验与技巧.md)**（坐标、按名字点、长文本、急停、常见错误）
+> - 许可：[MIT](LICENSE)　作者：north-star(t)
 
 **不依赖外部视觉模型**——元素名、角色、坐标由 Windows UI Automation 提供，
 不是模型从图片里猜的。
 
 ## 安装
 
-在 DSH 里用插件市场安装 `dsh-desktop-control`。
+**先下载** [Release 里的 `dsh-desktop-control-*.tgz`](https://github.com/HUANGjiale123-bit/dsh-desktop-control/releases)，
+然后二选一：
+
+1. **插件管理（推荐）**：DSH → 插件管理 → 添加插件 → 在"包名或地址"里填 tgz 的**绝对路径**
+   （例如 `D:\下载\dsh-desktop-control-1.0.2.tgz`）→ 重启 DSH
+2. **CLI（等价）**：
+
+   ```powershell
+   dsh plugin --profile <你的profile> add "D:\下载\dsh-desktop-control-1.0.2.tgz"
+   ```
+
+> 市场暂未收录（`dshmarket` 只显示其索引内的插件）；请从 Releases 下载。
+> 手改 `package.json` 的安装方式见安装说明的开发者附录，**不推荐**。
 
 **装完就能用，不需要改任何配置。** 辅助程序随插件包一起安装。
+装好后重启 DSH，让它跑一次 `desktop_diagnose`，看到 `插件 1.0.x` 即成功。
 
 ## 权限模型
 

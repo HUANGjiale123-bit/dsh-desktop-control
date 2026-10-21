@@ -5,7 +5,7 @@
 **先说清楚它是什么、以及它有什么毛病，再决定要不要装。** 下面「已知问题」那一节
 不是免责声明，是实测结果，请先读。
 
-当前版本：**2.18.65**（完整设计与实测记录在仓库 `docs/` 下，`docs/README.md` 是入口）
+当前版本：**1.0.2**（完整设计与实测记录在仓库 `docs/` 下，`docs/README.md` 是入口）
 
 ---
 
@@ -42,7 +42,7 @@
    里加 `"dsh-desktop-control"`（注意最后一项后面不能有逗号），然后立刻校验：
    `node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('OK')"`；
    没打印 `OK` 就 `copy package.json.bak package.json`
-3. 重启 DSH，跑 `desktop_diagnose`：看到 `插件 2.18.xx` 才算成功
+3. 重启 DSH，跑 `desktop_diagnose`：看到 `插件 1.0.x` 才算成功
 
 **不要**手改 `cordis.yml` / `cordis.patch.yml`——本包自带 patch，手写 YAML 条目
 容易写错字段（早期说明就错在让人写 `package:` 那一项）。

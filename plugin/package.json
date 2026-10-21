@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-control",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "让 DSH 看见屏幕、操作鼠标键盘，带会话级授权与随时可停的急停机制；另含可选的光标装饰（实验性，默认关闭）",
   "type": "module",
   "main": "index.mjs",
