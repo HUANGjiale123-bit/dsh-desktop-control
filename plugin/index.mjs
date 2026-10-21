@@ -70,7 +70,7 @@ export const inject = ['tools', 'approval']
  * desktop_indicate 走旧实现）。把版本打日志里，一眼就能看出跑的是哪一版，
  * 不必再从文案差异反推。改动本文件时记得同步 plugin/package.json 的 version。
  */
-const PLUGIN_VERSION = '2.18.78'
+const PLUGIN_VERSION = '2.18.79'
 
 /** 工具的参数是对象形式；每个字段自带 type 与 description。 */
 const HWND = { type: 'integer', description: '窗口句柄，来自 desktop_list_windows。' }
@@ -972,6 +972,53 @@ function applyInner(ctx, config = {}) {
       return true
     },
   }
+
+  /**
+   * 启动时扫残留：上一个实例被**同时强杀**（fx 和看门狗一起没）时，
+   * 系统光标可能还停在透明状态，而没有任何进程会去恢复。
+   *
+   * 判据：状态目录里有 fx.blanked，且里面记录的 pid 已经不存在。
+   * 只处理"已死"的；活着的实例不动它。
+   */
+  function recoverStaleCursorState() {
+    const base = join(tmpdir(), 'dsc-cursor-fx')
+    if (!existsSync(base)) return
+    const staleDirs = []
+    let legacyMarker = false
+    try {
+      for (const name of readdirSync(base)) {
+        const d = join(base, name)
+        let isDir = false
+        try { isDir = statSync(d).isDirectory() } catch { }
+        const marker = isDir ? join(d, 'fx.blanked') : join(base, 'fx.blanked')
+        if (!existsSync(marker)) continue
+
+        let pid = NaN
+        try { pid = Number(readFileSync(marker, 'utf8').trim()) } catch { }
+        let alive = false
+        if (Number.isFinite(pid) && pid > 0) {
+          try { process.kill(pid, 0); alive = true } catch { }
+        }
+        if (alive) continue
+        if (isDir) staleDirs.push(d)
+        else legacyMarker = true
+      }
+    } catch { }
+
+    if (!staleDirs.length && !legacyMarker) return
+    ctx.logger?.warn?.(
+      `[desktop-control] 发现 ${staleDirs.length + (legacyMarker ? 1 : 0)} 个已结束实例的待恢复标记` +
+        `（可能是被同时强杀）——正在恢复系统光标`,
+    )
+    // 恢复一次，然后清掉这些实例的目录（它们已经没有任何进程在管）
+    spawnAsync(helperPath, ['cursor_restore']).then(() => {
+      for (const d of staleDirs) { try { rmSync(d, { recursive: true, force: true }) } catch { } }
+      if (legacyMarker) { try { rmSync(join(base, 'fx.blanked'), { force: true }) } catch { } }
+      ctx.logger?.info?.(`[desktop-control] 已恢复并清理 ${staleDirs.length} 个残留状态目录`)
+    }).catch(() => { })
+  }
+
+  recoverStaleCursorState()
 
   const set = createDesktopToolset({
     helperPath,

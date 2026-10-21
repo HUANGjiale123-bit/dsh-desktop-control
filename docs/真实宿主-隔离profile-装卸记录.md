@@ -61,3 +61,34 @@ $ dsh iso-l "hi"
 - 仍**不**证明：web/GUI profile 的完整重启体验、市场安装路径、第二台机器的环境兼容性。
 - 隔离目录里没有凭据，因此每次启动停在 LLM 凭据错误——这发生在插件加载之后，
   证明宿主已经走完了插件激活阶段。
+
+---
+
+## 5. 补充：真实 **web/GUI** profile（同一台机器，不需要第二台）
+
+前面用的是 headless 模板；用户实际用的是 web profile，所以补验一次。
+
+```
+$ dsh --profile iso-w --from-default-profile web --dump-config     # 新建隔离 profile
+$ dsh plugin --profile iso-w add file:.../dsc79.tgz
++ dsh-desktop-control 2.18.79
+
+$ dsh iso-w --port 61234
+dsh web: http://127.0.0.1:61234/?token=...        # 真起了 web 服务，无 pending 告警
+
+$ dsh plugin --profile iso-w remove dsh-desktop-control
+- dsh-desktop-control 2.18.79
+
+$ grep -c dsh-desktop-control profiles/iso-w/package.json
+0                                                  # 引用已清
+$ ls profiles/iso-w/node_modules | grep -i desktop
+（无：依赖已移除）
+
+$ dsh iso-w --port 61235
+dsh web: http://127.0.0.1:61235/?token=...        # 卸载后仍能正常启动
+```
+
+结论：**装 → 启动（真实 web 服务）→ 卸载 → 再启动** 通过，插件在 web profile 里正常激活。
+
+边界：这是同一台机器上的隔离 profile，不是"另一台电脑"；也没有验证市场安装入口（走的是 DSH CLI 的
+plugin add/remove，即宿主自己的 reconcile 路径）。
