@@ -205,57 +205,76 @@ namespace DscFx
         }
 
         /// <summary>
-        /// guard.ready 是否属于**本轮**且看门狗仍存活。
-        /// 文件格式：{"runId":"...","pid":1234}；为了兼容旧格式，纯数字也接受为 pid。
+        /// guard.ready 是否属于**本轮**且确实是那个看门狗进程。
+        ///
+        /// 复核（2.18.73）指出旧实现按"兼容"放行了纯 PID / 缺 runId / 空 runId，
+        /// 而且只验证 PID 存活 —— 任何活着的进程都能充当"恢复保障"。
+        /// 现在要求全部成立：
+        ///   · runId 非空且与 fx 本轮 runId 完全一致
+        ///   · pid 是**严格**正整数（不跳过字符找数字）
+        ///   · 该进程的启动时间与 ready 里记录的一致（防 PID 复用）
+        /// 旧格式一律拒绝：保持系统光标，并在日志里说明版本不匹配。
         /// </summary>
         private static bool GuardReadyValid(string path, string myRun)
         {
+            if (string.IsNullOrEmpty(myRun)) return false;
             try
             {
                 if (!System.IO.File.Exists(path)) return false;
                 string text = System.IO.File.ReadAllText(path).Trim();
-                string runId = null;
-                int pid = 0;
-                if (text.StartsWith("{"))
-                {
-                    // 手写解析，避免正则字符串转义把编译搞坏
-                    int k1 = text.IndexOf("\"runId\"");
-                    if (k1 >= 0)
-                    {
-                        int c1 = text.IndexOf(':', k1);
-                        int q1 = c1 > 0 ? text.IndexOf('"', c1 + 1) : -1;
-                        int q2 = q1 > 0 ? text.IndexOf('"', q1 + 1) : -1;
-                        if (q2 > q1 && q1 > 0) runId = text.Substring(q1 + 1, q2 - q1 - 1);
-                    }
-                    int k2 = text.IndexOf("\"pid\"");
-                    if (k2 >= 0)
-                    {
-                        int c2 = text.IndexOf(':', k2);
-                        int e = c2 + 1;
-                        while (e < text.Length && !char.IsDigit(text[e])) e++;
-                        int b = e;
-                        while (e < text.Length && char.IsDigit(text[e])) e++;
-                        if (e > b) int.TryParse(text.Substring(b, e - b), out pid);
-                    }
-                }
-                else
-                {
-                    int.TryParse(text, out pid);
-                }
-                if (pid <= 0) return false;
-                // 旧文件可能指向一个已经退出（或早已被复用）的 pid
+                if (!text.StartsWith("{")) return false;   // 旧格式：拒绝
+
+                string runId = JsonString(text, "runId");
+                if (string.IsNullOrEmpty(runId) || runId != myRun) return false;
+
+                long pid = JsonLong(text, "pid");
+                if (pid <= 0 || pid > int.MaxValue) return false;
+
+                long startTicks = JsonLong(text, "start");
+                if (startTicks <= 0) return false;
+
+                System.Diagnostics.Process p = null;
                 try
                 {
-                    var p = System.Diagnostics.Process.GetProcessById(pid);
-                    if (p == null) return false;
+                    p = System.Diagnostics.Process.GetProcessById((int)pid);
+                    // 进程对象有效还不够：PID 会被复用，必须核对启动时间
+                    return p.StartTime.ToUniversalTime().Ticks == startTicks;
                 }
                 catch { return false; }
-
-                // 有 runId 时必须匹配本轮；旧格式（没有 runId）只校验 pid 存活
-                if (!string.IsNullOrEmpty(myRun) && !string.IsNullOrEmpty(runId) && runId != myRun) return false;
-                return true;
+                finally { if (p != null) p.Dispose(); }
             }
             catch { return false; }
+        }
+
+        /// <summary>只接受形如 "key":"value" 的字符串值；没有或格式错返回 null。</summary>
+        private static string JsonString(string text, string key)
+        {
+            int k = text.IndexOf("\"" + key + "\"");
+            if (k < 0) return null;
+            int c = text.IndexOf(':', k);
+            if (c < 0) return null;
+            int q1 = text.IndexOf('"', c + 1);
+            if (q1 < 0) return null;
+            int q2 = text.IndexOf('"', q1 + 1);
+            if (q2 < 0) return null;
+            return text.Substring(q1 + 1, q2 - q1 - 1);
+        }
+
+        /// <summary>只接受形如 "key":123 的整数值；没有、负数或格式错返回 -1。</summary>
+        private static long JsonLong(string text, string key)
+        {
+            int k = text.IndexOf("\"" + key + "\"");
+            if (k < 0) return -1;
+            int c = text.IndexOf(':', k);
+            if (c < 0) return -1;
+            int e = c + 1;
+            while (e < text.Length && text[e] == ' ') e++;
+            int b = e;
+            if (e < text.Length && text[e] == '-') return -1;   // 明确拒绝负数
+            while (e < text.Length && char.IsDigit(text[e])) e++;
+            if (e == b) return -1;
+            long v;
+            return long.TryParse(text.Substring(b, e - b), out v) ? v : -1;
         }
 
         private static bool BlankAllCursors()
@@ -463,6 +482,15 @@ namespace DscFx
         {
             SetProcessDPIAware();
 
+            // 只读自检：验证 guard.ready 是否属于本轮（供测试/排查用，不动光标）
+            if (args.Length >= 3 && args[0] == "--ready-check")
+            {
+                string rp = System.IO.Path.Combine(args[1], "guard.ready");
+                bool okReady = GuardReadyValid(rp, args[2]);
+                Console.WriteLine("{\"ok\":" + (okReady ? "true" : "false") + "}");
+                return okReady ? 0 : 1;
+            }
+
             // 保命模式：任何情况下都能把光标恢复回来。
             if (args.Length >= 1 && args[0] == "--restore")
             {
@@ -619,12 +647,18 @@ namespace DscFx
                         // 运行中看门狗死了/被换成旧 run：立刻恢复，避免"没人兜底还继续隐藏"
                         if (blanked && !GuardReadyValid(System.IO.Path.Combine(watchDir, "guard.ready"), myRun))
                         {
+                            // 复核（2.18.73）：原来无论成功失败都写"已恢复"。成功文案只放成功分支。
                             if (RestoreSystemCursors())
                             {
                                 blanked = false;
                                 try { System.IO.File.Delete(blankedFile); } catch { }
+                                LogPick(watchDir, "看门狗失效：已恢复系统光标，暂停隐藏");
                             }
-                            LogPick(watchDir, "看门狗失效：已恢复系统光标，暂停隐藏");
+                            else
+                            {
+                                LogPick(watchDir, "看门狗失效且恢复失败：保留待恢复标记，1 秒后重试");
+                                System.Threading.Thread.Sleep(1000);
+                            }
                         }
 
                         if (active)

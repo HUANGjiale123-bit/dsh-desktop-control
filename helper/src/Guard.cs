@@ -94,8 +94,16 @@ namespace DscGuard
             string ready = Path.Combine(dir, "guard.ready");
             try
             {
-                File.WriteAllText(ready,
-                    "{\"runId\":\"" + myRun + "\",\"pid\":" + Process.GetCurrentProcess().Id + "}");
+                // 必须带 runId + pid + 进程启动时间；fx 会核对启动时间防 PID 复用。
+                // 原子替换：先写临时文件再 Move，避免读到半截 JSON。
+                var self = Process.GetCurrentProcess();
+                string json =
+                    "{\"runId\":\"" + myRun + "\",\"pid\":" + self.Id +
+                    ",\"start\":" + self.StartTime.ToUniversalTime().Ticks + "}";
+                string tmpReady = ready + ".tmp";
+                File.WriteAllText(tmpReady, json);
+                if (File.Exists(ready)) File.Delete(ready);
+                File.Move(tmpReady, ready);
             }
             catch { }
             Log(dir, "guard 启动 pid=" + Process.GetCurrentProcess().Id);

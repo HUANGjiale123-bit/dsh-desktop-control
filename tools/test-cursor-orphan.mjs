@@ -28,6 +28,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const HELPER = tempHelper()
 assertNotLow(HELPER)
 
+const RUN = 'orphan-test-' + Date.now()
 const DIR = join(tmpdir(), 'dsc-orphan-test')
 const PS_ABS = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 const NEEDLE = DIR
@@ -63,9 +64,11 @@ try {
 
   console.log()
   console.log('── 1. 启动装饰与看门狗（像插件那样）──')
-  // 看门狗就绪标记：装饰进程看到它才允许隐藏系统光标（复核 2.18.71）
-  writeFileSync(join(DIR, 'guard.ready'), JSON.stringify({ pid: process.pid }))
-  const fx = spawn(join(DIR, 'dsc-fx.exe'), ['--watch', DIR, 'blank', '120', `${ASSET}@45,102`],
+  // 先起看门狗（同一 runId）：它会写带 runId/pid/启动时间的 ready，
+  // 装饰进程看到匹配的 ready 才允许隐藏系统光标（复核 2.18.72/73）。
+  const guard = spawn(join(DIR, 'dsc-guard.exe'), ['--watch', DIR, '--run', RUN], { stdio: 'ignore', windowsHide: true })
+  for (let i = 0; i < 30 && !existsSync(join(DIR, 'guard.ready')); i++) await sleep(100)
+  const fx = spawn(join(DIR, 'dsc-fx.exe'), ['--watch', DIR, 'blank', '120', `${ASSET}@45,102`, '--run', RUN],
     { stdio: 'ignore', windowsHide: true })
   await sleep(1200)
   writeFileSync(join(DIR, 'fx.active'), String(Date.now()))
@@ -75,7 +78,6 @@ try {
   if (existsSync(MARK)) ok('装饰进程已接管光标')
   else bad('装饰进程没接管光标，后面的判断没有意义')
 
-  const guard = spawn(join(DIR, 'dsc-guard.exe'), ['--watch', DIR], { stdio: 'ignore', windowsHide: true })
   await sleep(1000)
   if (oursAlive('dsc-fx.exe') && oursAlive('dsc-guard.exe')) ok('两个进程都在跑')
   else bad('进程没起来')

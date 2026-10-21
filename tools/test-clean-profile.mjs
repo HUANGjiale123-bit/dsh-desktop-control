@@ -13,7 +13,7 @@
  * 用法：node tools/test-clean-profile.mjs
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, mkdtempSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -56,8 +56,9 @@ const TARBALL = resolve(join(process.cwd(), 'dist', tgz))
 console.log(`  包：${tgz}`)
 console.log(`  pnpm：${pnpm}`)
 
-// 带空格 + 中文的目录：验证路径处理
-const profileDir = join(process.cwd(), '.cache', '干净 profile 测试')
+// 每次新建唯一目录（带空格 + 中文）：避免固定缓存路径残留
+mkdirSync(join(process.cwd(), '.cache'), { recursive: true })
+const profileDir = mkdtempSync(join(process.cwd(), '.cache', '干净 profile 测试-'))
 mkdirSync(profileDir, { recursive: true })
 writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'clean-profile-test', private: true }, null, 2) + '\n')
 
@@ -72,8 +73,20 @@ try {
   console.log()
   console.log('── 1. 安装：pnpm add file:<tgz> ──')
   const add = run(['add', `file:${TARBALL}`])
-  if (add.status === 0) ok('pnpm add 成功')
-  else bad(`pnpm add 失败：${String(add.stderr || add.stdout).slice(0, 200)}`)
+  if (add.status === 0) {
+    ok('pnpm add 成功')
+  } else {
+    // 先保存完整错误，再终止：否则后面的 ENOENT 会盖住真正的首个失败原因
+    const detail = `status=${add.status}
+STDOUT:
+${add.stdout ?? ''}
+STDERR:
+${add.stderr ?? ''}`
+    try { writeFileSync(join(profileDir, 'pnpm-add-error.txt'), detail) } catch { }
+    bad(`pnpm add 失败（完整输出见 pnpm-add-error.txt）：${String(add.stderr || add.stdout).slice(0, 200)}`)
+    console.log('    测试到此为止：安装都没成功，后续断言没有意义')
+    process.exit(1)
+  }
 
   const pkgDir = join(profileDir, 'node_modules', 'dsh-desktop-control')
   if (existsSync(join(pkgDir, 'package.json'))) ok('node_modules 里出现了包')

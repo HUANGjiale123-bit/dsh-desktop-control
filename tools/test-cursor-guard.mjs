@@ -23,6 +23,7 @@ const bad = (m) => { console.log(`  ✗ ${m}`); fail++ }
 const HELPER = tempHelper()
 assertNotLow(HELPER)
 
+const RUN = 'guard-test-' + Date.now()
 const DIR = join(tmpdir(), 'dsc-guard-test')
 const MARK = join(DIR, 'fx.blanked')
 const LOG = join(DIR, 'guard.log')
@@ -62,11 +63,11 @@ try {
   {
     // 先起看门狗：装饰进程要看到 guard.ready 才允许隐藏系统光标
     // （复核 2.18.71：没有恢复者时不能隐藏光标）。
-    const guard = spawn(GUARD, ['--watch', DIR], { stdio: 'ignore', windowsHide: true })
+    const guard = spawn(GUARD, ['--watch', DIR, '--run', RUN], { stdio: 'ignore', windowsHide: true })
     for (let i = 0; i < 20 && !existsSync(join(DIR, 'guard.ready')); i++) await sleep(100)
 
     const errFile = join(DIR, 'fx.err')
-    const fx = spawn(FX, ['--watch', DIR, 'blank', '120', `${ASSET}@45,102`], {
+    const fx = spawn(FX, ['--watch', DIR, 'blank', '120', `${ASSET}@45,102`, '--run', RUN], {
       stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
     })
     let fxErr = ''
